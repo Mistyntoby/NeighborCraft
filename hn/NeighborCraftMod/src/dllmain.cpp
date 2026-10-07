@@ -40,7 +40,7 @@ public:
 	{
 		nc::start(this_module());
 		Unreal::Hook::RegisterEngineTickPostCallback(
-			[](auto &, Unreal::UEngine *, float delta_seconds, bool) { nc::tick(delta_seconds); },
+			[](auto &, Unreal::UEngine *engine, float delta_seconds, bool) { nc::tick(engine, delta_seconds); },
 			{false, false, STR("NeighborCraftMod"), STR("Tick")});
 	}
 };

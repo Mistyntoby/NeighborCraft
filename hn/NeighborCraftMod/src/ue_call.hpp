@@ -5,9 +5,9 @@
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
-#include <Unreal/UObjectArray.hpp>
 #include <algorithm>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace nc
@@ -30,28 +30,6 @@ namespace nc
 		return s ? s->FindProperty(FName(name, FNAME_Find)) : nullptr;
 	}
 
-	/// A UObject pointer that stays checkable across level loads (the slot may be reused by another object).
-	class ObjRef
-	{
-	public:
-		ObjRef() = default;
-		explicit ObjRef(UObject *o) : m_obj(o), m_index(o ? o->GetInternalIndex() : -1) {}
-		UObject *get() const
-		{
-			if (!m_obj || m_index < 0)
-				return nullptr;
-			// Only the slot's object pointer: HN's engine build reads the item's flags wrongly (IsValid failed every
-			// frame for a live PlayerController), while a destroyed object's slot is always cleared or reused.
-			FUObjectItem *item = UObjectArray::IndexToObject(m_index);
-			return item && item->GetUObject() == m_obj ? m_obj : nullptr;
-		}
-		explicit operator bool() const { return get() != nullptr; }
-
-	private:
-		UObject *m_obj = nullptr;
-		int32 m_index = -1;
-	};
-
 	/// One call of `function` on `target` (for a static BlueprintFunctionLibrary function: on its default object).
 	class Call
 	{
@@ -59,7 +37,7 @@ namespace nc
 		Call(UObject *target, const TCHAR *function) : m_target(target)
 		{
 			if (target)
-				m_fn = target->GetFunctionByNameInChain(function);
+				m_fn = lookup(target, function);
 			if (m_fn)
 				m_buf.assign(size_t(std::max<int32>(m_fn->GetPropertiesSize(), 1)), 0);
 		}
@@ -97,6 +75,29 @@ namespace nc
 		uint8_t *data() { return m_buf.data(); }
 
 	private:
+		/// Functions found once per (class, name): `function` is always a string literal, so its address is the key.
+		static UFunction *lookup(UObject *target, const TCHAR *function)
+		{
+			struct Key
+			{
+				const void *cls;
+				const TCHAR *name;
+				bool operator==(const Key &) const = default;
+			};
+			struct Hash
+			{
+				size_t operator()(const Key &k) const { return std::hash<const void *>()(k.cls) ^ (std::hash<const void *>()(k.name) << 1); }
+			};
+			static std::unordered_map<Key, UFunction *, Hash> cache;
+			const Key key{target->GetClassPrivate(), function};
+			auto it = cache.find(key);
+			if (it != cache.end())
+				return it->second;
+			UFunction *fn = target->GetFunctionByNameInChain(function);
+			cache.emplace(key, fn);
+			return fn;
+		}
+
 		UObject *m_target = nullptr;
 		UFunction *m_fn = nullptr;
 		std::vector<uint8_t> m_buf;

@@ -5,7 +5,7 @@ namespace nc
 {
 	/// Starts the Minecraft link (background thread). Call once, when Unreal is initialised.
 	void start(void *module);
-	/// Every engine tick, on the game thread.
-	void tick(float delta_seconds);
+	/// Every engine tick, on the game thread (`engine`: the UEngine that ticked).
+	void tick(void *engine, float delta_seconds);
 	void stop();
 }

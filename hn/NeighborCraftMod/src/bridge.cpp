@@ -58,7 +58,6 @@ namespace nc
 		long long g_frame = 0;
 		double g_yOffset = 0.0;
 		bool g_haveOffset = false;
-		ObjRef g_pc, g_kismet;
 		int g_viewW = 0, g_viewH = 0;
 		bool g_keyDown[256] = {};
 
@@ -166,31 +165,38 @@ namespace nc
 			return p ? *p : nullptr;
 		}
 
-		UObject *player_controller()
+		/// The local player's controller, read fresh every frame from objects that live as long as the game:
+		/// GameEngine -> GameInstance -> LocalPlayers[0] -> PlayerController (no cached pointer can go stale on a level
+		/// load, and no object search is needed).
+		UObject *player_controller(UObject *engine)
 		{
-			if (UObject *pc = g_pc.get())
-				return pc;
-			static DWORD next = 0;
-			if (GetTickCount() < next)
+			UObject **gi = engine ? engine->GetValuePtrByPropertyNameInChain<UObject *>(STR("GameInstance")) : nullptr;
+			if (!gi || !*gi)
 				return nullptr;
-			next = GetTickCount() + 1000;
-			// the one that has a pawn (the menu level's controller has none)
-			UObject *pc = nullptr;
-			for (UObject *o : find_all(L"PlayerController"))
-				if (!pc || pawn_of(o))
-					pc = o;
-			g_pc = ObjRef(pc);
-			if (pc)
-				log(L"player controller: " + pc->GetFullName());
-			return pc;
+			struct PlayerArray
+			{
+				UObject **data;
+				int32 num;
+				int32 max;
+			};
+			auto *players = (*gi)->GetValuePtrByPropertyNameInChain<PlayerArray>(STR("LocalPlayers"));
+			if (!players || players->num < 1 || !players->data || !players->data[0])
+				return nullptr;
+			UObject **pc = players->data[0]->GetValuePtrByPropertyNameInChain<UObject *>(STR("PlayerController"));
+			UObject *found = pc ? *pc : nullptr;
+			static UObject *last = nullptr;
+			if (found && found != last)
+				log(L"player controller: " + found->GetFullName());
+			last = found;
+			return found;
 		}
 
+		/// KismetSystemLibrary's default object (it lives as long as the game).
 		UObject *kismet()
 		{
-			if (UObject *k = g_kismet.get())
-				return k;
-			UObject *k = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
-			g_kismet = ObjRef(k);
+			static UObject *k = nullptr;
+			if (!k)
+				k = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
 			return k;
 		}
 
@@ -715,7 +721,7 @@ namespace nc
 		g_ws.stop();
 	}
 
-	void tick(float)
+	void tick(void *engine_object, float)
 	{
 		compositor::try_register(g_module);
 		++g_frame;
@@ -742,7 +748,7 @@ namespace nc
 			notify(g_hands ? "Minecraft hands ON (mouse + 1-9 go to Minecraft)" : "Minecraft hands off");
 		}
 
-		UObject *pc = player_controller();
+		UObject *pc = player_controller(static_cast<UObject *>(engine_object));
 		UObject *pawn = pc ? pawn_of(pc) : nullptr;
 		if (pressed(VK_F9))
 			dump(pc, pawn);
