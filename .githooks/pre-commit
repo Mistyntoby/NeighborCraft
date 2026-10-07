@@ -1,0 +1,9 @@
+#!/bin/sh
+# Block commits that add personal info. Patterns (one ERE per line) live in .git/info/personal-patterns,
+# which is local only and never pushed.
+P="$(git rev-parse --git-dir)/info/personal-patterns"
+[ -s "$P" ] || exit 0
+if git diff --cached -U0 | grep "^+" | grep -iqEf "$P"; then
+  echo "pre-commit: staged changes contain personal info (see $P); use %USERPROFILE% for paths." >&2
+  exit 1
+fi
