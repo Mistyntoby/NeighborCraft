@@ -49,9 +49,16 @@ modelled on universal-modder `examples/minecraft-gta5-passthrough`.
   IConsoleManager; fix with `ue4ss/UE4SS_Signatures/ConsoleManager.lua` if we need it.
 - In-game `~` console: pending user confirmation.
 
-### 3. ReShade depth (in progress)
-- With `RESHADE_DEPTH_INPUT_IS_REVERSED=0` DisplayDepth was almost all black (consistent with reversed-Z).
-  Set REVERSED=1, far plane 1000 in ReShade.ini + preset; awaiting visual check and Generic Depth buffer info.
+### 3. ReShade depth: usable, reversed-Z (2026-10-07)
+- DisplayDepth with `RESHADE_DEPTH_INPUT_IS_REVERSED=1`, far plane 1000: near dark -> far white, sky white,
+  lines up with the picture (user confirmed). HN set to windowed 1920x1080 (opens borderless).
+- UE4: infinite reversed-Z, near plane `NearClipPlane=10` (0.1 m) -> linear depth = 0.1 / d.
+
+### 4b. Navigation, more evidence
+- Content has `Sosed/BP_NeighborNavLinkProxy` and `BP_Sosed` (the Neighbor), `Player/BP_Human` (player):
+  nav link proxies only matter to navmesh pathing, so the Neighbor almost certainly paths on the navmesh.
+- Exe has native names `StunTime`, `ENeighborState`, `CatchPlayer`, `NeighborSpeed`, `m_pNeighbor`.
+- Live answer pending: the F9 dump prints every RecastNavMesh's `RuntimeGeneration`.
 
 ### Lab / backups
 - Backup 1: `%USERPROFILE%\NeighborCraft-lab\backups\20261006-220736` (outside the repo): `Saved\` (saves + user
@@ -70,3 +77,27 @@ modelled on universal-modder `examples/minecraft-gta5-passthrough`.
   Hello_Neighbor_Alpha_1_Remake, Into the Mind, roblox, vgnUltimateMod) to
   `%USERPROFILE%\NeighborCraft-lab\hn-mods-disabled\`. Move back to `HelloNeighbor\Mods\` to restore.
 - Uninstall: delete `dwmapi.dll`, `ue4ss\` (and later `dxgi.dll`, `ReShade.ini`, `reshade-shaders\`) from `Win64`.
+
+## Build (2026-10-07)
+### Toolchain (all outside the repo, under `%USERPROFILE%\NeighborCraft-lab\`)
+- JDK 25 (Temurin 25.0.4.1) portable: `deps\jdk25`.
+- VS 2022 17.14 + "Desktop development with C++" (MSVC 14.44.35207, SDK 10.0.26100, CMake, Ninja), Rust stable.
+- RE-UE4SS at `6eb3d9bc` (= the installed experimental build) in `deps\RE-UE4SS`. Its submodules need HTTPS
+  URLs (`git config submodule.<path>.url https://...`) and an Epic-linked GitHub account for UEPseudo.
+- ReShade 6.8.0 add-on headers + ReShade.fxh: `hn/fetch_deps.sh` -> `deps\reshade`.
+- Python venv for the tools: `pyenv` (websockets, numpy, pillow).
+
+### Minecraft side (`mc/`): working
+- Ported from the GTA example, GTA-only systems removed. Port 25620, shm `Local\NeighborCraftFrame`, world
+  `neighborcraft` (void, creative). `./gradlew build` / `runClient` with JAVA_HOME=jdk25 (dev client, own game dir).
+- `tools/linktest.py` verified: camera drives Minecraft, barriers and commands apply, `blocks` events come back,
+  colour + depth exported (1280x720, flags 7), sky transparent.
+
+### Hello Neighbor side (`hn/`): built, first in-game run pending
+- `NeighborCraftMod` (UE4SS C++ mod that also registers as a ReShade add-on): engine-tick post callback (game
+  thread) sends `cam` (UE->MC axes, horizontal->vertical FOV) and floor probes via
+  `KismetSystemLibrary:LineTraceSingle` (ProcessEvent with a parameter block laid out from the UFunction's own
+  property offsets). Keys: F6 hands, F7 on/off, F8 re-level, F9 reflection dump.
+- `hn/build.bat` -> `build\hn`; `hn/install.sh` (+ `--remove`) installs `ue4ss\Mods\NeighborCraftMod\dlls\main.dll`
+  and `reshade-shaders\Shaders\NeighborCraft.fx`, and sets the ReShade preset to the NeighborCraft technique
+  (old preset kept as `ReShadePreset.ini.neighborcraft-bak`).
