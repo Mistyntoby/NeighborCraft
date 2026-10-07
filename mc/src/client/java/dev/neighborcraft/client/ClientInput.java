@@ -53,6 +53,18 @@ final class ClientInput {
 					key.setDown(down);
 				}
 			}
+			case "move" -> {
+				// the movement keys held in the host's window, every host frame (bits: 1 forward, 2 back, 4 left,
+				// 8 right, 16 jump, 32 sneak, 64 sprint): Minecraft's own movement reads them like real keys
+				int bits = m.get("m").getAsInt();
+				minecraft.options.keyUp.setDown((bits & 1) != 0);
+				minecraft.options.keyDown.setDown((bits & 2) != 0);
+				minecraft.options.keyLeft.setDown((bits & 4) != 0);
+				minecraft.options.keyRight.setDown((bits & 8) != 0);
+				minecraft.options.keyJump.setDown((bits & 16) != 0);
+				minecraft.options.keyShift.setDown((bits & 32) != 0);
+				minecraft.options.keySprint.setDown((bits & 64) != 0);
+			}
 			case "slot" -> {
 				if (player != null) {
 					player.getInventory().setSelectedSlot(Math.clamp(m.get("n").getAsInt(), 0, Inventory.getSelectionSize() - 1));

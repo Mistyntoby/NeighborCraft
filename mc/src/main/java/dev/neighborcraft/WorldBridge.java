@@ -70,6 +70,40 @@ public final class WorldBridge {
 		});
 	}
 
+	/**
+	 * The host's world as voxels: cells {x, y, z, ...} it found solid become barriers (only where there's air), and
+	 * cells it found empty lose our barrier (a door opened). Blocks the player placed are never touched.
+	 */
+	public static void voxels(final int[] solid, final int[] empty) {
+		MinecraftServer s = server;
+		if (s == null) {
+			return;
+		}
+
+		s.execute(() -> {
+			ServerLevel level = s.overworld();
+			BlockState barrier = Blocks.BARRIER.defaultBlockState();
+			BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+			placingGround = true;
+			for (int i = 0; i + 2 < solid.length; i += 3) {
+				pos.set(solid[i], solid[i + 1], solid[i + 2]);
+				if (level.isInWorldBounds(pos) && level.getBlockState(pos).isAir()) {
+					level.setBlock(pos, barrier, Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+					barriers.add(pos.immutable());
+				}
+			}
+
+			for (int i = 0; i + 2 < empty.length; i += 3) {
+				pos.set(empty[i], empty[i + 1], empty[i + 2]);
+				if (barriers.remove(pos) && level.getBlockState(pos).is(Blocks.BARRIER)) {
+					level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+				}
+			}
+
+			placingGround = false;
+		});
+	}
+
 	/** Remove every barrier we placed (e.g. when the host loads another level). */
 	public static void clearSolid() {
 		MinecraftServer s = server;

@@ -14,4 +14,9 @@ abstract class LocalPlayerMixin {
 	private void passthrough$followHost(final CallbackInfo ci) {
 		PlayerSync.tick((LocalPlayer) (Object) this);
 	}
+
+	@Inject(method = "sendPosition", at = @At("HEAD"))
+	private void passthrough$hostGround(final CallbackInfo ci) {
+		PlayerSync.beforeSend((LocalPlayer) (Object) this);
+	}
 }

@@ -79,6 +79,10 @@ public final class FrameExporter {
 		boolean busy;
 		long busySince;
 		HostState.Pose pose;
+		/** The camera this frame was rendered with (Minecraft's own when it drives, otherwise the host's). */
+		net.minecraft.world.phys.Vec3 camPos;
+		float camYaw;
+		float camPitch;
 		float far;
 		long frame;
 		long captureNanos;
@@ -180,6 +184,10 @@ public final class FrameExporter {
 		c.busy = true;
 		c.busySince = now;
 		c.pose = pose;
+		net.minecraft.client.Camera camera = net.minecraft.client.Minecraft.getInstance().gameRenderer.mainCamera();
+		c.camPos = camera.position();
+		c.camYaw = camera.yRot();
+		c.camPitch = camera.xRot();
 		c.far = far;
 		c.frame = ++frameCounter;
 		c.captureNanos = now;
@@ -239,11 +247,11 @@ public final class FrameExporter {
 			m.set(FLOAT, desc + 36, c.far);
 			m.set(FLOAT, desc + 40, p.fov());
 			m.set(INT, desc + 44, (RenderSystem.getDevice().getDeviceInfo().isZZeroToOne() ? 1 : 0) | 2 | 4);
-			m.set(DOUBLE, desc + 48, p.x());
-			m.set(DOUBLE, desc + 56, p.y());
-			m.set(DOUBLE, desc + 64, p.z());
-			m.set(FLOAT, desc + 72, p.yaw());
-			m.set(FLOAT, desc + 76, p.pitch());
+			m.set(DOUBLE, desc + 48, c.camPos.x);
+			m.set(DOUBLE, desc + 56, c.camPos.y);
+			m.set(DOUBLE, desc + 64, c.camPos.z);
+			m.set(FLOAT, desc + 72, c.camYaw);
+			m.set(FLOAT, desc + 76, c.camPitch);
 			m.set(FLOAT, desc + 80, p.roll());
 			m.set(INT, desc + 84, p.firstPerson() ? 1 : 0);
 			m.set(LONG, desc + 88, c.captureNanos);

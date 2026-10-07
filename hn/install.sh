@@ -26,6 +26,8 @@ fi
 mkdir -p "$MOD/dlls"
 cp "$BUILD/NeighborCraftMod/NeighborCraftMod.dll" "$MOD/dlls/main.dll"
 touch "$MOD/enabled.txt"
+# how the mod starts Minecraft when Hello Neighbor starts (and Minecraft isn't running yet)
+echo "cmd.exe /c \"$(cygpath -w "$HERE/../tools/start_minecraft.bat")\"" > "$MOD/minecraft_launch.txt"
 cp "$HERE/shaders/NeighborCraft.fx" "$SHADERS/NeighborCraft.fx"
 if [ -f "$PRESET" ] && ! grep -q '^Techniques=NeighborCraft@NeighborCraft.fx' "$PRESET"; then
 	[ -f "$PRESET.neighborcraft-bak" ] || cp "$PRESET" "$PRESET.neighborcraft-bak"

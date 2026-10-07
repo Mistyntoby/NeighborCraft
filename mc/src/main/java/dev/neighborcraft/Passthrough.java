@@ -12,6 +12,8 @@ public class Passthrough implements ModInitializer {
 	public static final Logger LOG = LoggerFactory.getLogger(ID);
 	/** True while Hello Neighbor is driving the camera. The integrated server shares this JVM, so both sides read it. */
 	public static volatile boolean active;
+	/** True while Minecraft moves the player (its physics, against the host's world as barriers) and the host follows. */
+	public static volatile boolean driving;
 	/** Where events for the host go (JSON lines); the client's HostLink sets it. */
 	public static volatile Consumer<String> events = message -> {};
 

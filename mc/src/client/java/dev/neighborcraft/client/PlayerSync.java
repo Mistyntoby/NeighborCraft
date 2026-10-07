@@ -1,5 +1,7 @@
 package dev.neighborcraft.client;
 
+import dev.neighborcraft.Passthrough;
+import java.util.Locale;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
@@ -29,6 +31,23 @@ public final class PlayerSync {
 			return;
 		}
 
+		if (p.drive()) {
+			// Minecraft moves the player: only the look comes from the host, and the host is told where the eyes are
+			player.setYRot(p.yaw());
+			player.setXRot(p.pitch());
+			player.yRotO = p.yaw();
+			player.xRotO = p.pitch();
+			player.yHeadRot = player.yHeadRotO = p.yaw();
+			if (minecraft.options.getCameraType() != CameraType.FIRST_PERSON) {
+				minecraft.options.setCameraType(CameraType.FIRST_PERSON);
+			}
+
+			Vec3 eye = player.getEyePosition(partialTick);
+			Passthrough.events.accept(String.format(Locale.ROOT, "{\"t\":\"mcpos\",\"eye\":[%.4f,%.4f,%.4f],\"feet\":%.4f,\"ground\":%b,\"tn\":%d}",
+				eye.x, eye.y, eye.z, player.getPosition(partialTick).y, player.onGround(), System.nanoTime()));
+			return;
+		}
+
 		player.setYRot(p.yaw());
 		player.setXRot(p.pitch());
 		player.yRotO = p.yaw();
@@ -50,6 +69,17 @@ public final class PlayerSync {
 	}
 
 	/**
+	 * Just before the player's movement goes to the server: on the ground or not as the host's player is. The server
+	 * counts the fall from there, so a hit while falling after a jump is critical, as in Minecraft.
+	 */
+	public static void beforeSend(final LocalPlayer player) {
+		HostState.Pose p = HostState.live();
+		if (p != null && !p.drive()) {
+			player.setOnGround(!p.air());
+		}
+	}
+
+	/**
 	 * Every client tick, at the start of the player's tick (the old position is already saved, so the model
 	 * interpolates and walks): in first person the player's eyes are at the host camera, in third person
 	 * their feet are at the host player's.
@@ -57,6 +87,18 @@ public final class PlayerSync {
 	public static void tick(final LocalPlayer player) {
 		HostState.Pose p = HostState.live();
 		if (p == null) {
+			return;
+		}
+
+		if (p.drive()) {
+			// walking, not creative flight: jumps, falls and critical hits work as in survival
+			Abilities abilities = player.getAbilities();
+			if (abilities.flying || abilities.mayfly) {
+				abilities.flying = false;
+				abilities.mayfly = false;
+				player.onUpdateAbilities();
+			}
+
 			return;
 		}
 

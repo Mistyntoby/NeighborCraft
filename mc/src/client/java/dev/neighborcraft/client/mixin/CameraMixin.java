@@ -47,7 +47,8 @@ abstract class CameraMixin {
 	@Inject(method = "alignWithEntity", at = @At("TAIL"))
 	private void passthrough$hostCamera(final float partialTicks, final CallbackInfo ci) {
 		HostState.Pose p = HostState.frame();
-		if (p == null) {
+		if (p == null || p.drive()) {
+			// driving: Minecraft's own first-person camera (the player already looks where the host looks)
 			return;
 		}
 

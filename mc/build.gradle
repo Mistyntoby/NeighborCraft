@@ -19,6 +19,10 @@ loom {
 		client {
 			programArgs "--width", "1920", "--height", "1080"
 			vmArgs "--enable-native-access=ALL-UNNAMED"
+			// started by Hello Neighbor (tools/start_minecraft.bat): quit when it closes
+			if (project.hasProperty("exitWithHost")) {
+				vmArgs "-Dneighborcraft.exitWithHost=true"
+			}
 		}
 	}
 }

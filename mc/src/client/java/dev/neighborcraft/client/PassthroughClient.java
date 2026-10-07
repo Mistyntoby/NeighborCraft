@@ -19,6 +19,7 @@ import net.minecraft.core.HolderLookup;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.LevelSettings;
 import net.minecraft.world.level.WorldDataConfiguration;
@@ -67,6 +68,11 @@ public class PassthroughClient implements ClientModInitializer {
 	/** Server ticks until the setup commands run (the player isn't in the player list yet when JOIN fires). */
 	private static int setupIn = -1;
 	private static int respawnIn;
+	/** Started by Hello Neighbor (-Dneighborcraft.exitWithHost=true): quit when it has been gone for a while. */
+	private static final boolean EXIT_WITH_HOST = Boolean.getBoolean("neighborcraft.exitWithHost");
+	private static final long HOST_GONE_NANOS = 20_000_000_000L;
+	private static long hostLastSeen = System.nanoTime();
+	private static boolean hostEverSeen;
 
 	@Override
 	public void onInitializeClient() {
@@ -97,6 +103,15 @@ public class PassthroughClient implements ClientModInitializer {
 			configure(minecraft.options);
 		}
 
+		if (HostLink.connected()) {
+			hostLastSeen = System.nanoTime();
+			hostEverSeen = true;
+		} else if (EXIT_WITH_HOST && hostEverSeen && System.nanoTime() - hostLastSeen > HOST_GONE_NANOS) {
+			Passthrough.LOG.info("Hello Neighbor is gone: quitting");
+			hostEverSeen = false;
+			minecraft.stop();
+		}
+
 		// back on the title screen (first start, or the world was quit by accident): open the world again
 		if (minecraft.level != null) {
 			worldRequested = false;
@@ -120,6 +135,10 @@ public class PassthroughClient implements ClientModInitializer {
 		options.damageTiltStrength().set(0.0);
 		options.menuBackgroundBlurriness().set(0);
 		options.enableVsync().set(false);
+		// Hello Neighbor has its own soundtrack; Minecraft keeps its sounds (blocks, hits) but no music
+		options.getSoundSourceOptionInstance(SoundSource.MUSIC).set(0.0);
+		// Hello Neighbor's stairs arrive as whole blocks: step up them without jumping
+		options.autoJump().set(true);
 		// the host shows ~60-120 fps: rendering faster only competes with it for the GPU
 		options.framerateLimit().set(120);
 		options.save();

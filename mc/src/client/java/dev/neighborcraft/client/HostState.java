@@ -14,10 +14,13 @@ public final class HostState {
 	 * @param firstPerson whether the host camera is first person (third person shows the player model)
 	 * @param px the player's feet (third person)
 	 * @param bodyYaw the player's body yaw (third person)
+	 * @param air the host's player is airborne (jumping or falling): Minecraft's hits are critical while falling
+	 * @param drive Minecraft moves the player (its own physics) and the host follows; only the look (yaw, pitch,
+	 *        fov) comes from the host, and the position fields are unused
 	 */
 	public record Pose(
 		long hostFrame, double x, double y, double z, float yaw, float pitch, float roll, float fov,
-		boolean firstPerson, double px, double py, double pz, float bodyYaw, long receivedNanos
+		boolean firstPerson, double px, double py, double pz, float bodyYaw, long receivedNanos, boolean air, boolean drive
 	) {
 	}
 
@@ -29,21 +32,27 @@ public final class HostState {
 	private HostState() {
 	}
 
-	/** {"t":"cam","f":frame,"p":[x,y,z],"r":[yaw,pitch,roll],"fov":deg,"fp":bool,"pl":[x,y,z],"h":bodyYaw} */
+	/**
+	 * {"t":"cam","f":frame,"p":[x,y,z],"r":[yaw,pitch,roll],"fov":deg,"fp":bool,"pl":[x,y,z],"h":bodyYaw}, or
+	 * {"t":"cam","drive":true,"f":frame,"r":[yaw,pitch,roll],"fov":deg} when Minecraft moves the player.
+	 */
 	static void update(final JsonObject m) {
-		JsonArray p = m.getAsJsonArray("p");
+		boolean drive = m.has("drive") && m.get("drive").getAsBoolean();
+		JsonArray p = drive && !m.has("p") ? null : m.getAsJsonArray("p");
 		JsonArray r = m.getAsJsonArray("r");
 		JsonArray pl = m.has("pl") ? m.getAsJsonArray("pl") : p;
 		float yaw = r.get(0).getAsFloat();
 		latest = new Pose(
 			m.has("f") ? m.get("f").getAsLong() : 0L,
-			p.get(0).getAsDouble(), p.get(1).getAsDouble(), p.get(2).getAsDouble(),
+			p == null ? 0.0 : p.get(0).getAsDouble(), p == null ? 0.0 : p.get(1).getAsDouble(), p == null ? 0.0 : p.get(2).getAsDouble(),
 			yaw, r.get(1).getAsFloat(), r.size() > 2 ? r.get(2).getAsFloat() : 0.0F,
 			m.has("fov") ? m.get("fov").getAsFloat() : 70.0F,
 			!m.has("fp") || m.get("fp").getAsBoolean(),
-			pl.get(0).getAsDouble(), pl.get(1).getAsDouble(), pl.get(2).getAsDouble(),
+			pl == null ? 0.0 : pl.get(0).getAsDouble(), pl == null ? 0.0 : pl.get(1).getAsDouble(), pl == null ? 0.0 : pl.get(2).getAsDouble(),
 			m.has("h") ? m.get("h").getAsFloat() : yaw,
-			System.nanoTime()
+			System.nanoTime(),
+			m.has("air") && m.get("air").getAsBoolean(),
+			drive
 		);
 	}
 
@@ -61,5 +70,6 @@ public final class HostState {
 	public static void beginFrame() {
 		frame = live();
 		Passthrough.active = frame != null;
+		Passthrough.driving = frame != null && frame.drive();
 	}
 }

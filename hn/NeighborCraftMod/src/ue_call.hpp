@@ -40,8 +40,10 @@ namespace nc
 		{
 			if (!m_obj || m_index < 0)
 				return nullptr;
+			// Only the slot's object pointer: HN's engine build reads the item's flags wrongly (IsValid failed every
+			// frame for a live PlayerController), while a destroyed object's slot is always cleared or reused.
 			FUObjectItem *item = UObjectArray::IndexToObject(m_index);
-			return item && item->GetUObject() == m_obj && item->IsValid(false) ? m_obj : nullptr;
+			return item && item->GetUObject() == m_obj ? m_obj : nullptr;
 		}
 		explicit operator bool() const { return get() != nullptr; }
 

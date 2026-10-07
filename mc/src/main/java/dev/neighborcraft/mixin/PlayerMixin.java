@@ -10,14 +10,15 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * The host moves the player, so neither side should collide it with blocks: host terrain arrives as barriers
- * that the player can end up inside, and the server would otherwise reject those moves.
+ * When the host moves the player, neither side should collide it with blocks: host terrain arrives as barriers
+ * that the player can end up inside, and the server would otherwise reject those moves. When Minecraft moves the
+ * player (driving), it collides normally: the barriers are the host's world.
  */
 @Mixin(Player.class)
 abstract class PlayerMixin {
 	@Inject(method = "tick", at = @At(value = "FIELD", target = "Lnet/minecraft/world/entity/player/Player;noPhysics:Z", opcode = Opcodes.PUTFIELD, shift = At.Shift.AFTER))
 	private void passthrough$ghost(final CallbackInfo ci) {
-		if (Passthrough.active) {
+		if (Passthrough.active && !Passthrough.driving) {
 			((Entity) (Object) this).noPhysics = true;
 		}
 	}
