@@ -37,9 +37,21 @@ modelled on universal-modder `examples/minecraft-gta5-passthrough`.
   - The level's RecastNavMesh actor may override the ini default; read it live with UE4SS.
   - Still unverified: whether the Neighbor's AI actually paths via the navmesh (vs. custom movement).
 
-### Pending (needs game launches)
-- 2. UE4SS injection + console.
-- 3. ReShade depth buffer (expected reversed-Z: UE4 on D3D11 uses inverted depth).
+### 1b. RHI confirmed live (2026-10-07)
+- ReShade.log: game calls `D3D11CreateDeviceAndSwapChain` / `IDXGIFactory::CreateSwapChain` -> **D3D11**.
+  Back buffer is not RGBA8 (sRGB-sampling warnings), exclusive fullscreen via `SetFullscreenState(TRUE)`.
+
+### 2. UE4SS (2026-10-07): injects
+- PS scan found EngineVersion 4.20, Shipping, GUObjectArray, GMalloc, FName::ToString/ctor,
+  StaticConstructObject_Internal, FUObjectHashTables::Get, GNatives, GameEngineTick, ProcessConsoleExec.
+  HashTables self test passed (1950 classes). CheatManagerEnabler: CheatManager already exists.
+- **Failed: ConsoleManagerSingleton** (2 candidates: 7FF7288DE6B0, 7FF729151470). Only matters for CVars via
+  IConsoleManager; fix with `ue4ss/UE4SS_Signatures/ConsoleManager.lua` if we need it.
+- In-game `~` console: pending user confirmation.
+
+### 3. ReShade depth (in progress)
+- With `RESHADE_DEPTH_INPUT_IS_REVERSED=0` DisplayDepth was almost all black (consistent with reversed-Z).
+  Set REVERSED=1, far plane 1000 in ReShade.ini + preset; awaiting visual check and Generic Depth buffer info.
 
 ### Lab / backups
 - Backup 1: `%USERPROFILE%\NeighborCraft-lab\backups\20261006-220736` (outside the repo): `Saved\` (saves + user
