@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 1,
+	"id": "neighborcraft",
+	"version": "${version}",
+	"name": "NeighborCraft",
+	"description": "Runs alongside Hello Neighbor: its camera drives Minecraft's, its house becomes invisible collision, and Minecraft's picture (colour + depth) is handed back to be composited into Hello Neighbor's frame.",
+	"authors": ["Mistyntoby"],
+	"contributors": ["Based on universal-modder's minecraft-gta5-passthrough example (MIT)"],
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["dev.neighborcraft.Passthrough"],
+		"client": ["dev.neighborcraft.client.PassthroughClient"]
+	},
+	"mixins": [
+		"neighborcraft.mixins.json",
+		{ "config": "neighborcraft.client.mixins.json", "environment": "client" }
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

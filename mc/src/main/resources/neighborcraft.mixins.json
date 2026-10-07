@@ -1,0 +1,7 @@
+{
+	"required": true,
+	"package": "dev.neighborcraft.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": ["LevelMixin", "PlayerMixin", "ServerExplosionMixin", "ServerPlayerMixin"],
+	"injectors": { "defaultRequire": 1 }
+}
