@@ -1,0 +1,71 @@
+# NeighborCraft: only our own source, shaders, scripts and docs belong here.
+# Never commit game files, extracted assets, third-party binaries, build output or backups.
+
+# --- Game files and extracted/converted assets (Mojang, tinyBuild) ---
+*.uasset
+*.uexp
+*.ubulk
+*.umap
+*.pak
+*.utoc
+*.ucas
+*.sav
+*.mca
+*.nbt
+*.dat
+*.jar
+!mc/gradle/wrapper/gradle-wrapper.jar
+assets/
+extracted/
+dumps/
+**/CXXHeaderDump/
+**/UHTHeaderDump/
+**/ObjectDump*.txt
+resourcepack/
+lab/
+
+# --- Third-party binaries and runtimes (fetched by scripts, never vendored) ---
+*.dll
+*.exe
+*.asi
+*.addon
+*.addon64
+*.pdb
+third_party/
+ue4ss/
+UE4SS*/
+reshade-shaders/
+ReShade*.ini
+
+# --- Save / game-file backups ---
+backups/
+*.bak
+*.zip
+*.7z
+
+# --- Build output ---
+build/
+out/
+bin/
+obj/
+x64/
+.gradle/
+mc/run/
+*.class
+*.obj
+*.lib
+*.exp
+*.ilk
+*.log
+
+# --- Recordings ---
+takes/
+*.mp4
+*.mkv
+
+# --- Editors / OS ---
+.vs/
+.idea/
+*.user
+Thumbs.db
+.DS_Store
