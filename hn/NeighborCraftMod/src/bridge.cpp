@@ -91,6 +91,32 @@ namespace nc
 			return down == was ? 0 : (down ? 1 : -1);
 		}
 
+		/// Whether `o`'s class is `class_name` or derives from it (checked by name: UE4SS's class lookups can't be
+		/// trusted in HN, whose custom engine build confuses the hash tables).
+		bool is_a(UObject *o, const wchar_t *class_name)
+		{
+			for (UStruct *s = o ? o->GetClassPrivate() : nullptr; s; s = s->GetSuperStruct())
+				if (s->GetName() == class_name)
+					return true;
+			return false;
+		}
+
+		bool is_default(UObject *o)
+		{
+			return o->GetName().starts_with(L"Default__");
+		}
+
+		/// Every live, non-default instance of `class_name` (or a subclass).
+		std::vector<UObject *> find_all(const wchar_t *class_name)
+		{
+			std::vector<UObject *> found, out;
+			UObjectGlobals::FindAllOf(class_name, found);
+			for (UObject *o : found)
+				if (o && !is_default(o) && is_a(o, class_name))
+					out.push_back(o);
+			return out;
+		}
+
 		UObject *player_controller()
 		{
 			if (UObject *pc = g_pc.get())
@@ -98,12 +124,27 @@ namespace nc
 			static DWORD next = 0;
 			if (GetTickCount() < next)
 				return nullptr;
-			next = GetTickCount() + 500;
-			UObject *pc = UObjectGlobals::FindFirstOf(STR("PlayerController"));
+			next = GetTickCount() + 1000;
+			// the one that has a pawn (the menu level's controller has none)
+			UObject *pc = nullptr;
+			for (UObject *o : find_all(L"PlayerController"))
+			{
+				Call c(o, STR("K2_GetPawn"));
+				c.invoke();
+				UObject **pawn = c.param<UObject *>(STR("ReturnValue"));
+				if (!pc || (pawn && *pawn))
+					pc = o;
+			}
 			g_pc = ObjRef(pc);
 			if (pc)
 				log(L"player controller: " + pc->GetFullName());
 			return pc;
+		}
+
+		/// A one-line message on screen, in Minecraft's action bar (composited over HN's picture).
+		void notify(const std::string &text)
+		{
+			sendf("{\"t\":\"cmd\",\"c\":\"title @a actionbar {\\\"text\\\":\\\"%s\\\",\\\"color\\\":\\\"yellow\\\"}\"}", text.c_str());
 		}
 
 		UObject *kismet()
@@ -207,6 +248,7 @@ namespace nc
 			g_sampled.clear();
 			g_ws.send("{\"t\":\"clear\"}");
 			log(L"re-levelled: ground " + std::to_wstring(groundZ) + L" cm, yOffset " + std::to_wstring(g_yOffset));
+			notify("NeighborCraft: ground re-levelled");
 		}
 
 		/// HN's floor under columns around the player that haven't been probed on this storey yet, nearest first.
@@ -286,8 +328,7 @@ namespace nc
 			dump_object(f, pc, L"PlayerController");
 			dump_object(f, pcm ? *pcm : nullptr, L"PlayerCameraManager");
 			dump_object(f, pawn, L"Pawn");
-			std::vector<UObject *> neighbors;
-			UObjectGlobals::FindAllOf(STR("BP_Sosed_C"), neighbors);
+			const std::vector<UObject *> neighbors = find_all(L"BP_Sosed_C");
 			f << L"==== BP_Sosed_C instances: " << neighbors.size() << L"\n";
 			dump_object(f, neighbors.empty() ? nullptr : neighbors[0], L"Neighbor");
 			if (!neighbors.empty())
@@ -295,8 +336,7 @@ namespace nc
 				UObject **controller = neighbors[0]->GetValuePtrByPropertyNameInChain<UObject *>(STR("Controller"));
 				dump_object(f, controller ? *controller : nullptr, L"Neighbor controller");
 			}
-			std::vector<UObject *> navmeshes;
-			UObjectGlobals::FindAllOf(STR("RecastNavMesh"), navmeshes);
+			const std::vector<UObject *> navmeshes = find_all(L"RecastNavMesh");
 			f << L"==== RecastNavMesh instances: " << navmeshes.size() << L"\n";
 			for (UObject *n : navmeshes)
 			{
@@ -307,6 +347,8 @@ namespace nc
 			dump_object(f, navmeshes.empty() ? nullptr : navmeshes[0], L"RecastNavMesh");
 			log(L"dump written: " + file + L" (" + std::to_wstring(neighbors.size()) + L" neighbours, " +
 				std::to_wstring(navmeshes.size()) + L" navmeshes)");
+			notify("NeighborCraft: dump written (" + std::to_string(neighbors.size()) + " neighbour, " +
+				std::to_string(navmeshes.size()) + " navmesh)");
 		}
 
 		void handle(const std::string &m)
@@ -341,11 +383,13 @@ namespace nc
 		{
 			g_enabled = !g_enabled;
 			log(g_enabled ? L"passthrough on" : L"passthrough off");
+			notify(g_enabled ? "NeighborCraft on" : "NeighborCraft off");
 		}
 		if (pressed(VK_F6))
 		{
 			g_hands = !g_hands;
 			log(g_hands ? L"Minecraft hands on (mouse and 1-9 go to Minecraft)" : L"Minecraft hands off");
+			notify(g_hands ? "Minecraft hands ON (mouse + 1-9 go to Minecraft)" : "Minecraft hands off");
 		}
 
 		UObject *pc = player_controller();

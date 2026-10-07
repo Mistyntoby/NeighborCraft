@@ -97,7 +97,10 @@ public class PassthroughClient implements ClientModInitializer {
 			configure(minecraft.options);
 		}
 
-		if (!worldRequested && minecraft.level == null && minecraft.gui.screen() instanceof TitleScreen && !Boolean.getBoolean("neighborcraft.noAutoWorld")) {
+		// back on the title screen (first start, or the world was quit by accident): open the world again
+		if (minecraft.level != null) {
+			worldRequested = false;
+		} else if (!worldRequested && minecraft.gui.screen() instanceof TitleScreen && !Boolean.getBoolean("neighborcraft.noAutoWorld")) {
 			worldRequested = true;
 			openWorld(minecraft);
 		}

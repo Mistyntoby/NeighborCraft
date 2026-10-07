@@ -315,7 +315,7 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	return overlay.rgb + saturate(color) * (1.0 - overlay.a);
 }
 
-technique MCPassthrough < ui_tooltip = "Minecraft passthrough: enabled automatically while the Minecraft link is up."; >
+technique NeighborCraft < ui_tooltip = "Minecraft passthrough: enabled automatically while the Minecraft link is up."; >
 {
 	pass Light
 	{
