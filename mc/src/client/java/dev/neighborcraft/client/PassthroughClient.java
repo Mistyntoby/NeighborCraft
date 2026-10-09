@@ -145,7 +145,22 @@ public class PassthroughClient implements ClientModInitializer {
 		options.save();
 	}
 
+	/** Whether this run already started the world fresh (it is only reopened, not wiped, after an accidental quit). */
+	private static boolean freshThisRun;
+
 	private static void openWorld(final Minecraft minecraft) {
+		// Every run starts from an empty world: Hello Neighbor's geometry is re-probed each session (and aligned to where
+		// the player stands then), so blocks kept from an earlier session would sit in the wrong places.
+		if (!freshThisRun && minecraft.getLevelSource().levelExists(WORLD)) {
+			try (var access = minecraft.getLevelSource().createAccess(WORLD)) {
+				access.deleteLevel();
+				Passthrough.LOG.info("deleted last session's world {}", WORLD);
+			} catch (java.io.IOException e) {
+				Passthrough.LOG.warn("couldn't delete last session's world", e);
+			}
+		}
+
+		freshThisRun = true;
 		if (minecraft.getLevelSource().levelExists(WORLD)) {
 			Passthrough.LOG.info("opening world {}", WORLD);
 			minecraft.createWorldOpenFlows().openWorld(WORLD, () -> minecraft.gui.setScreen(new TitleScreen()));

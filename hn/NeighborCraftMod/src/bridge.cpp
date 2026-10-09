@@ -554,12 +554,20 @@ namespace nc
 		// become host blocks, and blocks that HN geometry only crosses are subdivided down to 1/8 block (12.5 cm): an
 		// 8x8x8 mask that Minecraft turns into the block's collision shape, so walls and floors sit where they really are.
 
+		int g_probeStats[3] = {};
+
 		/// Whether HN's world blocks a player anywhere in a box (centre and half size in cm).
 		bool blocks_player(UObject *self, const Vec3f &centre, const Vec3f &half)
 		{
 			Call c(kismet(), STR("BoxTraceSingleByProfile"));
 			if (!c)
+			{
+				static bool warned = false;
+				if (!warned)
+					log(L"BoxTraceSingleByProfile isn't available: HN's world can't be probed");
+				warned = true;
 				return false;
+			}
 			static const NameParam pawnProfile = name_param(STR("Pawn"));
 			c.set<UObject *>(STR("WorldContextObject"), self)
 				.set(STR("Start"), Vec3f{centre.x, centre.y, centre.z + 0.5f})
@@ -708,6 +716,16 @@ namespace nc
 				}
 				g_cells[key] = {sig, now};
 				queries += 1;
+				++g_probeStats[kind];
+			}
+			static DWORD nextStats = 0;
+			if (now > nextStats)
+			{
+				nextStats = now + 5000;
+				if (g_probeStats[0] + g_probeStats[1] + g_probeStats[2] > 0)
+					log(L"probe: " + std::to_wstring(g_probeStats[0]) + L" empty, " + std::to_wstring(g_probeStats[1]) + L" full, " +
+						std::to_wstring(g_probeStats[2]) + L" partial blocks (last 5 s)");
+				g_probeStats[0] = g_probeStats[1] = g_probeStats[2] = 0;
 			}
 			if (!cells.empty())
 				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "]}");
