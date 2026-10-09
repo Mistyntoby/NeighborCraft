@@ -13,6 +13,8 @@ public final class PlayerSync {
 	private static final double TELEPORT_SQ = 64.0 * 64.0;
 	/** How far the host's player moved over the last client tick (drives the walk animation). */
 	private static float tickDistance;
+	/** Minecraft's own view-bob inputs, from the host's movement (the synced player never walks by itself). */
+	private static float walkDist, walkDistO, bob, bobO;
 	private static double lastX = Double.NaN, lastZ;
 
 	private PlayerSync() {
@@ -20,6 +22,12 @@ public final class PlayerSync {
 
 	public static float tickDistance() {
 		return tickDistance;
+	}
+
+	/** The hand's walk bob, as vanilla computes it for a walking player: {walk distance (negated), bob}. */
+	public static float[] handBob(final float partialTick) {
+		float walk = walkDist + (walkDist - walkDistO) * partialTick;
+		return new float[] {-walk, bobO + (bob - bobO) * partialTick};
 	}
 
 	/** Every frame, before the camera update: position, rotation, and first/third person to match the host. */
@@ -106,6 +114,10 @@ public final class PlayerSync {
 		double y = p.firstPerson() ? p.y() - player.getEyeHeight() : p.py();
 		double z = p.firstPerson() ? p.z() : p.pz();
 		tickDistance = Double.isNaN(lastX) ? 0.0F : (float) Math.min(Math.hypot(x - lastX, z - lastZ), 1.0);
+		walkDistO = walkDist;
+		walkDist += tickDistance * 0.6F;
+		bobO = bob;
+		bob += ((p.air() ? 0.0F : Math.min(0.1F, tickDistance)) - bob) * 0.4F;
 		lastX = x;
 		lastZ = z;
 		boolean teleport = player.distanceToSqr(x, y, z) > TELEPORT_SQ;

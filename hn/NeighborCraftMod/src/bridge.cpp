@@ -28,6 +28,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -244,6 +245,16 @@ namespace nc
 			c.set<uint8_t>(STR("NewMovementMode"), want).set<uint8_t>(STR("NewCustomMode"), 0).invoke();
 		}
 
+		/// Set a bool property (bitfield-safe) on an object, by name.
+		bool set_bool_property(UObject *o, const TCHAR *name, bool value)
+		{
+			auto *p = static_cast<FBoolProperty *>(o ? o->GetPropertyByNameInChain(name) : nullptr);
+			if (!p)
+				return false;
+			p->SetPropertyValue(p->ContainerPtrToValuePtr<void>(o), value);
+			return true;
+		}
+
 		/// HN's character movement with Minecraft's numbers (1 block = 1 m): walk 4.317 m/s, sprint 5.612, sneak 1.295;
 		/// a jump peaks at 1.25 blocks after 0.3 s (v0 8.35 m/s, gravity 27.8 m/s2); 0.6 block step-up; snappy ground
 		/// acceleration and little air control. HN's own collision stays (exact, off-grid). `on` false restores HN's.
@@ -261,25 +272,36 @@ namespace nc
 				{STR("GravityScale"), 2.84f}, {STR("AirControl"), 0.35f}, {STR("MaxStepHeight"), 60.0f},
 				{STR("MaxAcceleration"), 4000.0f}, {STR("BrakingDecelerationWalking"), 4000.0f},
 			};
-			UObject *cmc = movement_component(pawn);
-			if (!cmc)
-				return;
-			for (Setting &s : settings)
-			{
-				float *v = cmc->GetValuePtrByPropertyNameInChain<float>(s.name);
-				if (!v)
-					continue;
-				if (!s.haveSaved)
+			// HN's player (class Human) keeps its own speeds and copies them into the movement component itself
+			static Setting pawnSettings[] = {
+				{STR("m_fWalkSpeed"), 431.7f}, {STR("m_fRunSpeed"), 561.2f}, {STR("m_fWalk"), 431.7f}, {STR("m_fRun"), 561.2f},
+			};
+			const bool sprint = on && key_held(VK_SHIFT); // HN's run key is Shift: Minecraft's sprint speed
+			auto apply = [&](UObject *o, Setting *list, size_t n) {
+				for (size_t i = 0; o && i < n; ++i)
 				{
-					s.saved = *v;
-					s.haveSaved = true;
+					Setting &s = list[i];
+					float *v = o->GetValuePtrByPropertyNameInChain<float>(s.name);
+					if (!v)
+						continue;
+					if (!s.haveSaved)
+					{
+						s.saved = *v;
+						s.haveSaved = true;
+						log(L"movement: " + std::wstring(s.name) + L" was " + std::to_wstring(*v));
+					}
+					float want = on ? s.minecraft : s.saved;
+					if (sprint && list == settings && i == 0)
+						want = 561.2f;
+					// something in HN rewrote it since last tick: say so once (the movement must then be set elsewhere)
+					static std::unordered_set<const TCHAR *> reported;
+					if (on && *v != want && *v != s.minecraft && *v != 561.2f && s.haveSaved && *v != s.saved && reported.insert(s.name).second)
+						log(L"movement: HN changed " + std::wstring(s.name) + L" to " + std::to_wstring(*v));
+					*v = want;
 				}
-				float want = on ? s.minecraft : s.saved;
-				// HN's run key is Shift: Minecraft's sprint speed
-				if (on && s.name == settings[0].name && key_held(VK_SHIFT))
-					want = 561.2f;
-				*v = want;
-			}
+			};
+			apply(movement_component(pawn), settings, std::size(settings));
+			apply(pawn, pawnSettings, std::size(pawnSettings));
 		}
 
 		struct Camera
@@ -314,6 +336,13 @@ namespace nc
 		};
 		// EObjectTypeQuery: ObjectTypeQuery1 = WorldStatic, ObjectTypeQuery2 = WorldDynamic (not pawns, not physics props)
 		const uint8_t kSolidTypes[] = {0, 1};
+		/// Actors the world probes don't see: our own colliders for Minecraft's blocks (they aren't HN's world).
+		std::vector<UObject *> g_probeIgnore;
+
+		ScriptArray ignore_list()
+		{
+			return {g_probeIgnore.data(), int32(g_probeIgnore.size()), int32(g_probeIgnore.size())};
+		}
 
 		/// Offset of OutHit.ImpactPoint in a trace function's parameter block.
 		bool impact_point(Call &c, Vec3f &hit)
@@ -354,6 +383,7 @@ namespace nc
 				.set(STR("Start"), a)
 				.set(STR("End"), b)
 				.set(STR("ObjectTypes"), ScriptArray{kSolidTypes, 2, 2})
+				.set(STR("ActorsToIgnore"), ignore_list())
 				.set_bool(STR("bTraceComplex"), false)
 				.set<uint8_t>(STR("DrawDebugType"), 0)
 				.set_bool(STR("bIgnoreSelf"), true);
@@ -374,6 +404,7 @@ namespace nc
 				.set(STR("HalfSize"), half)
 				.set(STR("Orientation"), Rot3f{})
 				.set(STR("ObjectTypes"), ScriptArray{kSolidTypes, 2, 2})
+				.set(STR("ActorsToIgnore"), ignore_list())
 				.set_bool(STR("bTraceComplex"), false)
 				.set<uint8_t>(STR("DrawDebugType"), 0)
 				.set_bool(STR("bIgnoreSelf"), true);
@@ -409,6 +440,136 @@ namespace nc
 		{
 			return (unsigned long long)(uint32_t(x) & 0x1FFFFF) << 42 | (unsigned long long)(uint32_t(y) & 0x1FFFFF) << 21 |
 				   (uint32_t(z) & 0x1FFFFF);
+		}
+
+		// ---- colliders for Minecraft's blocks ----------------------------------------------------------------
+		// Every solid block placed in Minecraft becomes an invisible 1 m box in HN: the player (and the Neighbor) collide
+		// with it, and it is a dynamic navmesh obstacle, so the Neighbor paths around it (HN's navmeshes regenerate
+		// around dynamic modifiers only: RuntimeGeneration = DynamicModifiersOnly).
+
+		constexpr size_t kMaxColliders = 4000;
+		std::unordered_map<unsigned long long, UObject *> g_colliders; // Minecraft block -> TriggerBox actor
+		UObject *g_colliderLevel = nullptr;                           // the controller they were spawned under
+
+		/// FTransform in UE 4.20 (floats): rotation quaternion, translation, scale, each 16-byte aligned.
+		struct alignas(16) Transform4
+		{
+			float rot[4] = {0, 0, 0, 1};
+			float pos[3] = {};
+			float pad0 = 0;
+			float scale[3] = {1, 1, 1};
+			float pad1 = 0;
+		};
+
+		/// An FName as the engine passes it: name entry index + number.
+		struct NameParam
+		{
+			uint32_t index;
+			int32 number;
+		};
+
+		NameParam name_param(const TCHAR *text)
+		{
+			FName n(text, FNAME_Add);
+			NameParam p{};
+			FNameEntryId id = n.GetComparisonIndex();
+			static_assert(sizeof(id) == 4);
+			std::memcpy(&p.index, &id, 4);
+			p.number = n.GetNumber();
+			return p;
+		}
+
+		UObject *gameplay_statics()
+		{
+			static UObject *g = nullptr;
+			if (!g)
+				g = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+			return g;
+		}
+
+		UObject *trigger_box_class()
+		{
+			static UObject *c = nullptr;
+			if (!c)
+				c = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.TriggerBox"));
+			return c;
+		}
+
+		void rebuild_probe_ignore()
+		{
+			g_probeIgnore.clear();
+			for (auto &[key, actor] : g_colliders)
+				g_probeIgnore.push_back(actor);
+		}
+
+		UObject *spawn_collider(UObject *context, const Vec3f &centre)
+		{
+			UObject *statics = gameplay_statics(), *cls = trigger_box_class();
+			if (!statics || !cls)
+				return nullptr;
+			Transform4 t;
+			t.pos[0] = centre.x;
+			t.pos[1] = centre.y;
+			t.pos[2] = centre.z;
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), context)
+				.set<UObject *>(STR("ActorClass"), cls)
+				.set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1) // AlwaysSpawn
+				.set<UObject *>(STR("Owner"), nullptr);
+			if (!begin.invoke())
+				return nullptr;
+			UObject **actor = begin.param<UObject *>(STR("ReturnValue"));
+			if (!actor || !*actor)
+				return nullptr;
+			UObject **shape = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("CollisionComponent"));
+			if (shape && *shape)
+			{
+				// a solid 1 m box instead of a trigger, and an obstacle that carves the navmesh
+				set_bool_property(*shape, STR("bDynamicObstacle"), true);
+				Call(*shape, STR("SetBoxExtent")).set(STR("InBoxExtent"), Vec3f{50.0f, 50.0f, 50.0f}).set_bool(STR("bUpdateOverlaps"), false).invoke();
+				Call(*shape, STR("SetCollisionProfileName")).set(STR("InCollisionProfileName"), name_param(STR("BlockAll"))).invoke();
+			}
+			Call finish(statics, STR("FinishSpawningActor"));
+			finish.set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
+			if (shape && *shape)
+			{
+				// re-register with the navigation system now that it is an obstacle
+				Call(*shape, STR("SetCanEverAffectNavigation")).set_bool(STR("bRelevant"), false).invoke();
+				Call(*shape, STR("SetCanEverAffectNavigation")).set_bool(STR("bRelevant"), true).invoke();
+			}
+			return *actor;
+		}
+
+		void destroy_colliders(bool alive)
+		{
+			if (alive)
+				for (auto &[key, actor] : g_colliders)
+					Call(actor, STR("K2_DestroyActor")).invoke();
+			g_colliders.clear();
+			g_probeIgnore.clear();
+		}
+
+		/// {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...]} from Minecraft: solid blocks placed and removed.
+		void apply_blocks(UObject *context, const std::vector<int> &set, const std::vector<int> &clear)
+		{
+			for (size_t i = 0; i + 2 < clear.size(); i += 3)
+			{
+				auto it = g_colliders.find(cell_key(clear[i], clear[i + 1], clear[i + 2]));
+				if (it == g_colliders.end())
+					continue;
+				Call(it->second, STR("K2_DestroyActor")).invoke();
+				g_colliders.erase(it);
+			}
+			for (size_t i = 0; i + 2 < set.size() && g_colliders.size() < kMaxColliders; i += 3)
+			{
+				const unsigned long long key = cell_key(set[i], set[i + 1], set[i + 2]);
+				if (g_colliders.count(key))
+					continue;
+				if (UObject *a = spawn_collider(context, to_ue(set[i] + 0.5, set[i + 1] + 0.5, set[i + 2] + 0.5)))
+					g_colliders[key] = a;
+			}
+			rebuild_probe_ignore();
 		}
 
 		// ---- voxels ------------------------------------------------------------------------------------------
@@ -462,8 +623,13 @@ namespace nc
 					continue;
 				if (it == g_cells.end() && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
 					ready = false;
-				queries += 5;
-				const bool s = probe_cell(pawn, x, y, z);
+				// cells the player's own capsule overlaps are never solid: what HN probes there is the player's arms and
+				// held items (Minecraft then outlined invisible blocks around the face)
+				const Vec3f lo = to_ue(x, y, z), hi = to_ue(x + 1, y + 1, z + 1);
+				const bool inPlayer = lo.x < feet.x + 40.0f && hi.x > feet.x - 40.0f && lo.y < feet.y + 40.0f && hi.y > feet.y - 40.0f &&
+									  lo.z < feet.z + 95.0f && hi.z > feet.z - 95.0f;
+				queries += inPlayer ? 0 : 5;
+				const bool s = !inPlayer && probe_cell(pawn, x, y, z);
 				if (it == g_cells.end() || it->second.solid != s)
 				{
 					std::string &list = s ? solid : empty;
@@ -490,6 +656,9 @@ namespace nc
 			g_cells.clear();
 			g_driving = false;
 			g_ws.send("{\"t\":\"clear\"}");
+			// the blocks' colliders move with the new offset: rebuild them from Minecraft's blocks
+			destroy_colliders(true);
+			g_ws.send("{\"t\":\"blocksync\",\"r\":64}");
 			log(L"re-levelled: ground " + std::to_wstring(groundZ) + L" cm, yOffset " + std::to_wstring(g_yOffset));
 			notify("NeighborCraft: ground re-levelled");
 		}
@@ -626,9 +795,34 @@ namespace nc
 			return true;
 		}
 
+		/// All the integers of the array under `key` (appended to `out`).
+		void json_ints(const std::string &m, const char *key, std::vector<int> &out)
+		{
+			const size_t at = m.find(std::string("\"") + key + "\":[");
+			if (at == std::string::npos)
+				return;
+			const char *p = m.c_str() + at + std::strlen(key) + 4;
+			while (*p && *p != ']')
+			{
+				char *end = nullptr;
+				const long v = std::strtol(p, &end, 10);
+				if (end == p)
+					break;
+				out.push_back(int(v));
+				p = end + (*end == ',' ? 1 : 0);
+			}
+		}
+
+		std::vector<int> g_pendingSet, g_pendingClear; // block changes from Minecraft, applied on the next tick
+
 		void handle(const std::string &m)
 		{
-			if (m.find("\"t\":\"mcpos\"") != std::string::npos)
+			if (m.find("\"t\":\"blocks\"") != std::string::npos)
+			{
+				json_ints(m, "set", g_pendingSet);
+				json_ints(m, "clear", g_pendingClear);
+			}
+			else if (m.find("\"t\":\"mcpos\"") != std::string::npos)
 			{
 				double eye[3];
 				if (json_vec3(m, "eye", eye))
@@ -645,6 +839,39 @@ namespace nc
 				g_nextHide = 0;
 				log(L"Minecraft says hello (pid " + std::to_wstring(g_mcPid) + L")");
 			}
+		}
+
+		/// Actual gameplay: not HN's main menu (the Start map) and not paused. Minecraft shows only then.
+		bool in_gameplay(UObject *pc)
+		{
+			static UObject *lastPc = nullptr;
+			static bool menu = false;
+			if (pc != lastPc)
+			{
+				lastPc = pc;
+				menu = pc->GetFullName().find(L"/Maps/Start.") != StringType::npos;
+			}
+			if (menu)
+				return false;
+			Call paused(pc, STR("IsPaused"));
+			if (paused.invoke())
+				if (const uint8_t *p = paused.param<uint8_t>(STR("ReturnValue")); p && *p)
+					return false;
+			return true;
+		}
+
+		/// HN's first-person arms and body are hidden while Minecraft's hand is shown, and come back otherwise.
+		void set_player_hidden(UObject *pawn, bool hidden)
+		{
+			static UObject *lastPawn = nullptr;
+			static bool lastHidden = false;
+			static DWORD next = 0;
+			if (!pawn || (pawn == lastPawn && hidden == lastHidden && GetTickCount() < next))
+				return;
+			lastPawn = pawn;
+			lastHidden = hidden;
+			next = GetTickCount() + 1000; // HN may show it again: re-apply now and then
+			Call(pawn, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), hidden).invoke();
 		}
 
 		void forward_key(int vk, const char *key)
@@ -758,8 +985,9 @@ namespace nc
 			handle(message);
 
 		Camera cam;
-		const bool live = g_enabled && g_ws.connected() && pawn && read_camera(pc, cam);
+		const bool live = g_enabled && g_ws.connected() && pawn && in_gameplay(pc) && read_camera(pc, cam);
 		compositor::set_active(live);
+		set_player_hidden(pawn, live);
 		if (!live)
 		{
 			if (pawn)
@@ -768,6 +996,28 @@ namespace nc
 				hn_movement(pawn, true);
 			g_driving = false;
 			return;
+		}
+
+		// a new level (or the same one reloaded after being caught): its colliders went with the old one
+		if (pc != g_colliderLevel)
+		{
+			destroy_colliders(false);
+			g_cells.clear();
+			g_colliderLevel = pc;
+			if (g_haveOffset)
+				g_ws.send("{\"t\":\"blocksync\",\"r\":64}");
+			static bool dumped = false;
+			if (!dumped)
+			{
+				dumped = true;
+				dump(pc, pawn);
+			}
+		}
+		if (!g_pendingSet.empty() || !g_pendingClear.empty())
+		{
+			apply_blocks(pawn, g_pendingSet, g_pendingClear);
+			g_pendingSet.clear();
+			g_pendingClear.clear();
 		}
 
 		Vec3f p;

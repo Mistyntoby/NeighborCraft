@@ -2,7 +2,11 @@ package dev.neighborcraft.client.mixin;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.neighborcraft.Passthrough;
+import com.mojang.blaze3d.vertex.PoseStack;
 import dev.neighborcraft.client.FrameExporter;
+import dev.neighborcraft.client.PlayerSync;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -10,12 +14,41 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** No sky while a host is attached (the host's sky shows through), and the frame is split into world and overlay layers. */
+/**
+ * No sky while a host is attached (the host's sky shows through), no view bob on the world (only on the hand), and
+ * the frame is split into world and overlay layers.
+ */
 @Mixin(GameRenderer.class)
 abstract class GameRendererMixin {
 	@Shadow @Final private RenderTarget mainRenderTarget;
+
+	@Shadow
+	private void bobView(final CameraRenderState state, final PoseStack poseStack) {
+	}
+
+	/** The world isn't bobbed while attached: its camera has to stay exactly on the host's. */
+	@Redirect(
+		method = "renderLevel",
+		at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GameRenderer;bobView(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lcom/mojang/blaze3d/vertex/PoseStack;)V")
+	)
+	private void passthrough$noWorldBob(final GameRenderer self, final CameraRenderState state, final PoseStack poseStack) {
+		if (!Passthrough.active) {
+			this.bobView(state, poseStack);
+		}
+	}
+
+	/** The hand bobs as it does when walking in Minecraft, from the host's movement. */
+	@Inject(method = "bobView", at = @At("HEAD"))
+	private void passthrough$handBob(final CameraRenderState state, final PoseStack poseStack, final CallbackInfo ci) {
+		if (Passthrough.active && !Passthrough.driving && state.entityRenderState != null) {
+			float[] b = PlayerSync.handBob(Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(true));
+			state.entityRenderState.backwardsInterpolatedWalkDistance = b[0];
+			state.entityRenderState.bob = b[1];
+		}
+	}
 
 	@ModifyArg(
 		method = "renderLevel",

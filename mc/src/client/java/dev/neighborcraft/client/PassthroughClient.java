@@ -127,7 +127,8 @@ public class PassthroughClient implements ClientModInitializer {
 		options.onboardAccessibility = false;
 		options.tutorialStep = TutorialSteps.NONE;
 		options.cloudStatus().set(CloudStatus.OFF);
-		options.bobView().set(false);
+		// the hand bobs as in Minecraft; the world never does while attached (GameRendererMixin)
+		options.bobView().set(true);
 		options.vignette().set(false);
 		options.improvedTransparency().set(false);
 		options.inactivityFpsLimit().set(InactivityFpsLimit.MINIMIZED);
