@@ -43,9 +43,9 @@ namespace nc
 		constexpr int kPort = 25620;
 		constexpr float kHostNear = 0.1f;      // HN's NearClipPlane (10 uu); Unreal's far plane is infinite
 		// The voxels: cells around the player, nearest first, probed a few per tick.
-		constexpr int kVoxRadius = 9;          // blocks, horizontally
-		constexpr int kVoxBelow = 2, kVoxAbove = 4;
-		constexpr int kVoxQueriesPerTick = 160;
+		constexpr int kVoxRadius = 7;          // blocks, horizontally
+		constexpr int kVoxBelow = 2, kVoxAbove = 3;  // relative to the block the feet are in
+		constexpr int kVoxQueriesPerTick = 400;
 		constexpr int kVoxRefreshRadius = 3;   // cells this close are re-probed (doors open and close)
 		constexpr DWORD kVoxRefreshMs = 1500;
 		constexpr int kDriveReadyRadius = 2;   // cells known around the player before Minecraft takes over
@@ -64,7 +64,7 @@ namespace nc
 
 		// driving
 		bool g_driving = false;
-		bool g_gridPhysics = false;  // F10
+		bool g_gridPhysics = true;   // F10: Minecraft moves the player (else HN does, with Minecraft's numbers)
 		bool g_haveEye = false;
 		Vec3f g_eye;                 // Minecraft's eye, Unreal coordinates
 		bool g_placed = false;
@@ -80,7 +80,7 @@ namespace nc
 		// voxels: cell -> solid, and when it was probed
 		struct Cell
 		{
-			bool solid;
+			unsigned long long signature; // 0 empty, 1 full, otherwise a hash of the partial shape
 			DWORD probed;
 		};
 		std::unordered_map<unsigned long long, Cell> g_cells;
@@ -334,9 +334,8 @@ namespace nc
 			int32 num;
 			int32 max;
 		};
-		// EObjectTypeQuery: ObjectTypeQuery1 = WorldStatic, ObjectTypeQuery2 = WorldDynamic (not pawns, not physics props)
-		const uint8_t kSolidTypes[] = {0, 1};
-		/// Actors the world probes don't see: our own colliders for Minecraft's blocks (they aren't HN's world).
+		/// Actors the world probes don't see: our own colliders for Minecraft's blocks (they aren't HN's world), the
+		/// Neighbor (he moves), and what the player carries.
 		std::vector<UObject *> g_probeIgnore;
 
 		ScriptArray ignore_list()
@@ -371,46 +370,6 @@ namespace nc
 			c.invoke();
 			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
 			return ok && *ok && impact_point(c, hit);
-		}
-
-		/// A line trace against HN's static and dynamic world (walls, doors, furniture), not pawns or loose props.
-		bool solid_line(UObject *self, const Vec3f &a, const Vec3f &b)
-		{
-			Call c(kismet(), STR("LineTraceSingleForObjects"));
-			if (!c)
-				return false;
-			c.set<UObject *>(STR("WorldContextObject"), self)
-				.set(STR("Start"), a)
-				.set(STR("End"), b)
-				.set(STR("ObjectTypes"), ScriptArray{kSolidTypes, 2, 2})
-				.set(STR("ActorsToIgnore"), ignore_list())
-				.set_bool(STR("bTraceComplex"), false)
-				.set<uint8_t>(STR("DrawDebugType"), 0)
-				.set_bool(STR("bIgnoreSelf"), true);
-			c.invoke();
-			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
-			return ok && *ok;
-		}
-
-		/// Whether HN's world overlaps a box (centre, half size in cm): a box sweep over 2 cm reports what it starts in.
-		bool solid_box(UObject *self, const Vec3f &centre, const Vec3f &half)
-		{
-			Call c(kismet(), STR("BoxTraceSingleForObjects"));
-			if (!c)
-				return false;
-			c.set<UObject *>(STR("WorldContextObject"), self)
-				.set(STR("Start"), Vec3f{centre.x, centre.y, centre.z + 1.0f})
-				.set(STR("End"), Vec3f{centre.x, centre.y, centre.z - 1.0f})
-				.set(STR("HalfSize"), half)
-				.set(STR("Orientation"), Rot3f{})
-				.set(STR("ObjectTypes"), ScriptArray{kSolidTypes, 2, 2})
-				.set(STR("ActorsToIgnore"), ignore_list())
-				.set_bool(STR("bTraceComplex"), false)
-				.set<uint8_t>(STR("DrawDebugType"), 0)
-				.set_bool(STR("bIgnoreSelf"), true);
-			c.invoke();
-			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
-			return ok && *ok;
 		}
 
 		bool ground_below(UObject *pawn, const Vec3f &at, float &groundZ)
@@ -495,11 +454,28 @@ namespace nc
 			return c;
 		}
 
+		std::vector<UObject *> g_extraIgnore; // the Neighbor and what the player carries, refreshed every second
+
 		void rebuild_probe_ignore()
 		{
-			g_probeIgnore.clear();
+			g_probeIgnore = g_extraIgnore;
 			for (auto &[key, actor] : g_colliders)
 				g_probeIgnore.push_back(actor);
+		}
+
+		void refresh_probe_ignore(UObject *pawn)
+		{
+			static DWORD next = 0;
+			if (GetTickCount() < next)
+				return;
+			next = GetTickCount() + 1000;
+			g_extraIgnore = find_all(L"BP_Sosed_C");
+			Call attached(pawn, STR("GetAttachedActors"));
+			if (attached.invoke())
+				if (auto *list = attached.param<ScriptArray>(STR("OutActors")); list && list->data)
+					for (int32 i = 0; i < list->num; ++i)
+						g_extraIgnore.push_back(static_cast<UObject *const *>(list->data)[i]);
+			rebuild_probe_ignore();
 		}
 
 		UObject *spawn_collider(UObject *context, const Vec3f &centre)
@@ -572,26 +548,119 @@ namespace nc
 			rebuild_probe_ignore();
 		}
 
-		// ---- voxels ------------------------------------------------------------------------------------------
+		// ---- HN's world as host blocks ------------------------------------------------------------------------
+		// Each block around the player is probed against what blocks a player in HN (the "Pawn" collision profile:
+		// walls, floors, furniture, closed doors; not triggers, not the Neighbor). Empty blocks stay air, solid ones
+		// become host blocks, and blocks that HN geometry only crosses are subdivided down to 1/8 block (12.5 cm): an
+		// 8x8x8 mask that Minecraft turns into the block's collision shape, so walls and floors sit where they really are.
 
-		/// Cell (x, y, z) is solid if HN's world fills its middle (floors, furniture), or a wall crosses it: traces from
-		/// its centre towards each side, reaching 2 cm past the +x/+z faces and stopping 2 cm short of the -x/-z ones, so
-		/// a thin wall on a cell boundary goes to exactly one of the two cells.
-		bool probe_cell(UObject *pawn, int x, int y, int z)
+		/// Whether HN's world blocks a player anywhere in a box (centre and half size in cm).
+		bool blocks_player(UObject *self, const Vec3f &centre, const Vec3f &half)
 		{
-			const Vec3f c = to_ue(x + 0.5, y + 0.5, z + 0.5);
-			if (solid_box(pawn, c, {40.0f, 40.0f, 45.0f}))
-				return true;
-			const float reach[4][2] = {{52, 0}, {-48, 0}, {0, 52}, {0, -48}};
-			for (const auto &r : reach)
-				if (solid_line(pawn, c, {c.x + r[0], c.y + r[1], c.z}))
-					return true;
-			return false;
+			Call c(kismet(), STR("BoxTraceSingleByProfile"));
+			if (!c)
+				return false;
+			static const NameParam pawnProfile = name_param(STR("Pawn"));
+			c.set<UObject *>(STR("WorldContextObject"), self)
+				.set(STR("Start"), Vec3f{centre.x, centre.y, centre.z + 0.5f})
+				.set(STR("End"), Vec3f{centre.x, centre.y, centre.z - 0.5f})
+				.set(STR("HalfSize"), half)
+				.set(STR("Orientation"), Rot3f{})
+				.set(STR("ProfileName"), pawnProfile)
+				.set(STR("ActorsToIgnore"), ignore_list())
+				.set_bool(STR("bTraceComplex"), false)
+				.set<uint8_t>(STR("DrawDebugType"), 0)
+				.set_bool(STR("bIgnoreSelf"), true);
+			c.invoke();
+			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
+			return ok && *ok;
 		}
 
-		/// Probe the cells around the player that are unknown, or near and stale, nearest first; send the changes.
-		/// Returns whether every cell within kDriveReadyRadius is known.
-		bool sample_voxels(UObject *pawn, const Vec3f &feet)
+		struct BlockProbe
+		{
+			UObject *self;
+			Vec3f origin;      // the block's minimum corner, Unreal cm
+			uint8_t bits[64];  // bit z of byte x * 8 + y: sub-cell (x, y, z), Minecraft axes, 8 per block
+			int queries;
+		};
+
+		/// Sub-cube (x, y, z) of size n (in 1/8 block, Minecraft axes) as an Unreal box: Minecraft x -> Unreal x,
+		/// Minecraft z -> Unreal y, Minecraft y -> Unreal z.
+		bool probe_node(BlockProbe &p, int x, int y, int z, int n)
+		{
+			const float s = 12.5f;
+			const Vec3f c{p.origin.x + (x + n * 0.5f) * s, p.origin.y + (z + n * 0.5f) * s, p.origin.z + (y + n * 0.5f) * s};
+			const float h = n * s * 0.5f - 0.5f; // a hair inside, so a surface exactly on the edge isn't counted twice
+			++p.queries;
+			return blocks_player(p.self, c, {h, h, h});
+		}
+
+		void fill_node(BlockProbe &p, int x, int y, int z, int n)
+		{
+			for (int i = x; i < x + n; ++i)
+				for (int j = y; j < y + n; ++j)
+					for (int k = z; k < z + n; ++k)
+						p.bits[i * 8 + j] |= uint8_t(1u << k);
+		}
+
+		void subdivide(BlockProbe &p, int x, int y, int z, int n)
+		{
+			if (!probe_node(p, x, y, z, n))
+				return;
+			if (n == 1)
+			{
+				fill_node(p, x, y, z, 1);
+				return;
+			}
+			const int h = n / 2;
+			for (int i = 0; i < 8; ++i)
+				subdivide(p, x + (i & 1) * h, y + (i >> 1 & 1) * h, z + (i >> 2 & 1) * h, h);
+		}
+
+		/// 0: nothing of HN's in block (x, y, z); 1: all of it; 2: part of it (mask in `hex`).
+		int probe_block(UObject *pawn, int x, int y, int z, std::string &hex, int &queries)
+		{
+			BlockProbe p{pawn, to_ue(x, y, z), {}, 0};
+			int kind = 0;
+			if (probe_node(p, 0, 0, 0, 8))
+			{
+				// solid through and through (inside a wall or the ground): its corners and middle are all inside
+				bool full = true;
+				for (int i = 0; i < 9 && full; ++i)
+				{
+					const int cx = i == 8 ? 4 : (i & 1) * 7, cy = i == 8 ? 4 : (i >> 1 & 1) * 7, cz = i == 8 ? 4 : (i >> 2 & 1) * 7;
+					full = probe_node(p, cx, cy, cz, 1);
+				}
+				if (full)
+					kind = 1;
+				else
+				{
+					for (int i = 0; i < 8; ++i)
+						subdivide(p, (i & 1) * 4, (i >> 1 & 1) * 4, (i >> 2 & 1) * 4, 4);
+					int set = 0;
+					for (uint8_t b : p.bits)
+						set += std::popcount(b);
+					kind = set == 0 ? 0 : set == 512 ? 1 : 2;
+				}
+			}
+			queries += p.queries;
+			if (kind == 2)
+			{
+				static const char digits[] = "0123456789abcdef";
+				hex.resize(128);
+				for (int i = 0; i < 64; ++i)
+				{
+					hex[i * 2] = digits[p.bits[i] >> 4];
+					hex[i * 2 + 1] = digits[p.bits[i] & 15];
+				}
+			}
+			return kind;
+		}
+
+		/// Probe the blocks around the player that are unknown, or near and stale, nearest first; send the changes.
+		/// `eye`: the player's eyes (cm); blocks Steve's own body overlaps are skipped (HN's arms and held things).
+		/// Returns whether every block within kDriveReadyRadius is known.
+		bool sample_world(UObject *pawn, const Vec3f &eye)
 		{
 			if (g_voxOffsets.empty())
 			{
@@ -605,11 +674,11 @@ namespace nc
 				for (auto &[d, dx, dy, dz] : all)
 					g_voxOffsets.insert(g_voxOffsets.end(), {dx, dy, dz});
 			}
-			double fx, fy, fz;
-			to_mc(feet, fx, fy, fz);
-			const int px = int(std::floor(fx)), py = int(std::floor(fy + 0.01)), pz = int(std::floor(fz));
+			double ex, ey, ez;
+			to_mc(eye, ex, ey, ez);
+			const int px = int(std::floor(ex)), py = int(std::floor(ey - 1.62)), pz = int(std::floor(ez));
 			const DWORD now = GetTickCount();
-			std::string solid, empty;
+			std::string cells, masks, hex;
 			int queries = 0;
 			bool ready = true;
 			for (size_t i = 0; i < g_voxOffsets.size() && queries < kVoxQueriesPerTick; i += 3)
@@ -623,24 +692,25 @@ namespace nc
 					continue;
 				if (it == g_cells.end() && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
 					ready = false;
-				// cells the player's own capsule overlaps are never solid: what HN probes there is the player's arms and
-				// held items (Minecraft then outlined invisible blocks around the face)
-				const Vec3f lo = to_ue(x, y, z), hi = to_ue(x + 1, y + 1, z + 1);
-				const bool inPlayer = lo.x < feet.x + 40.0f && hi.x > feet.x - 40.0f && lo.y < feet.y + 40.0f && hi.y > feet.y - 40.0f &&
-									  lo.z < feet.z + 95.0f && hi.z > feet.z - 95.0f;
-				queries += inPlayer ? 0 : 5;
-				const bool s = !inPlayer && probe_cell(pawn, x, y, z);
-				if (it == g_cells.end() || it->second.solid != s)
+				// Steve's body (0.6 wide, from his feet to just above his eyes) is never HN's world
+				const bool inPlayer = x + 1 > ex - 0.35 && x < ex + 0.35 && z + 1 > ez - 0.35 && z < ez + 0.35 && y + 1 > ey - 1.5 &&
+									  y < ey + 0.25;
+				hex.clear();
+				const int kind = inPlayer ? 0 : probe_block(pawn, x, y, z, hex, queries);
+				const unsigned long long sig = kind == 2 ? std::hash<std::string>()(hex) | 3 : kind;
+				if (it == g_cells.end() || it->second.signature != sig)
 				{
-					std::string &list = s ? solid : empty;
-					char entry[48];
-					snprintf(entry, sizeof(entry), "%s%d,%d,%d", list.empty() ? "" : ",", x, y, z);
-					list += entry;
+					char entry[64];
+					snprintf(entry, sizeof(entry), "%s%d,%d,%d,%d", cells.empty() ? "" : ",", x, y, z, kind);
+					cells += entry;
+					if (kind == 2)
+						masks += (masks.empty() ? "\"" : ",\"") + hex + "\"";
 				}
-				g_cells[key] = {s, now};
+				g_cells[key] = {sig, now};
+				queries += 1;
 			}
-			if (!solid.empty() || !empty.empty())
-				g_ws.send("{\"t\":\"vox\",\"s\":[" + solid + "],\"e\":[" + empty + "]}");
+			if (!cells.empty())
+				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "]}");
 			return ready;
 		}
 
@@ -1053,7 +1123,8 @@ namespace nc
 		const float vfov = float(2.0 * std::atan(std::tan(cam.hfov * 3.14159265358979 / 360.0) / aspect) * 180.0 / 3.14159265358979);
 		double cx, cy, cz;
 		to_mc(cam.loc, cx, cy, cz);
-		const float yaw = cam.rot.yaw - 90.0f, pitch = -cam.rot.pitch, roll = cam.rot.roll;
+		// Unreal's roll is clockwise-positive, Minecraft's camera roll counter-clockwise-positive
+		const float yaw = cam.rot.yaw - 90.0f, pitch = -cam.rot.pitch, roll = -cam.rot.roll;
 		compositor::set_host_pose(yaw, pitch, roll, vfov, cx, cy, cz);
 
 		// F10: Minecraft's own physics against the voxels (blocky collision) instead of HN's exact collision
@@ -1062,7 +1133,8 @@ namespace nc
 			g_gridPhysics = !g_gridPhysics;
 			notify(g_gridPhysics ? "Minecraft physics: blocky collision" : "HN collision, Minecraft movement");
 		}
-		const bool ready = sample_voxels(pawn, p);
+		refresh_probe_ignore(pawn);
+		const bool ready = sample_world(pawn, g_driving && g_haveEye ? g_eye : cam.loc);
 		if (g_gridPhysics && !g_driving && ready)
 		{
 			// the house around the player is known: Minecraft takes over the walking

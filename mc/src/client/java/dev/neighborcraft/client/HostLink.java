@@ -20,7 +20,7 @@ import org.java_websocket.server.WebSocketServer;
  * <li>{"t":"cam","f":frame,"p":[x,y,z],"r":[yaw,pitch,roll],"fov":vertical degrees,"fp":first person,"pl":[feet x,y,z],"h":body yaw}</li>
  * <li>{"t":"ground","c":[x,z,yBottom,yTop, ...]}: solid columns (barriers)</li>
  * <li>{"t":"clear"}: remove the barriers placed so far</li>
- * <li>{"t":"vox","s":[x,y,z, ...],"e":[x,y,z, ...]}: cells the host found solid (barriers) and empty (our barriers removed)</li>
+ * <li>{"t":"shape","c":[x,y,z,kind, ...],"m":[hex, ...]}: HN's geometry per block (see WorldBridge.shapes)</li>
  * <li>{"t":"tp","p":[x,y,z]}: put the player's feet here (before Minecraft starts moving it)</li>
  * <li>{"t":"move","m":bits}: movement keys held in the host (Minecraft moves the player; see ClientInput)</li>
  * <li>{"t":"blocksync","r":radius}: report every solid block near the player (the host rebuilds its colliders)</li>
@@ -79,7 +79,15 @@ public final class HostLink extends WebSocketServer {
 				case "clear" -> WorldBridge.clearSolid();
 				case "cmd" -> WorldBridge.command(m.get("c").getAsString());
 				case "blocksync" -> WorldBridge.sync(m.has("r") ? m.get("r").getAsInt() : 48);
-				case "vox" -> WorldBridge.voxels(ints(m.getAsJsonArray("s")), ints(m.getAsJsonArray("e")));
+				case "shape" -> {
+					JsonArray masks = m.has("m") ? m.getAsJsonArray("m") : new JsonArray();
+					String[] hex = new String[masks.size()];
+					for (int i = 0; i < hex.length; i++) {
+						hex[i] = masks.get(i).getAsString();
+					}
+
+					WorldBridge.shapes(ints(m.getAsJsonArray("c")), hex);
+				}
 				case "tp" -> {
 					JsonArray at = m.getAsJsonArray("p");
 					WorldBridge.command(String.format(Locale.ROOT, "tp @a %.3f %.3f %.3f", at.get(0).getAsDouble(), at.get(1).getAsDouble(), at.get(2).getAsDouble()));

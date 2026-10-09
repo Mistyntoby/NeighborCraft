@@ -70,11 +70,15 @@ public final class WorldBridge {
 		});
 	}
 
+	/** Host blocks we placed (HN's world): removed on a re-level, never reported back as the player's blocks. */
+	private static final Set<BlockPos> hosts = ConcurrentHashMap.newKeySet();
+
 	/**
-	 * The host's world as voxels: cells {x, y, z, ...} it found solid become barriers (only where there's air), and
-	 * cells it found empty lose our barrier (a door opened). Blocks the player placed are never touched.
+	 * HN's world, block by block: {"t":"shape","c":[x,y,z,kind, ...],"m":[hex, ...]}. kind 0: nothing of HN's there
+	 * (our host block goes), 1: HN fills the whole block, 2: HN fills part of it (the next mask in "m", 8x8x8 bits).
+	 * Only air and our own host blocks are ever replaced; the player's blocks are never touched.
 	 */
-	public static void voxels(final int[] solid, final int[] empty) {
+	public static void shapes(final int[] cells, final String[] masks) {
 		MinecraftServer s = server;
 		if (s == null) {
 			return;
@@ -82,21 +86,41 @@ public final class WorldBridge {
 
 		s.execute(() -> {
 			ServerLevel level = s.overworld();
-			BlockState barrier = Blocks.BARRIER.defaultBlockState();
+			BlockState host = Passthrough.HOST.defaultBlockState();
 			BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 			placingGround = true;
-			for (int i = 0; i + 2 < solid.length; i += 3) {
-				pos.set(solid[i], solid[i + 1], solid[i + 2]);
-				if (level.isInWorldBounds(pos) && level.getBlockState(pos).isAir()) {
-					level.setBlock(pos, barrier, Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
-					barriers.add(pos.immutable());
+			int mask = 0;
+			for (int i = 0; i + 3 < cells.length; i += 4) {
+				pos.set(cells[i], cells[i + 1], cells[i + 2]);
+				int kind = cells[i + 3];
+				if (!level.isInWorldBounds(pos)) {
+					if (kind == 2) {
+						mask++;
+					}
+					continue;
 				}
-			}
 
-			for (int i = 0; i + 2 < empty.length; i += 3) {
-				pos.set(empty[i], empty[i + 1], empty[i + 2]);
-				if (barriers.remove(pos) && level.getBlockState(pos).is(Blocks.BARRIER)) {
-					level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+				BlockState current = level.getBlockState(pos);
+				boolean ours = current.is(Passthrough.HOST);
+				if (kind == 0) {
+					if (ours) {
+						level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+					}
+
+					HostBlock.SHAPES.remove(pos.asLong());
+					hosts.remove(pos);
+					continue;
+				}
+
+				if (kind == 2) {
+					HostBlock.SHAPES.put(pos.asLong(), HostBlock.fromMask(masks[mask++]));
+				} else {
+					HostBlock.SHAPES.remove(pos.asLong());
+				}
+
+				if (current.isAir() || current.is(Blocks.BARRIER)) {
+					level.setBlock(pos, host, Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+					hosts.add(pos.immutable());
 				}
 			}
 
@@ -120,8 +144,16 @@ public final class WorldBridge {
 				}
 			}
 
+			for (BlockPos pos : hosts) {
+				if (level.getBlockState(pos).is(Passthrough.HOST)) {
+					level.setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE);
+				}
+			}
+
 			placingGround = false;
 			barriers.clear();
+			hosts.clear();
+			HostBlock.SHAPES.clear();
 		});
 	}
 
@@ -139,7 +171,7 @@ public final class WorldBridge {
 	}
 
 	private static boolean solidForHost(final ServerLevel level, final BlockPos pos, final BlockState state) {
-		return !state.isAir() && !state.is(Blocks.BARRIER) && !state.getCollisionShape(level, pos).isEmpty();
+		return !state.isAir() && !state.is(Blocks.BARRIER) && !state.is(Passthrough.HOST) && !state.getCollisionShape(level, pos).isEmpty();
 	}
 
 	/** Every server tick: send the block changes. */

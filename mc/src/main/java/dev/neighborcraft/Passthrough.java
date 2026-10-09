@@ -1,6 +1,14 @@
 package dev.neighborcraft;
 
 import java.util.function.Consumer;
+import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -16,9 +24,17 @@ public class Passthrough implements ModInitializer {
 	public static volatile boolean driving;
 	/** Where events for the host go (JSON lines); the client's HostLink sets it. */
 	public static volatile Consumer<String> events = message -> {};
+	/** Hello Neighbor's world: invisible blocks shaped like HN's geometry (see HostBlock). */
+	public static Block HOST;
 
 	@Override
 	public void onInitialize() {
+		ResourceKey<Block> key = ResourceKey.create(Registries.BLOCK, Identifier.fromNamespaceAndPath(ID, "host"));
+		HOST = Registry.register(BuiltInRegistries.BLOCK, key, new HostBlock(BlockBehaviour.Properties.of()
+			.setId(key).strength(-1.0F, 3600000.0F).noLootTable().noOcclusion().dynamicShape()
+			.isSuffocating((state, level, pos) -> false)));
+		// HN's world can't be broken from Minecraft (creative would otherwise break it instantly)
+		PlayerBlockBreakEvents.BEFORE.register((level, player, pos, state, entity) -> !state.is(HOST));
 		ServerLifecycleEvents.SERVER_STARTED.register(WorldBridge::attach);
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> WorldBridge.detach());
 		ServerTickEvents.END_SERVER_TICK.register(WorldBridge::tick);
