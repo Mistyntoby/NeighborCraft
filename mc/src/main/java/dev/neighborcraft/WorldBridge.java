@@ -31,7 +31,21 @@ public final class WorldBridge {
 		server = s;
 	}
 
+	/** The world is loaded and the player has joined: what the host sends now takes effect. */
+	private static volatile boolean playerReady;
+
+	public static boolean playerReady() {
+		return playerReady;
+	}
+
+	/** Tell the host the world is ready: it (re)sends its world, then starts the player. */
+	public static void markReady() {
+		playerReady = true;
+		Passthrough.events.accept("{\"t\":\"ready\"}");
+	}
+
 	static void detach() {
+		playerReady = false;
 		server = null;
 		barriers.clear();
 	}

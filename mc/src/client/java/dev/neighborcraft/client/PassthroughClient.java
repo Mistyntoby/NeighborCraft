@@ -87,6 +87,8 @@ public class PassthroughClient implements ClientModInitializer {
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
 			if (setupIn > 0 && --setupIn == 0) {
 				SETUP.forEach(WorldBridge::command);
+				// after the setup commands (queued on this same server thread): Hello Neighbor may now send its world
+				server.execute(WorldBridge::markReady);
 			}
 		});
 	}

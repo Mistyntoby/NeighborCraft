@@ -267,6 +267,7 @@ namespace
 	bool g_boundIsBackBuffer = false;
 	bool g_sceneDrawn = false;
 	bool g_renderedThisFrame = false;
+	int g_backBufferDraws = 0; // diagnostics
 
 	/// Everything a D3D11 draw depends on: Unreal's RHI caches the state it set, so what ReShade's passes change must be
 	/// put back exactly (same idea as the state backup in Dear ImGui's D3D11 backend).
@@ -388,7 +389,10 @@ namespace
 	/// Before every draw: at the second draw into the back buffer (HN's UI begins), composite Minecraft first.
 	bool before_draw(command_list *cmd_list)
 	{
-		if (!g_boundIsBackBuffer || g_renderedThisFrame || g_runtime == nullptr || g_runtime->get_device()->get_api() != device_api::d3d11)
+		if (!g_boundIsBackBuffer)
+			return false;
+		++g_backBufferDraws;
+		if (g_renderedThisFrame || g_runtime == nullptr || g_runtime->get_device()->get_api() != device_api::d3d11)
 			return false;
 		if (!g_sceneDrawn)
 		{
@@ -422,13 +426,28 @@ namespace
 	void on_present(effect_runtime *runtime)
 	{
 		watch_effect_file(runtime); // every frame, even when the effect failed to compile
+		g_runtime = runtime; // registered after ReShade created its runtime: init_effect_runtime never came
+		// what the hook saw, now and then (ReShade.log)
+		static int frames = 0, early = 0;
+		++frames;
+		early += g_renderedThisFrame ? 1 : 0;
+		if (frames == 600)
+		{
+			char text[160];
+			snprintf(text, sizeof(text), "NeighborCraft: Minecraft composited before HN's UI in %d of %d frames (back buffer draws last frame: %d)",
+				early, frames, g_backBufferDraws);
+			reshade::log::message(reshade::log::level::info, text);
+			frames = early = 0;
+		}
 		// the next frame starts: look for its scene pass and its first UI draw again
 		g_sceneDrawn = false;
 		g_renderedThisFrame = false;
+		g_backBufferDraws = 0;
 	}
 
 	void on_begin_effects(effect_runtime *runtime, command_list *, resource_view, resource_view)
 	{
+		g_runtime = runtime;
 		uint32_t bw = 0, bh = 0;
 		runtime->get_screenshot_width_and_height(&bw, &bh);
 		g_bbWidth = bw;

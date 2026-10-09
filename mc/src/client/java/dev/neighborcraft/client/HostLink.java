@@ -28,7 +28,7 @@ import org.java_websocket.server.WebSocketServer;
  * <li>{"t":"key","k":"use|attack|pick|inventory|drop|swap|escape","down":bool}</li>
  * <li>{"t":"slot","n":0-8}, {"t":"scroll","d":+-1}, {"t":"hud","hidden":bool}, {"t":"view","w":px,"h":px}</li>
  * </ul>
- * Minecraft to host: {"t":"hello",...} on connect, {"t":"blocks","set":[...],"clear":[...]}, {"t":"explosion",...},
+ * Minecraft to host: {"t":"hello",...} on connect, {"t":"ready"} once its world is loaded and the player joined, {"t":"blocks","set":[...],"clear":[...]}, {"t":"explosion",...},
  * {"t":"pteleport","pos":[x,y,z]}. Messages of type "dev" are relayed unchanged to the other clients (test tools).
  */
 public final class HostLink extends WebSocketServer {
@@ -62,6 +62,9 @@ public final class HostLink extends WebSocketServer {
 	public void onOpen(final WebSocket conn, final ClientHandshake handshake) {
 		Passthrough.LOG.info("host connected from {}", conn.getRemoteSocketAddress());
 		conn.send(String.format(Locale.ROOT, "{\"t\":\"hello\",\"v\":1,\"shm\":\"%s\",\"pid\":%d}", FrameExporter.NAME.replace("\\", "\\\\"), ProcessHandle.current().pid()));
+		if (WorldBridge.playerReady()) {
+			conn.send("{\"t\":\"ready\"}");
+		}
 	}
 
 	@Override

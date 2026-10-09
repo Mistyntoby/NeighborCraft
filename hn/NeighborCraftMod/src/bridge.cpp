@@ -59,6 +59,7 @@ namespace nc
 		long long g_frame = 0;
 		double g_yOffset = 0.0;
 		bool g_haveOffset = false;
+		bool g_mcReady = false; // Minecraft's world is loaded and its player joined (its "ready" message)
 		int g_viewW = 0, g_viewH = 0;
 		bool g_keyDown[256] = {};
 
@@ -334,8 +335,8 @@ namespace nc
 			int32 num;
 			int32 max;
 		};
-		/// Actors the world probes don't see: our own colliders for Minecraft's blocks (they aren't HN's world), the
-		/// Neighbor (he moves), and what the player carries.
+		/// Actors the world probes don't see: our own colliders for Minecraft's blocks (they aren't HN's world) and the
+		/// Neighbor (he moves).
 		std::vector<UObject *> g_probeIgnore;
 
 		ScriptArray ignore_list()
@@ -454,7 +455,7 @@ namespace nc
 			return c;
 		}
 
-		std::vector<UObject *> g_extraIgnore; // the Neighbor and what the player carries, refreshed every second
+		std::vector<UObject *> g_extraIgnore; // the Neighbor, refreshed every second
 
 		void rebuild_probe_ignore()
 		{
@@ -469,12 +470,9 @@ namespace nc
 			if (GetTickCount() < next)
 				return;
 			next = GetTickCount() + 1000;
+			// only the Neighbor, who lives as long as the level: anything that may be destroyed within the second would
+			// leave a dangling pointer in the traces (what the player carries is skipped by the probe's body check)
 			g_extraIgnore = find_all(L"BP_Sosed_C");
-			Call attached(pawn, STR("GetAttachedActors"));
-			if (attached.invoke())
-				if (auto *list = attached.param<ScriptArray>(STR("OutActors")); list && list->data)
-					for (int32 i = 0; i < list->num; ++i)
-						g_extraIgnore.push_back(static_cast<UObject *const *>(list->data)[i]);
 			rebuild_probe_ignore();
 		}
 
@@ -1065,7 +1063,18 @@ namespace nc
 
 		void handle(const std::string &m)
 		{
-			if (m.find("\"t\":\"blocks\"") != std::string::npos)
+			if (m.find("\"t\":\"ready\"") != std::string::npos)
+			{
+				// a (new) world: everything sent before it was dropped, so send HN's world again from scratch
+				g_mcReady = true;
+				g_cells.clear();
+				g_bits.clear();
+				g_columns.clear();
+				g_dirty.clear();
+				g_driving = false;
+				log(L"Minecraft's world is ready");
+			}
+			else if (m.find("\"t\":\"blocks\"") != std::string::npos)
 			{
 				json_ints(m, "set", g_pendingSet);
 				json_ints(m, "clear", g_pendingClear);
@@ -1094,10 +1103,14 @@ namespace nc
 		{
 			static UObject *lastPc = nullptr;
 			static bool menu = false;
+			static UObject *pauseMenu = nullptr;
+			static DWORD nextFind = 0;
 			if (pc != lastPc)
 			{
 				lastPc = pc;
 				menu = pc->GetFullName().find(L"/Maps/Start.") != StringType::npos;
+				pauseMenu = nullptr; // a new level may come with a new pause menu: find it again
+				nextFind = 0;
 			}
 			if (menu)
 				return false;
@@ -1105,6 +1118,22 @@ namespace nc
 			if (paused.invoke())
 				if (const uint8_t *p = paused.param<uint8_t>(STR("ReturnValue")); p && *p)
 					return false;
+			// HN's own pause menu (BPW_MenuPause): HN doesn't use the engine's pause for it; paused while it shows
+			if (!pauseMenu && GetTickCount() > nextFind)
+			{
+				nextFind = GetTickCount() + 3000;
+				const std::vector<UObject *> menus = find_all(L"BPW_MenuPause_C");
+				pauseMenu = menus.empty() ? nullptr : menus[0];
+				if (pauseMenu)
+					log(L"pause menu: " + pauseMenu->GetFullName());
+			}
+			if (pauseMenu)
+			{
+				Call shown(pauseMenu, STR("IsInViewport"));
+				if (shown.invoke())
+					if (const uint8_t *v = shown.param<uint8_t>(STR("ReturnValue")); v && *v)
+						return false;
+			}
 			return true;
 		}
 
@@ -1288,6 +1317,7 @@ namespace nc
 			// (re)connected: start the world over and show Minecraft's HUD
 			g_generation = g_ws.generation();
 			g_haveOffset = false;
+			g_mcReady = false;
 			g_viewW = g_viewH = 0;
 			g_ws.send("{\"t\":\"hud\",\"hidden\":false}");
 		}
@@ -1325,7 +1355,7 @@ namespace nc
 			notify(g_gridPhysics ? "Minecraft physics: blocky collision" : "HN collision, Minecraft movement");
 		}
 		refresh_probe_ignore(pawn);
-		const bool ready = sample_world(pawn, g_driving && g_haveEye ? g_eye : cam.loc);
+		const bool ready = g_mcReady && sample_world(pawn, g_driving && g_haveEye ? g_eye : cam.loc);
 		if (g_gridPhysics && !g_driving && ready)
 		{
 			// the house around the player is known: Minecraft takes over the walking
@@ -1357,22 +1387,25 @@ namespace nc
 			static DWORD nextGroundCheck = 0;
 			static bool haveGood = false;
 			static Vec3f lastGood;
-			bool underWorld = false;
+			static bool underWorld = false; // until Steve is back on HN's ground, HN's player stays where it is
 			if (g_haveEye && GetTickCount() > nextGroundCheck)
 			{
 				nextGroundCheck = GetTickCount() + 250;
 				float groundZ = 0.0f;
-				if (ground_below(pawn, g_eye, groundZ) && g_eye.z - groundZ < 400.0f)
+				const bool ground = ground_below(pawn, g_eye, groundZ);
+				if (ground && g_eye.z - groundZ < 400.0f)
 				{
 					lastGood = {g_eye.x, g_eye.y, groundZ + 10.0f};
 					haveGood = true;
+					underWorld = false;
 				}
-				else if (!ground_below(pawn, g_eye, groundZ))
+				else if (!ground)
 				{
+					if (!underWorld)
+						log(L"Steve is under HN's world: back to the last ground");
 					underWorld = true;
-					log(L"Steve is under HN's world: back to the last ground");
-					if (haveGood)
-						teleport_minecraft(pawn, lastGood);
+					teleport_minecraft(pawn, haveGood ? lastGood : p);
+					nextGroundCheck = GetTickCount() + 1000; // give the teleport time to land
 				}
 			}
 			// HN's camera goes to Minecraft's eyes: move the pawn by the camera's offset from it
