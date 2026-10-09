@@ -101,3 +101,36 @@ modelled on universal-modder `examples/minecraft-gta5-passthrough`.
 - `hn/build.bat` -> `build\hn`; `hn/install.sh` (+ `--remove`) installs `ue4ss\Mods\NeighborCraftMod\dlls\main.dll`
   and `reshade-shaders\Shaders\NeighborCraft.fx`, and sets the ReShade preset to the NeighborCraft technique
   (old preset kept as `ReShadePreset.ini.neighborcraft-bak`).
+
+## Integration (2026-10-07 .. 10-09)
+### Architecture now
+- Minecraft drives the player (default; F10 toggles HN-collision mode with Minecraft speeds). HN's pawn is a puppet
+  placed at Steve's eyes (MOVE_None). Same split as the SkyCraft (Skyrim) mashup.
+- HN's world in Minecraft: invisible `neighborcraft:host` blocks with per-position VoxelShapes. HN side probes with the
+  **Pawn collision profile** (what really blocks a player): `BoxTraceSingleByProfile` octree down to 1/8 block for
+  walls/furniture, plus 4x4 `LineTraceSingleByProfile` rays per column for floors (every storey). Message `shape`.
+- Minecraft blocks -> HN: one TriggerBox per block, switched to BlockAll 1 m box + `bDynamicObstacle` (navmesh).
+- Compositing runs at HN's second back-buffer draw (start of UI) via `render_effects`, D3D11 state saved/restored.
+- Handshake: Minecraft sends `ready` after its world loaded; HN sends world/teleports only after it.
+- Minecraft pauses (PauseScreen) while HN is in menus/paused (`BPW_MenuPause_C` in viewport; engine pause unused).
+- Minecraft is launched by HN (`tools/start_minecraft.bat`), hidden off-screen, quits 20 s after HN; fresh world each run.
+
+### HN gotchas found
+1. UE4SS class lookups (FindFirstOf/FindAllOf via hash tables) return unrelated objects in HN's custom 4.20 build:
+   set `bForceGUObjectArrayForIteration = true` and verify class chains by name.
+2. FUObjectItem slot/flag checks fail for live objects: never cache UObject* across frames; read
+   GameEngine -> GameInstance -> LocalPlayers[0] -> PlayerController each tick.
+3. Object-type traces hit HN's invisible trigger volumes (phantom blocks): use the Pawn profile.
+4. Box overlaps don't see under a landscape heightfield (only its surface): floors by rays.
+5. Unreal roll is clockwise-positive, Minecraft's camera roll counter-clockwise: negate.
+6. ReShade add-on registered after runtime creation never gets `init_effect_runtime`: take the runtime from per-frame events.
+7. `near` is a Windows macro.
+8. HN player: native class `Human` (BP_Human_C) with `m_fWalkSpeed`/`m_fRunSpeed`; Neighbor: `Sosed` (BP_Sosed_C)
+   with OnStruck/OnHit/SetFreeze/SetState, controlled by SosedAIController (path following, navmesh).
+   Navmeshes `Default` and `SuperMarket` are RuntimeGeneration=DynamicModifiersOnly (verified live).
+9. Crash dumps: `tools/crashinfo.py` (faulting module + game/UE4SS/mod frames on the stack).
+
+### Open
+- Verify in game: floors/standing, pause covering, no crash (latest build untested).
+- Rendering: transparency cause, relighting/shadows, GPU texture sharing, native-geometry evaluation.
+- Neighbor combat (hooks identified), wall breaking.
