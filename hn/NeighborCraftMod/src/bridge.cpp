@@ -665,9 +665,124 @@ namespace nc
 			return kind;
 		}
 
-		/// Probe the blocks around the player that are unknown, or near and stale, nearest first; send the changes.
-		/// `eye`: the player's eyes (cm); blocks Steve's own body overlaps are skipped (HN's arms and held things).
-		/// Returns whether every block within kDriveReadyRadius is known.
+		/// A line trace against what blocks a player in HN (the "Pawn" profile); the impact point on a hit.
+		bool ray_blocks_player(UObject *self, const Vec3f &a, const Vec3f &b, Vec3f &hit)
+		{
+			Call c(kismet(), STR("LineTraceSingleByProfile"));
+			if (!c)
+				return false;
+			static const NameParam pawnProfile = name_param(STR("Pawn"));
+			c.set<UObject *>(STR("WorldContextObject"), self)
+				.set(STR("Start"), a)
+				.set(STR("End"), b)
+				.set(STR("ProfileName"), pawnProfile)
+				.set(STR("ActorsToIgnore"), ignore_list())
+				.set_bool(STR("bTraceComplex"), false)
+				.set<uint8_t>(STR("DrawDebugType"), 0)
+				.set_bool(STR("bIgnoreSelf"), true);
+			c.invoke();
+			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
+			return ok && *ok && impact_point(c, hit);
+		}
+
+		// Floors come from rays, not boxes: box overlaps only see the surface of a landscape heightfield (not the
+		// ground under it) and miss a surface lying exactly on a block boundary. Each 1x1 block column gets 4x4 rays
+		// straight down; every surface a ray meets (each storey: the ray goes on below what it hit) becomes a 1/8-block
+		// solid layer, its top within ~6 cm of the real surface.
+		struct BlockBits
+		{
+			uint8_t box[64] = {};   // from the box probe (walls, furniture)
+			uint8_t floor[64] = {}; // from the column rays
+			bool boxKnown = false;
+		};
+		std::unordered_map<unsigned long long, BlockBits> g_bits;
+		std::unordered_map<unsigned long long, DWORD> g_columns; // column (x, z) -> when its rays were cast
+		std::unordered_set<unsigned long long> g_dirty;          // blocks whose shape may have changed, to send
+
+		int cell_x(unsigned long long key)
+		{
+			return int(int64_t(key << 1) >> 43);
+		}
+
+		int cell_y(unsigned long long key)
+		{
+			return int(int64_t(key << 22) >> 43);
+		}
+
+		int cell_z(unsigned long long key)
+		{
+			return int(int64_t(key << 43) >> 43);
+		}
+
+		/// Cast the rays of column (x, z) between Minecraft heights yLo and yHi; rewrites the floor layers of its blocks.
+		int probe_column(UObject *pawn, int x, int z, int yLo, int yHi)
+		{
+			for (int y = yLo; y < yHi; ++y)
+			{
+				const unsigned long long key = cell_key(x, y, z);
+				BlockBits &b = g_bits[key];
+				std::fill(std::begin(b.floor), std::end(b.floor), uint8_t(0));
+				g_dirty.insert(key);
+			}
+			int queries = 0;
+			for (int i = 0; i < 4; ++i)
+				for (int k = 0; k < 4; ++k)
+				{
+					const double mx = x + (i + 0.5) / 4.0, mz = z + (k + 0.5) / 4.0;
+					Vec3f from = to_ue(mx, yHi, mz);
+					const Vec3f to = to_ue(mx, yLo, mz);
+					for (int surfaces = 0; surfaces < 6; ++surfaces)
+					{
+						Vec3f hit;
+						++queries;
+						if (!ray_blocks_player(pawn, from, to, hit))
+							break;
+						double hx, hy, hz;
+						to_mc(hit, hx, hy, hz);
+						// the 1/8 layer whose top is nearest the surface, in the block that holds it
+						const long layer = long(std::lround(hy * 8.0)) - 1;
+						const int by = int(std::floor(layer / 8.0));
+						const int ly = int(layer - by * 8L);
+						if (by >= yLo && by < yHi)
+						{
+							BlockBits &b = g_bits[cell_key(x, by, z)];
+							for (int sx = i * 2; sx < i * 2 + 2; ++sx)
+								for (int sz = k * 2; sz < k * 2 + 2; ++sz)
+									b.floor[sx * 8 + ly] |= uint8_t(1u << sz);
+						}
+						from = {hit.x, hit.y, hit.z - 3.0f}; // on below this surface: the storey under it
+						if (from.z <= to.z)
+							break;
+					}
+				}
+			return queries;
+		}
+
+		/// The block's shape: what the box probe and the floor rays found. 0 empty, 1 full, 2 partial (mask in `hex`).
+		int block_shape(const BlockBits &b, std::string &hex)
+		{
+			uint8_t bits[64];
+			int set = 0;
+			for (int i = 0; i < 64; ++i)
+				set += std::popcount(bits[i] = uint8_t(b.box[i] | b.floor[i]));
+			if (set == 0)
+				return 0;
+			if (set == 512)
+				return 1;
+			static const char digits[] = "0123456789abcdef";
+			hex.resize(128);
+			for (int i = 0; i < 64; ++i)
+			{
+				hex[i * 2] = digits[bits[i] >> 4];
+				hex[i * 2 + 1] = digits[bits[i] & 15];
+			}
+			return 2;
+		}
+
+		/// Probe the world around the player (column rays for floors, boxes for walls and furniture) for what is
+		/// unknown, or near and stale, nearest first, and send the blocks whose shape changed. `eye`: the player's eyes
+		/// (cm); Steve's own body is never HN's world (HN's arms and held things). Returns whether everything within
+		/// kDriveReadyRadius is known.
 		bool sample_world(UObject *pawn, const Vec3f &eye)
 		{
 			if (g_voxOffsets.empty())
@@ -686,49 +801,91 @@ namespace nc
 			to_mc(eye, ex, ey, ez);
 			const int px = int(std::floor(ex)), py = int(std::floor(ey - 1.62)), pz = int(std::floor(ez));
 			const DWORD now = GetTickCount();
-			std::string cells, masks, hex;
 			int queries = 0;
 			bool ready = true;
+			// floors first: one column per (dx, dz), in the same nearest-first order
+			for (size_t i = 0; i < g_voxOffsets.size() && queries < kVoxQueriesPerTick; i += 3)
+			{
+				const int dx = g_voxOffsets[i], dz = g_voxOffsets[i + 2];
+				if (g_voxOffsets[i + 1] != 0)
+					continue;
+				const unsigned long long col = cell_key(px + dx, 0, pz + dz);
+				auto it = g_columns.find(col);
+				const bool close = std::abs(dx) <= kVoxRefreshRadius && std::abs(dz) <= kVoxRefreshRadius;
+				if (it != g_columns.end() && !(close && now - it->second > kVoxRefreshMs * 3))
+					continue;
+				if (it == g_columns.end() && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
+					ready = false;
+				queries += probe_column(pawn, px + dx, pz + dz, py - kVoxBelow, py + kVoxAbove + 1);
+				g_columns[col] = now;
+			}
+			// then walls and furniture, block by block
+			std::string hex;
 			for (size_t i = 0; i < g_voxOffsets.size() && queries < kVoxQueriesPerTick; i += 3)
 			{
 				const int dx = g_voxOffsets[i], dy = g_voxOffsets[i + 1], dz = g_voxOffsets[i + 2];
 				const int x = px + dx, y = py + dy, z = pz + dz;
 				const unsigned long long key = cell_key(x, y, z);
-				auto it = g_cells.find(key);
+				const auto known = g_bits.find(key);
+				const bool boxKnown = known != g_bits.end() && known->second.boxKnown;
+				const auto it = g_cells.find(key);
 				const bool close = std::abs(dx) <= kVoxRefreshRadius && std::abs(dz) <= kVoxRefreshRadius;
-				if (it != g_cells.end() && !(close && now - it->second.probed > kVoxRefreshMs))
+				if (boxKnown && !(close && it != g_cells.end() && now - it->second.probed > kVoxRefreshMs))
 					continue;
-				if (it == g_cells.end() && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
+				if (!boxKnown && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
 					ready = false;
-				// Steve's body (0.6 wide, from his feet to just above his eyes) is never HN's world
 				const bool inPlayer = x + 1 > ex - 0.35 && x < ex + 0.35 && z + 1 > ez - 0.35 && z < ez + 0.35 && y + 1 > ey - 1.5 &&
 									  y < ey + 0.25;
-				hex.clear();
-				const int kind = inPlayer ? 0 : probe_block(pawn, x, y, z, hex, queries);
-				const unsigned long long sig = kind == 2 ? std::hash<std::string>()(hex) | 3 : kind;
-				if (it == g_cells.end() || it->second.signature != sig)
+				BlockBits &b = g_bits[key];
+				std::fill(std::begin(b.box), std::end(b.box), uint8_t(0));
+				if (!inPlayer)
 				{
-					char entry[64];
-					snprintf(entry, sizeof(entry), "%s%d,%d,%d,%d", cells.empty() ? "" : ",", x, y, z, kind);
-					cells += entry;
-					if (kind == 2)
-						masks += (masks.empty() ? "\"" : ",\"") + hex + "\"";
+					hex.clear();
+					const int kind = probe_block(pawn, x, y, z, hex, queries);
+					if (kind == 1)
+						std::fill(std::begin(b.box), std::end(b.box), uint8_t(0xFF));
+					else if (kind == 2)
+						for (int j = 0; j < 64; ++j)
+							b.box[j] = uint8_t(std::stoi(hex.substr(j * 2, 2), nullptr, 16));
 				}
-				g_cells[key] = {sig, now};
+				b.boxKnown = true;
+				g_dirty.insert(key);
+				auto &cell = g_cells[key];
+				cell.probed = now;
 				queries += 1;
-				++g_probeStats[kind];
 			}
+			// send the blocks whose shape changed
+			std::string cells, masks;
+			for (unsigned long long key : g_dirty)
+			{
+				const auto bit = g_bits.find(key);
+				if (bit == g_bits.end())
+					continue;
+				const int kind = block_shape(bit->second, hex);
+				auto [cell, added] = g_cells.try_emplace(key, Cell{~0ull, 0});
+				const unsigned long long sig = kind == 2 ? (std::hash<std::string>()(hex) | 3) : unsigned(kind);
+				if (!added && cell->second.signature == sig)
+					continue;
+				cell->second.signature = sig;
+				++g_probeStats[kind];
+				char entry[64];
+				snprintf(entry, sizeof(entry), "%s%d,%d,%d,%d", cells.empty() ? "" : ",", cell_x(key), cell_y(key), cell_z(key), kind);
+				cells += entry;
+				if (kind == 2)
+					masks += (masks.empty() ? "\"" : ",\"") + hex + "\"";
+			}
+			g_dirty.clear();
+			if (!cells.empty())
+				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "]}");
 			static DWORD nextStats = 0;
 			if (now > nextStats)
 			{
 				nextStats = now + 5000;
 				if (g_probeStats[0] + g_probeStats[1] + g_probeStats[2] > 0)
-					log(L"probe: " + std::to_wstring(g_probeStats[0]) + L" empty, " + std::to_wstring(g_probeStats[1]) + L" full, " +
+					log(L"world: sent " + std::to_wstring(g_probeStats[0]) + L" empty, " + std::to_wstring(g_probeStats[1]) + L" full, " +
 						std::to_wstring(g_probeStats[2]) + L" partial blocks (last 5 s)");
 				g_probeStats[0] = g_probeStats[1] = g_probeStats[2] = 0;
 			}
-			if (!cells.empty())
-				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "]}");
 			return ready;
 		}
 
@@ -742,6 +899,9 @@ namespace nc
 			g_yOffset = std::round(metres) - metres;
 			g_haveOffset = true;
 			g_cells.clear();
+			g_bits.clear();
+			g_columns.clear();
+			g_dirty.clear();
 			g_driving = false;
 			g_ws.send("{\"t\":\"clear\"}");
 			// the blocks' colliders move with the new offset: rebuild them from Minecraft's blocks
@@ -1073,7 +1233,17 @@ namespace nc
 			handle(message);
 
 		Camera cam;
-		const bool live = g_enabled && g_ws.connected() && pawn && in_gameplay(pc) && read_camera(pc, cam);
+		const bool gameplay = pawn && in_gameplay(pc);
+		// Minecraft pauses whenever HN isn't in gameplay (pause menu, main menu) or the passthrough is off
+		static bool mcPaused = false;
+		if (!g_ws.connected())
+			mcPaused = false; // a restarted Minecraft starts unpaused
+		else if ((gameplay && g_enabled) == mcPaused)
+		{
+			mcPaused = !mcPaused;
+			sendf("{\"t\":\"pause\",\"on\":%s}", mcPaused ? "true" : "false");
+		}
+		const bool live = g_enabled && g_ws.connected() && gameplay && read_camera(pc, cam);
 		compositor::set_active(live);
 		set_player_hidden(pawn, live);
 		if (!live)
@@ -1091,6 +1261,9 @@ namespace nc
 		{
 			destroy_colliders(false);
 			g_cells.clear();
+			g_bits.clear();
+			g_columns.clear();
+			g_dirty.clear();
 			g_colliderLevel = pc;
 			if (g_haveOffset)
 				g_ws.send("{\"t\":\"blocksync\",\"r\":64}");
@@ -1179,8 +1352,31 @@ namespace nc
 				teleport_minecraft(pawn, p);
 			}
 			hn_movement(pawn, false);
+			// never under HN's world: if there is no ground under Steve any more (fell through a gap in the probed world,
+			// or Minecraft respawned him somewhere), put him back where there was; HN's player isn't moved there
+			static DWORD nextGroundCheck = 0;
+			static bool haveGood = false;
+			static Vec3f lastGood;
+			bool underWorld = false;
+			if (g_haveEye && GetTickCount() > nextGroundCheck)
+			{
+				nextGroundCheck = GetTickCount() + 250;
+				float groundZ = 0.0f;
+				if (ground_below(pawn, g_eye, groundZ) && g_eye.z - groundZ < 400.0f)
+				{
+					lastGood = {g_eye.x, g_eye.y, groundZ + 10.0f};
+					haveGood = true;
+				}
+				else if (!ground_below(pawn, g_eye, groundZ))
+				{
+					underWorld = true;
+					log(L"Steve is under HN's world: back to the last ground");
+					if (haveGood)
+						teleport_minecraft(pawn, lastGood);
+				}
+			}
 			// HN's camera goes to Minecraft's eyes: move the pawn by the camera's offset from it
-			if (g_haveEye)
+			if (g_haveEye && !underWorld)
 			{
 				const Vec3f target{g_eye.x - (cam.loc.x - p.x), g_eye.y - (cam.loc.y - p.y), g_eye.z - (cam.loc.z - p.z)};
 				set_actor_location(pawn, target);

@@ -5,6 +5,7 @@ import dev.neighborcraft.Passthrough;
 import dev.neighborcraft.client.mixin.KeyMappingAccessor;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.player.Inventory;
@@ -51,6 +52,16 @@ final class ClientInput {
 					}
 
 					key.setDown(down);
+				}
+			}
+			case "pause" -> {
+				// Hello Neighbor paused (or left gameplay): Minecraft's world stops too (single player pauses while the
+				// pause screen is open), and goes on when HN does
+				boolean on = m.get("on").getAsBoolean();
+				if (on && minecraft.gui.screen() == null) {
+					minecraft.pauseGame(false);
+				} else if (!on && minecraft.gui.screen() instanceof PauseScreen) {
+					minecraft.gui.setScreen(null);
 				}
 			}
 			case "move" -> {

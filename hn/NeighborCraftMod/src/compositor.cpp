@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <d3d11.h>
 #include <reshade.hpp>
 
 using namespace reshade::api;
@@ -254,9 +255,176 @@ namespace
 		last = info.ftLastWriteTime;
 	}
 
+	// ---- Minecraft under HN's UI ---------------------------------------------------------------------------------
+	// ReShade renders effects at present, on top of everything, so Minecraft covered HN's pause menu, its blur and the
+	// level fades. Instead, the effects run when HN starts drawing its UI: Unreal draws the finished 3D frame into the
+	// back buffer with one full-screen pass, then the UI (Slate/UMG) into the same back buffer. So the first draw into
+	// the back buffer is the scene; at the second one the effects run (Minecraft composited into the scene), and the
+	// UI then draws over them. A frame with no UI draw falls back to ReShade's own rendering at present.
+
+	effect_runtime *g_runtime = nullptr;
+	resource_view g_boundRtv = {0};
+	bool g_boundIsBackBuffer = false;
+	bool g_sceneDrawn = false;
+	bool g_renderedThisFrame = false;
+
+	/// Everything a D3D11 draw depends on: Unreal's RHI caches the state it set, so what ReShade's passes change must be
+	/// put back exactly (same idea as the state backup in Dear ImGui's D3D11 backend).
+	struct D3D11StateBackup
+	{
+		UINT scissorCount = 0, viewportCount = 0;
+		D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+		D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+		ID3D11RasterizerState *rs = nullptr;
+		ID3D11BlendState *blend = nullptr;
+		FLOAT blendFactor[4] = {};
+		UINT sampleMask = 0;
+		ID3D11DepthStencilState *depth = nullptr;
+		UINT stencilRef = 0;
+		ID3D11RenderTargetView *rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+		ID3D11DepthStencilView *dsv = nullptr;
+		ID3D11ShaderResourceView *psSrvs[16] = {}, *vsSrvs[16] = {};
+		ID3D11SamplerState *psSamplers[16] = {};
+		ID3D11Buffer *psCbs[14] = {}, *vsCbs[14] = {};
+		ID3D11PixelShader *ps = nullptr;
+		ID3D11VertexShader *vs = nullptr;
+		ID3D11GeometryShader *gs = nullptr;
+		D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+		ID3D11Buffer *ib = nullptr, *vbs[4] = {};
+		UINT vbStrides[4] = {}, vbOffsets[4] = {};
+		DXGI_FORMAT ibFormat = DXGI_FORMAT_UNKNOWN;
+		UINT ibOffset = 0;
+		ID3D11InputLayout *layout = nullptr;
+
+		void capture(ID3D11DeviceContext *c)
+		{
+			scissorCount = viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+			c->RSGetScissorRects(&scissorCount, scissors);
+			c->RSGetViewports(&viewportCount, viewports);
+			c->RSGetState(&rs);
+			c->OMGetBlendState(&blend, blendFactor, &sampleMask);
+			c->OMGetDepthStencilState(&depth, &stencilRef);
+			c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv);
+			c->PSGetShaderResources(0, 16, psSrvs);
+			c->VSGetShaderResources(0, 16, vsSrvs);
+			c->PSGetSamplers(0, 16, psSamplers);
+			c->PSGetConstantBuffers(0, 14, psCbs);
+			c->VSGetConstantBuffers(0, 14, vsCbs);
+			c->PSGetShader(&ps, nullptr, nullptr);
+			c->VSGetShader(&vs, nullptr, nullptr);
+			c->GSGetShader(&gs, nullptr, nullptr);
+			c->IAGetPrimitiveTopology(&topology);
+			c->IAGetIndexBuffer(&ib, &ibFormat, &ibOffset);
+			c->IAGetVertexBuffers(0, 4, vbs, vbStrides, vbOffsets);
+			c->IAGetInputLayout(&layout);
+		}
+
+		template <typename T>
+		static void release(T *&p)
+		{
+			if (p)
+				p->Release();
+			p = nullptr;
+		}
+
+		void restore(ID3D11DeviceContext *c)
+		{
+			c->RSSetScissorRects(scissorCount, scissors);
+			c->RSSetViewports(viewportCount, viewports);
+			c->RSSetState(rs);
+			c->OMSetBlendState(blend, blendFactor, sampleMask);
+			c->OMSetDepthStencilState(depth, stencilRef);
+			c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, dsv);
+			c->PSSetShaderResources(0, 16, psSrvs);
+			c->VSSetShaderResources(0, 16, vsSrvs);
+			c->PSSetSamplers(0, 16, psSamplers);
+			c->PSSetConstantBuffers(0, 14, psCbs);
+			c->VSSetConstantBuffers(0, 14, vsCbs);
+			c->PSSetShader(ps, nullptr, 0);
+			c->VSSetShader(vs, nullptr, 0);
+			c->GSSetShader(gs, nullptr, 0);
+			c->IASetPrimitiveTopology(topology);
+			c->IASetIndexBuffer(ib, ibFormat, ibOffset);
+			c->IASetVertexBuffers(0, 4, vbs, vbStrides, vbOffsets);
+			c->IASetInputLayout(layout);
+			release(rs);
+			release(blend);
+			release(depth);
+			for (auto &v : rtvs)
+				release(v);
+			release(dsv);
+			for (auto &v : psSrvs)
+				release(v);
+			for (auto &v : vsSrvs)
+				release(v);
+			for (auto &v : psSamplers)
+				release(v);
+			for (auto &v : psCbs)
+				release(v);
+			for (auto &v : vsCbs)
+				release(v);
+			release(ps);
+			release(vs);
+			release(gs);
+			release(ib);
+			for (auto &v : vbs)
+				release(v);
+			release(layout);
+		}
+	};
+
+	void on_init_effect_runtime(effect_runtime *runtime)
+	{
+		g_runtime = runtime;
+	}
+
+	void on_bind_render_targets(command_list *cmd_list, uint32_t count, const resource_view *rtvs, resource_view)
+	{
+		g_boundRtv = count != 0 ? rtvs[0] : resource_view{0};
+		g_boundIsBackBuffer = g_runtime != nullptr && g_boundRtv.handle != 0 &&
+							  cmd_list->get_device()->get_resource_from_view(g_boundRtv) == g_runtime->get_current_back_buffer();
+	}
+
+	/// Before every draw: at the second draw into the back buffer (HN's UI begins), composite Minecraft first.
+	bool before_draw(command_list *cmd_list)
+	{
+		if (!g_boundIsBackBuffer || g_renderedThisFrame || g_runtime == nullptr || g_runtime->get_device()->get_api() != device_api::d3d11)
+			return false;
+		if (!g_sceneDrawn)
+		{
+			g_sceneDrawn = true; // the scene's own pass into the back buffer: let it draw
+			return false;
+		}
+		g_renderedThisFrame = true;
+		auto *context = reinterpret_cast<ID3D11DeviceContext *>(cmd_list->get_native());
+		D3D11StateBackup state;
+		state.capture(context);
+		g_runtime->render_effects(cmd_list, g_boundRtv, g_boundRtv);
+		state.restore(context);
+		return false;
+	}
+
+	bool on_draw(command_list *cmd_list, uint32_t, uint32_t, uint32_t, uint32_t)
+	{
+		return before_draw(cmd_list);
+	}
+
+	bool on_draw_indexed(command_list *cmd_list, uint32_t, uint32_t, uint32_t, int32_t, uint32_t)
+	{
+		return before_draw(cmd_list);
+	}
+
+	bool on_draw_indirect(command_list *cmd_list, indirect_command type, resource, uint64_t, uint32_t, uint32_t)
+	{
+		return type != indirect_command::dispatch && before_draw(cmd_list);
+	}
+
 	void on_present(effect_runtime *runtime)
 	{
 		watch_effect_file(runtime); // every frame, even when the effect failed to compile
+		// the next frame starts: look for its scene pass and its first UI draw again
+		g_sceneDrawn = false;
+		g_renderedThisFrame = false;
 	}
 
 	void on_begin_effects(effect_runtime *runtime, command_list *, resource_view, resource_view)
@@ -360,6 +528,8 @@ namespace
 
 	void on_destroy_effect_runtime(effect_runtime *runtime)
 	{
+		if (g_runtime == runtime)
+			g_runtime = nullptr;
 		destroy_layers(runtime->get_device());
 	}
 }
@@ -376,6 +546,11 @@ namespace compositor
 		reshade::register_event<reshade::addon_event::reshade_present>(on_present);
 		reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(on_reloaded_effects);
 		reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
+		reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
+		reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_render_targets);
+		reshade::register_event<reshade::addon_event::draw>(on_draw);
+		reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
+		reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_indirect);
 		g_registered = true;
 		reshade::log::message(reshade::log::level::info, "NeighborCraft: registered");
 		return true;
