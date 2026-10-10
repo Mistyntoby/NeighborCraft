@@ -81,14 +81,24 @@ abstract class CameraMixin {
 		}
 	}
 
-	/** Driving: Minecraft's own FOV (its setting and effects, sprinting widens it), which the host's camera takes. */
-	@Inject(method = "calculateFov", at = @At("RETURN"))
+	/**
+	 * Driving: Minecraft's own FOV (its setting and effects, sprinting widens it) is what the host's camera takes; the
+	 * world itself is rendered with tan(fov / 2) 15% wider (overscan), so re-projecting the frame onto the host's newer
+	 * camera never runs out of picture at the screen edges. The hand and HUD have their own FOV (calculateHudFov).
+	 */
+	@Inject(method = "calculateFov", at = @At("RETURN"), cancellable = true)
 	private void passthrough$minecraftFov(final float partialTicks, final CallbackInfoReturnable<Float> cir) {
 		HostState.Pose p = HostState.frame();
+		float fov = cir.getReturnValueF();
 		if (p != null && p.drive()) {
-			lastFov = cir.getReturnValueF();
+			lastFov = fov;
+			fov = (float) Math.toDegrees(2.0 * Math.atan(Math.tan(Math.toRadians(fov) / 2.0) * OVERSCAN));
+			cir.setReturnValue(fov);
 		}
+		HostState.setRenderedFov(fov);
 	}
+
+	private static final double OVERSCAN = 1.15;
 
 	@Inject(method = "update", at = @At("TAIL"))
 	private void passthrough$planes(final DeltaTracker deltaTracker, final CallbackInfo ci) {

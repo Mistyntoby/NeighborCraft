@@ -813,8 +813,23 @@ namespace nc
 		///    (walls, tables) keep their box shape.
 		///  - Where a ray measured a ceiling, the box cell holding it goes (rounded down, it took away clearance and made
 		///    Minecraft crouch or crawl).
-		int block_shape(const BlockBits &b, std::string &hex, std::string &floor, std::string &ceiling)
+		int block_shape(unsigned long long key, const BlockBits &b, std::string &hex, std::string &floor, std::string &ceiling)
 		{
+			// the floors of this block and of its 8 horizontal neighbours (a riser on a block border has its upper tread
+			// in the next block)
+			const int bx = cell_x(key), by = cell_y(key), bz = cell_z(key);
+			const BlockBits *around[3][3] = {};
+			for (int dx = -1; dx <= 1; ++dx)
+				for (int dz = -1; dz <= 1; ++dz)
+				{
+					const auto it = g_bits.find(cell_key(bx + dx, by, bz + dz));
+					around[dx + 1][dz + 1] = it == g_bits.end() ? nullptr : &it->second;
+				}
+			auto floor_at = [&](int sx, int sz) -> float {
+				const int ox = sx < 0 ? -1 : sx > 7 ? 1 : 0, oz = sz < 0 ? -1 : sz > 7 ? 1 : 0;
+				const BlockBits *n = around[ox + 1][oz + 1];
+				return n ? n->floor[(sx - ox * 8) * 8 + (sz - oz * 8)] : 0.0f;
+			};
 			uint8_t bits[64];
 			std::memcpy(bits, b.box, 64);
 			for (int sx = 0; sx < 8; ++sx)
@@ -824,11 +839,7 @@ namespace nc
 					float highest = own;
 					for (int dx = -1; dx <= 1; ++dx)
 						for (int dz = -1; dz <= 1; ++dz)
-						{
-							const int nx = sx + dx, nz = sz + dz;
-							if (nx >= 0 && nx < 8 && nz >= 0 && nz < 8)
-								highest = std::max(highest, b.floor[nx * 8 + nz]);
-						}
+							highest = std::max(highest, floor_at(sx + dx, sz + dz));
 					float clearBelow = own > 0.0f ? std::min(own + 0.125f, 1.0f) : 0.0f;
 					if (highest > 0.0f && highest - own <= 0.6f)
 						clearBelow = std::max(clearBelow, highest);
@@ -916,6 +927,12 @@ namespace nc
 					ready = false;
 				queries += probe_column(pawn, px + dx, pz + dz, py - kVoxBelow, py + kVoxAbove + 1);
 				g_columns[col] = now;
+				// the neighbouring columns' shapes depend on these floors too (steps across block borders)
+				for (int nx = -1; nx <= 1; ++nx)
+					for (int nz = -1; nz <= 1; ++nz)
+						for (int y = py - kVoxBelow; y <= py + kVoxAbove; ++y)
+							if ((nx || nz) && g_bits.count(cell_key(px + dx + nx, y, pz + dz + nz)))
+								g_dirty.insert(cell_key(px + dx + nx, y, pz + dz + nz));
 			}
 			// then walls and furniture, block by block
 			std::string hex;
@@ -956,7 +973,7 @@ namespace nc
 				const auto bit = g_bits.find(key);
 				if (bit == g_bits.end())
 					continue;
-				const int kind = block_shape(bit->second, hex, floor, ceiling);
+				const int kind = block_shape(key, bit->second, hex, floor, ceiling);
 				auto [cell, added] = g_cells.try_emplace(key, Cell{~0ull, 0});
 				const unsigned long long sig = kind == 2 ? ((std::hash<std::string>()(hex) ^ std::hash<std::string>()(floor) * 31 ^
 															   std::hash<std::string>()(ceiling) * 131) | 3)

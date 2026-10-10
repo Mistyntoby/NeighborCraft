@@ -100,6 +100,9 @@ public final class HostLink extends WebSocketServer {
 				case "tp" -> {
 					JsonArray at = m.getAsJsonArray("p");
 					WorldBridge.command(String.format(Locale.ROOT, "tp @a %.3f %.3f %.3f", at.get(0).getAsDouble(), at.get(1).getAsDouble(), at.get(2).getAsDouble()));
+					// survival: dying respawns here (on HN's ground), not at the void world's spawn
+					WorldBridge.command(String.format(Locale.ROOT, "spawnpoint @a %d %d %d", (int) Math.floor(at.get(0).getAsDouble()),
+						(int) Math.floor(at.get(1).getAsDouble()), (int) Math.floor(at.get(2).getAsDouble())));
 				}
 				case "dev" -> this.relay(conn, message);
 				default -> {

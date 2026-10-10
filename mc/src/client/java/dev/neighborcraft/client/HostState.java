@@ -31,6 +31,17 @@ public final class HostState {
 	/** The camera rotation the frame being rendered uses (Minecraft degrees, view bob included). Render thread only. */
 	private static float renderedYaw, renderedPitch, renderedRoll;
 
+	/** The vertical FOV the world of the frame being rendered uses (with any overscan). Render thread only. */
+	private static float renderedFov = 70.0F;
+
+	public static void setRenderedFov(final float fov) {
+		renderedFov = fov;
+	}
+
+	public static float renderedFov() {
+		return renderedFov;
+	}
+
 	public static void setRenderedCamera(final float yaw, final float pitch, final float roll) {
 		renderedYaw = yaw;
 		renderedPitch = pitch;

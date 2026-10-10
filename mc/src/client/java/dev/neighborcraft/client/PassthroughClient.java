@@ -34,7 +34,7 @@ import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 public class PassthroughClient implements ClientModInitializer {
-	/** The world the host plays in: an empty (void) creative world, so only what the player builds is Minecraft. */
+	/** The world the host plays in: an empty (void) survival world, so only what the player builds is Minecraft. */
 	private static final String WORLD = "neighborcraft";
 	/** Run on the server once the player has joined. */
 	private static final List<String> SETUP = List.of(
@@ -53,16 +53,17 @@ public class PassthroughClient implements ClientModInitializer {
 		"gamerule player_movement_check false",
 		"time set noon",
 		"weather clear",
+		"gamemode survival @a",
 		"clear @a",
 		"item replace entity @a hotbar.0 with minecraft:diamond_sword",
-		"item replace entity @a hotbar.1 with minecraft:oak_planks 64",
-		"item replace entity @a hotbar.2 with minecraft:cobblestone 64",
-		"item replace entity @a hotbar.3 with minecraft:bricks 64",
-		"item replace entity @a hotbar.4 with minecraft:glass 64",
-		"item replace entity @a hotbar.5 with minecraft:oak_log 64",
-		"item replace entity @a hotbar.6 with minecraft:white_wool 64",
+		"item replace entity @a hotbar.1 with minecraft:diamond_pickaxe",
+		"item replace entity @a hotbar.2 with minecraft:diamond_axe",
+		"item replace entity @a hotbar.3 with minecraft:diamond_shovel",
+		"item replace entity @a hotbar.4 with minecraft:oak_planks 64",
+		"item replace entity @a hotbar.5 with minecraft:cobblestone 64",
+		"item replace entity @a hotbar.6 with minecraft:glass 64",
 		"item replace entity @a hotbar.7 with minecraft:torch 64",
-		"item replace entity @a hotbar.8 with minecraft:diamond_pickaxe"
+		"item replace entity @a hotbar.8 with minecraft:bread 16"
 	);
 	private static boolean configured;
 	private static boolean worldRequested;
@@ -179,7 +180,7 @@ public class PassthroughClient implements ClientModInitializer {
 			minecraft.createWorldOpenFlows().openWorld(WORLD, () -> minecraft.gui.setScreen(new TitleScreen()));
 		} else {
 			Passthrough.LOG.info("creating world {}", WORLD);
-			LevelSettings settings = new LevelSettings("NeighborCraft", GameType.CREATIVE, LevelSettings.DifficultySettings.DEFAULT, true, WorldDataConfiguration.DEFAULT);
+			LevelSettings settings = new LevelSettings("NeighborCraft", GameType.SURVIVAL, LevelSettings.DifficultySettings.DEFAULT, true, WorldDataConfiguration.DEFAULT);
 			minecraft.createWorldOpenFlows().createFreshLevel(WORLD, settings, new WorldOptions(0L, false, false), PassthroughClient::voidWorld, minecraft.gui.screen());
 		}
 	}

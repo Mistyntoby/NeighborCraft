@@ -433,9 +433,9 @@ namespace
 		early += g_renderedThisFrame ? 1 : 0;
 		if (frames == 600)
 		{
-			char text[160];
-			snprintf(text, sizeof(text), "NeighborCraft: Minecraft composited before HN's UI in %d of %d frames (back buffer draws last frame: %d)",
-				early, frames, g_backBufferDraws);
+			char text[256];
+			snprintf(text, sizeof(text), "NeighborCraft: composited before HN's UI in %d of %d frames (back buffer draws: %d); Minecraft frame %ux%u fov %.2f, HN back buffer %ux%u",
+				early, frames, g_backBufferDraws, g_width, g_height, g_mcPose.fov, g_bbWidth.load(), g_bbHeight.load());
 			reshade::log::message(reshade::log::level::info, text);
 			frames = early = 0;
 		}

@@ -84,6 +84,7 @@ public final class FrameExporter {
 		float camYaw;
 		float camPitch;
 		float camRoll;
+		float camFov;
 		float far;
 		long frame;
 		long captureNanos;
@@ -190,6 +191,7 @@ public final class FrameExporter {
 		c.camYaw = HostState.renderedYaw();
 		c.camPitch = HostState.renderedPitch();
 		c.camRoll = HostState.renderedRoll();
+		c.camFov = HostState.renderedFov();
 		c.far = far;
 		c.frame = ++frameCounter;
 		c.captureNanos = now;
@@ -247,7 +249,7 @@ public final class FrameExporter {
 			m.set(INT, desc + 28, c.height);
 			m.set(FLOAT, desc + 32, NEAR);
 			m.set(FLOAT, desc + 36, c.far);
-			m.set(FLOAT, desc + 40, p.fov());
+			m.set(FLOAT, desc + 40, c.camFov);
 			m.set(INT, desc + 44, (RenderSystem.getDevice().getDeviceInfo().isZZeroToOne() ? 1 : 0) | 2 | 4);
 			m.set(DOUBLE, desc + 48, c.camPos.x);
 			m.set(DOUBLE, desc + 56, c.camPos.y);
