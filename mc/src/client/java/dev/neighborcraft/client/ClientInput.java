@@ -24,6 +24,7 @@ final class ClientInput {
 	/** The mouse button held over an open screen (-1: none), and where the cursor was, for drags. */
 	private static int heldButton = -1;
 	private static double lastX, lastY;
+	private static int clicksLogged;
 
 	private ClientInput() {
 	}
@@ -92,7 +93,12 @@ final class ClientInput {
 						MouseButtonEvent event = new MouseButtonEvent(gx, gy, new MouseButtonInfo(button, 0));
 						if (m.get("down").getAsBoolean()) {
 							heldButton = button;
-							screen.mouseClicked(event, false);
+							boolean handled = screen.mouseClicked(event, false);
+							if (clicksLogged++ < 40) {
+								Passthrough.LOG.info("screen click: button {} at gui {} {} (window {} x {}) on {}: {}", button, Math.round(gx),
+									Math.round(gy), window.getGuiScaledWidth(), window.getGuiScaledHeight(), screen.getClass().getSimpleName(),
+									handled ? "handled" : "not handled");
+							}
 						} else {
 							heldButton = -1;
 							screen.mouseReleased(event);

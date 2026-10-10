@@ -1818,7 +1818,8 @@ namespace nc
 			UObject **data;
 			int32 num, max;
 		};
-		const uint8_t kPhysicsTypes[] = {3}; // ObjectTypeQuery4 = PhysicsBody
+		// loose objects are PhysicsBody or WorldDynamic (only those actually simulating physics are kept)
+		const uint8_t kPhysicsTypes[] = {1, 3}; // ObjectTypeQuery2 = WorldDynamic, ObjectTypeQuery4 = PhysicsBody
 		std::vector<UObject *> g_nearPhysics; // components simulating physics near Steve, this tick only
 
 		std::vector<UObject *> physics_near(UObject *pawn, const Vec3f &at, float radius)
@@ -1830,7 +1831,7 @@ namespace nc
 			c.set<UObject *>(STR("WorldContextObject"), pawn)
 				.set(STR("SpherePos"), at)
 				.set(STR("SphereRadius"), radius)
-				.set(STR("ObjectTypes"), ScriptArray{kPhysicsTypes, 1, 1})
+				.set(STR("ObjectTypes"), ScriptArray{kPhysicsTypes, 2, 2})
 				.set<UObject *>(STR("ComponentClassFilter"), nullptr)
 				.set(STR("ActorsToIgnore"), ScriptArray{nullptr, 0, 0});
 			c.invoke();
@@ -1881,21 +1882,31 @@ namespace nc
 			lastTime = now;
 			haveLast = true;
 			const float speed = std::hypot(v.x, v.y);
+			static DWORD nextReport = 0;
+			if (now > nextReport && !g_nearPhysics.empty())
+			{
+				nextReport = now + 5000;
+				log(L"physics: " + std::to_wstring(g_nearPhysics.size()) + L" loose objects within 2.5 m (not walls for Minecraft)");
+			}
 			if (speed < 50.0f) // walking speed in cm/s
 				return;
-			for (UObject *component : g_nearPhysics)
+			// touching: overlapping Steve's body (his 0.6 x 1.8 box, a little wider), whatever the object's size
+			const std::vector<UObject *> touching = physics_near(pawn, {body.x + v.x / speed * 20.0f, body.y + v.y / speed * 20.0f, body.z}, 55.0f);
+			for (UObject *component : touching)
 			{
 				const Vec3f at = component_location(component);
-				const float dx = at.x - body.x, dy = at.y - body.y, d = std::hypot(dx, dy);
-				if (d > 80.0f || std::abs(at.z - body.z) > 100.0f || d < 1.0f)
+				const float dx = at.x - body.x, dy = at.y - body.y, d = std::max(1.0f, std::hypot(dx, dy));
+				// only what Steve walks towards (or is centred on), and gently: a share of his speed, less the heavier
+				const float towards = d < 20.0f ? 1.0f : (dx * v.x + dy * v.y) / (d * speed);
+				if (towards < 0.2f)
 					continue;
-				// only what Steve walks towards, and gently: a share of his speed, less the heavier it is
-				const float towards = (dx * v.x + dy * v.y) / (d * speed);
-				if (towards < 0.3f)
-					continue;
-				const float dv = std::min(speed * 0.6f, 300.0f) * towards / (1.0f + mass_of(component) / 20.0f);
+				const float dv = std::min(speed * 0.7f, 350.0f) * towards / (1.0f + mass_of(component) / 20.0f);
 				Call(component, STR("AddImpulse")).set(STR("Impulse"), Vec3f{v.x / speed * dv, v.y / speed * dv, 0.0f})
 					.set(STR("BoneName"), NameParam{}).set_bool(STR("bVelChange"), true).invoke();
+				static int logged = 0;
+				if (logged++ < 10)
+					log(L"physics: nudged " + component->GetName() + L" (" + std::to_wstring(int(mass_of(component))) + L" kg) by " +
+						std::to_wstring(int(dv)) + L" cm/s");
 			}
 		}
 
@@ -1915,7 +1926,7 @@ namespace nc
 			c.set<UObject *>(STR("WorldContextObject"), pawn)
 				.set(STR("Start"), g_mcCamera)
 				.set(STR("End"), Vec3f{g_mcCamera.x + dir.x * 300.0f, g_mcCamera.y + dir.y * 300.0f, g_mcCamera.z + dir.z * 300.0f})
-				.set(STR("ObjectTypes"), ScriptArray{kPhysicsTypes, 1, 1})
+				.set(STR("ObjectTypes"), ScriptArray{kPhysicsTypes, 2, 2})
 				.set(STR("ActorsToIgnore"), ScriptArray{nullptr, 0, 0})
 				.set_bool(STR("bTraceComplex"), false)
 				.set<uint8_t>(STR("DrawDebugType"), 0)
@@ -1943,6 +1954,87 @@ namespace nc
 			const float impulse = 1800.0f; // kg cm/s: a 5 kg box flies off at ~3.6 m/s, a 30 kg one shifts
 			Call(*component, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{dir.x * impulse, dir.y * impulse, dir.z * impulse + impulse * 0.25f})
 				.set(STR("Location"), *point).set(STR("BoneName"), NameParam{}).invoke();
+		}
+
+		// ---- doors ----------------------------------------------------------------------------------------------------
+		// A door that opens or closes changes the collision in its doorway at once, but the probe only refreshed nearby
+		// blocks every 1.5 s (floors every 4.5 s): Minecraft kept the closed door as a wall for that long (the recorder
+		// showed Steve blocked by a door-high box in an open doorway). HN's doors near Steve are watched every tick: when a
+		// door's bounds change, every block they cover (before and after) is probed again right away, until it stops.
+
+		struct DoorWatch
+		{
+			Vec3f origin, extent;
+		};
+		std::vector<UObject *> g_doors; // this level's doors (class Door and its subclasses)
+		std::unordered_map<UObject *, DoorWatch> g_doorBounds;
+		UObject *g_doorsLevel = nullptr;
+
+		bool actor_bounds(UObject *actor, Vec3f &origin, Vec3f &extent)
+		{
+			Call c(actor, STR("GetActorBounds"));
+			c.set_bool(STR("bOnlyCollidingComponents"), true);
+			if (!c.invoke())
+				return false;
+			const Vec3f *o = c.param<Vec3f>(STR("Origin")), *e = c.param<Vec3f>(STR("BoxExtent"));
+			if (!o || !e)
+				return false;
+			origin = *o;
+			extent = *e;
+			return true;
+		}
+
+		/// Forget what is known about the blocks a box (Unreal cm) covers: they are probed again, nearest first.
+		void invalidate_box(const Vec3f &lo, const Vec3f &hi)
+		{
+			double x0, y0, z0, x1, y1, z1;
+			to_mc(lo, x0, y0, z0);
+			to_mc(hi, x1, y1, z1);
+			for (int x = int(std::floor(std::min(x0, x1))); x <= int(std::floor(std::max(x0, x1))); ++x)
+				for (int z = int(std::floor(std::min(z0, z1))); z <= int(std::floor(std::max(z0, z1))); ++z)
+				{
+					g_columns.erase(cell_key(x, 0, z));
+					for (int y = int(std::floor(std::min(y0, y1))); y <= int(std::floor(std::max(y0, y1))); ++y)
+					{
+						const auto it = g_bits.find(cell_key(x, y, z));
+						if (it != g_bits.end())
+							it->second.boxKnown = false;
+					}
+				}
+		}
+
+		void doors_tick(UObject *pc, UObject *pawn)
+		{
+			if (pc != g_doorsLevel)
+			{
+				g_doorsLevel = pc;
+				g_doors = find_all(L"Door");
+				g_doorBounds.clear();
+				log(L"doors: " + std::to_wstring(g_doors.size()) + L" in this level");
+			}
+			if (!g_haveEye)
+				return;
+			for (UObject *door : g_doors)
+			{
+				Vec3f origin, extent;
+				if (!actor_bounds(door, origin, extent))
+					continue;
+				if (std::hypot(origin.x - g_eye.x, origin.y - g_eye.y) > 800.0f)
+					continue;
+				auto [it, added] = g_doorBounds.try_emplace(door, DoorWatch{origin, extent});
+				DoorWatch &last = it->second;
+				const bool moved = std::abs(origin.x - last.origin.x) + std::abs(origin.y - last.origin.y) + std::abs(origin.z - last.origin.z) +
+									   std::abs(extent.x - last.extent.x) + std::abs(extent.y - last.extent.y) + std::abs(extent.z - last.extent.z) >
+								   0.5f;
+				if (added || !moved)
+					continue;
+				// the space before and after this tick's movement
+				invalidate_box({std::min(origin.x - extent.x, last.origin.x - last.extent.x), std::min(origin.y - extent.y, last.origin.y - last.extent.y),
+								   std::min(origin.z - extent.z, last.origin.z - last.extent.z)},
+					{std::max(origin.x + extent.x, last.origin.x + last.extent.x), std::max(origin.y + extent.y, last.origin.y + last.extent.y),
+						std::max(origin.z + extent.z, last.origin.z + last.extent.z)});
+				last = {origin, extent};
+			}
 		}
 
 		// ---- HN's surface material under Steve, for Minecraft's particles and footsteps -----------------------------
@@ -2311,6 +2403,7 @@ namespace nc
 			notify(g_gridPhysics ? "Minecraft physics: blocky collision" : "HN collision, Minecraft movement");
 		}
 		refresh_probe_ignore(pawn);
+		doors_tick(pc, pawn);
 		if (g_driving)
 			physics_tick(pawn);
 		else
