@@ -16,6 +16,8 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.entity.player.Inventory;
@@ -135,6 +137,23 @@ final class ClientInput {
 
 				lastX = gx;
 				lastY = gy;
+			}
+			case "pickup" -> {
+				// HN took one of its objects out of its world for Minecraft's inventory (it waits for the answer)
+				dev.neighborcraft.Carry.give(m.get("id").getAsString(), m.get("name").getAsString(), m.get("cls").getAsString(),
+					m.has("kg") ? m.get("kg").getAsInt() : 0);
+			}
+			case "consume" -> dev.neighborcraft.Carry.consume(m.get("id").getAsString());
+			case "punched" -> {
+				// an attack moved one of HN's objects: Minecraft's attack sound, as for hitting a mob (a charged hit
+				// strong, a sprinting one knockback, a quick uncharged swing weak)
+				if (player != null && minecraft.level != null) {
+					double strength = m.has("s") ? m.get("s").getAsDouble() : 1.0;
+					boolean sprint = m.has("sprint") && m.get("sprint").getAsBoolean();
+					var sound = sprint && strength > 0.9 ? SoundEvents.PLAYER_ATTACK_KNOCKBACK
+						: strength > 0.9 ? SoundEvents.PLAYER_ATTACK_STRONG : SoundEvents.PLAYER_ATTACK_WEAK;
+					minecraft.level.playLocalSound(player.getX(), player.getEyeY(), player.getZ(), sound, SoundSource.PLAYERS, 1.0F, 1.0F, false);
+				}
 			}
 			case "swing" -> {
 				// the player used one of HN's objects (a door): the hand swings as when using a block in Minecraft

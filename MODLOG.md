@@ -176,3 +176,16 @@ Evidence-driven round: collision recorder sessions, HN/Minecraft logs, minidumps
 11. HN masses are 150-400 kg for small props: impulses must be velocity changes.
 12. UE4SS logging from the game thread can deadlock: log from another thread.
 13. A test Minecraft on the link port talks to the player's game: never run tools while HN is open.
+
+## Crawl fix, door remnants, carrying HN objects (2026-10-10, untested at stop)
+- Forced crawl at doors: a host block without a shape was a full cube; the shared shape map drops a shape before the
+  client hears the block is gone (recorder: a whole block in Steve's standing box the tick before every crawl).
+  No shape = empty; full blocks are stored explicitly.
+- Door remnants: the static probe no longer records moving parts (box cells, floor/ceiling ray hits inside them are
+  skipped) and blocks whose moving collision changed are re-probed.
+- Carrying (built, NOT tested): hold right click 0.35 s on a loose object (not doors/drawers, not HN story items with
+  an InteractiveComponent) -> the object is hidden in HN (no collision/physics) and Minecraft gets an `hn_object`
+  token (Carry.java; confirmed both ways, inventory full = object stays). Selected in the hotbar, HN shows the real
+  object at the hand position; right click places it where Steve looks (overlap-checked), Q throws it; a token
+  dropped from the inventory screen is thrown instead. Generic token icon (ours); per-item icons not done.
+- Stop point: weekly usage limit reached. Next: test the carry lifecycle and crawl fix in game.

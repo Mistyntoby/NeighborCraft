@@ -25,6 +25,7 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -57,6 +58,7 @@ namespace nc
 		constexpr int kVoxQueriesPerTick = 400;
 		constexpr int kVoxRefreshRadius = 3;   // cells this close are re-probed (doors open and close)
 		constexpr DWORD kVoxRefreshMs = 1500;
+		constexpr int kColumnMargin = 4;       // blocks probed beyond what is needed below (half that above)
 		constexpr int kDriveReadyRadius = 2;   // cells known around the player before Minecraft takes over
 		constexpr float kResyncCm = 150.0f;    // HN moved its player itself (caught, cutscene): follow it
 		constexpr double kYBase = 140.0;       // Minecraft y of HN height 0 (see relevel)
@@ -825,6 +827,20 @@ namespace nc
 		};
 		std::unordered_map<unsigned long long, BlockBits> g_bits;
 		std::unordered_map<unsigned long long, std::array<uint8_t, 64>> g_dynBits; // moving parts' sub-cells, per block
+
+		/// Whether a point (Minecraft coordinates) lies in a moving part's sub-cells this tick (a door leaf, a cabinet
+		/// door, a loose object). The static probe leaves those to the moving collision: a door re-probed mid-swing
+		/// left pieces of its leaf and handle behind in the static world (the recorder: thin slabs on the closed
+		/// door's plane, a 1/8 cell floating a metre up at a ray-measured, off-grid height, Steve blocked by them).
+		bool in_moving_part(double mx, double my, double mz)
+		{
+			const int bx = int(std::floor(mx)), by = int(std::floor(my)), bz = int(std::floor(mz));
+			const auto it = g_dynBits.find(cell_key(bx, by, bz));
+			if (it == g_dynBits.end())
+				return false;
+			const int sx = std::clamp(int((mx - bx) * 8.0), 0, 7), sy = std::clamp(int((my - by) * 8.0), 0, 7), sz = std::clamp(int((mz - bz) * 8.0), 0, 7);
+			return (it->second[sx * 8 + sy] >> sz & 1) != 0;
+		}
 		/// A column's rays: when they were cast, and the Minecraft heights [lo, hi) they covered. The cache used to know
 		/// only (x, z): a column first probed while Steve stood high up kept its range for good, and on Act 1's road,
 		/// which falls ~12 blocks towards the Neighbor's house, the road surface ahead lay below every column's range.
@@ -885,6 +901,14 @@ namespace nc
 							break;
 						double hx, hy, hz;
 						to_mc(hit, hx, hy, hz);
+						// a moving part's top (a door leaf's edge) is not a floor: on below it
+						if (in_moving_part(hx, hy - 0.01, hz))
+						{
+							from = {hit.x, hit.y, hit.z - 3.0f};
+							if (from.z <= to.z)
+								break;
+							continue;
+						}
 						// a surface on a block boundary belongs to the block below (its top face)
 						const int by = int(std::floor(hy - 1e-4));
 						if (by >= yLo && by < yHi)
@@ -913,6 +937,12 @@ namespace nc
 							break;
 						double hx, hy, hz;
 						to_mc(hit, hx, hy, hz);
+						// a moving part's underside (a door handle) is not a ceiling: on above it
+						if (in_moving_part(hx, hy + 0.01, hz))
+						{
+							from = {hit.x, hit.y, hit.z + 3.0f};
+							continue;
+						}
 						const int by = int(std::floor(hy + 1e-4)); // on a boundary: the block above (its bottom face)
 						if (by >= yLo && by < yHi)
 						{
@@ -1066,21 +1096,25 @@ namespace nc
 				auto it = g_columns.find(col);
 				const int needLo = py - kVoxBelow, needHi = py + kVoxAbove + 1;
 				const bool covered = it != g_columns.end() && it->second.lo <= needLo && it->second.hi >= needHi;
+				// probed with a margin (a ray costs about the same whatever its length): going down a hill, every
+				// column within reach was cast again each block Steve descended (~80 rays each, the probe's budget
+				// used up frame after frame); now every 4 blocks
+				const int probeLo = py - kVoxBelow - kColumnMargin, probeHi = py + kVoxAbove + 1 + kColumnMargin / 2;
 				const bool close = std::abs(dx) <= kVoxRefreshRadius && std::abs(dz) <= kVoxRefreshRadius;
 				if (covered && !(close && now - it->second.probed > kVoxRefreshMs * 3))
 					continue;
 				if (!covered && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
 					ready = false;
-				queries += probe_column(pawn, px + dx, pz + dz, needLo, needHi);
+				queries += probe_column(pawn, px + dx, pz + dz, probeLo, probeHi);
 				// what is known now: these heights, joined to the earlier ones when they touch
-				if (it != g_columns.end() && it->second.lo <= needHi && it->second.hi >= needLo)
-					g_columns[col] = {now, std::min(it->second.lo, needLo), std::max(it->second.hi, needHi)};
+				if (it != g_columns.end() && it->second.lo <= probeHi && it->second.hi >= probeLo)
+					g_columns[col] = {now, std::min(it->second.lo, probeLo), std::max(it->second.hi, probeHi)};
 				else
-					g_columns[col] = {now, needLo, needHi};
+					g_columns[col] = {now, probeLo, probeHi};
 				// the neighbouring columns' shapes depend on these floors too (steps across block borders)
 				for (int nx = -1; nx <= 1; ++nx)
 					for (int nz = -1; nz <= 1; ++nz)
-						for (int y = py - kVoxBelow; y <= py + kVoxAbove; ++y)
+						for (int y = probeLo; y < probeHi; ++y)
 							if ((nx || nz) && g_bits.count(cell_key(px + dx + nx, y, pz + dz + nz)))
 								g_dirty.insert(cell_key(px + dx + nx, y, pz + dz + nz));
 			}
@@ -1109,6 +1143,10 @@ namespace nc
 					else if (kind == 2)
 						for (int j = 0; j < 64; ++j)
 							b.box[j] = uint8_t(std::stoi(hex.substr(j * 2, 2), nullptr, 16));
+					// the moving parts here now are theirs, not the static world's
+					if (const auto dyn = g_dynBits.find(key); dyn != g_dynBits.end())
+						for (int j = 0; j < 64; ++j)
+							b.box[j] &= uint8_t(~dyn->second[j]);
 				}
 				b.boxKnown = true;
 				g_dirty.insert(key);
@@ -1352,6 +1390,25 @@ namespace nc
 		}
 
 		std::vector<int> g_pendingSet, g_pendingClear; // block changes from Minecraft, applied on the next tick
+		std::vector<std::string> g_throwRequests;      // tokens Minecraft dropped: HN throws the objects
+		std::string g_heldId, g_heldCls;               // the HN object in Minecraft's selected slot ("" none)
+		void carry_answer(const std::string &id, bool ok, const std::string &why);
+		bool carry_place(UObject *pc, UObject *pawn);
+		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls);
+		bool carry_start_pickup(UObject *pawn);
+		void carry_cancel_pickup();
+		bool actor_bounds(UObject *actor, Vec3f &origin, Vec3f &extent);
+		UObject *g_controlsPc = nullptr;
+
+		/// The string value under `key` (no escapes: ids and paths are plain).
+		std::string json_string(const std::string &m, const char *key)
+		{
+			const size_t at = m.find(std::string("\"") + key + "\":\"");
+			if (at == std::string::npos)
+				return {};
+			const size_t from = at + std::strlen(key) + 4, to = m.find('"', from);
+			return to == std::string::npos ? std::string{} : m.substr(from, to - from);
+		}
 		struct Punch
 		{
 			Vec3f at, dir;
@@ -1411,6 +1468,15 @@ namespace nc
 					g_haveMcCamera = true;
 				}
 			}
+			else if (m.find("\"t\":\"held\"") != std::string::npos)
+			{
+				g_heldId = json_string(m, "id");
+				g_heldCls = json_string(m, "cls");
+			}
+			else if (m.find("\"t\":\"picked\"") != std::string::npos)
+				carry_answer(json_string(m, "id"), m.find("\"ok\":true") != std::string::npos, json_string(m, "why"));
+			else if (m.find("\"t\":\"throwreq\"") != std::string::npos)
+				g_throwRequests.push_back(json_string(m, "id"));
 			else if (m.find("\"t\":\"punch\"") != std::string::npos)
 			{
 				double at[3], dir[3], strength = 1.0, damage = 1.0;
@@ -1820,7 +1886,14 @@ namespace nc
 							 (key_held(VK_SPACE) ? 16 : 0) | (key_held(VK_SHIFT) ? 32 : 0) | (key_held(VK_CONTROL) ? 64 : 0);
 			sendf("{\"t\":\"move\",\"m\":%d}", g_minecraftScreen ? 0 : bits);
 			forward_key('E', "inventory");
-			forward_key('Q', "drop");
+			// Q throws a held HN object; otherwise Minecraft's drop
+			if (!g_heldId.empty() && g_controlsPawn)
+			{
+				if (edge('Q') > 0)
+					carry_throw(g_controlsPc, g_controlsPawn, g_heldId, g_heldCls);
+			}
+			else
+				forward_key('Q', "drop");
 			forward_key('F', "swap");
 			forward_key(VK_F5, "perspective");
 			const int wheel = g_wheel.exchange(0);
@@ -1878,10 +1951,24 @@ namespace nc
 		}
 
 		bool g_rightClickHN = false; // the held right click went to HN (its E)
+		bool g_rightClickCarry = false; // the held right click is a pickup or a placement
+
 
 		void right_click(UObject *)
 		{
 			const int e = edge(VK_RBUTTON);
+			// carrying: a held HN object is put down; a loose object under the crosshair starts a pickup (hold)
+			if (e > 0 && g_controlsPawn && (!g_heldId.empty() ? (carry_place(g_controlsPc, g_controlsPawn), true) : carry_start_pickup(g_controlsPawn)))
+			{
+				g_rightClickCarry = true;
+				return;
+			}
+			if (e < 0 && g_rightClickCarry)
+			{
+				g_rightClickCarry = false;
+				carry_cancel_pickup();
+				return;
+			}
 			if (e > 0)
 			{
 				g_rightClickHN = g_controlsPawn && looking_at_interactive(g_controlsPawn);
@@ -2388,22 +2475,447 @@ namespace nc
 			// HN's objects weigh 150-400 kg (a vase 150, a chair 349, a TV 400: its physics' scale, not real weights), so
 			// a punch sized for real masses moved them 3-19 cm/s, nothing visible. The punch sets a velocity change
 			// instead, still less the heavier the object is on HN's own scale. At 350 / (1 + m / 200) a chair got under
-			// 1 m/s and "barely budged" (HN's friction stops it at once); now a full fist sends a chair ~2.7 m/s and a
-			// vase ~3.5, a sword (attack damage 7) half as much again, a sprint more. Quick repeated attacks (Minecraft's
-			// uncharged swings) still push, at about two thirds.
+			// 1 m/s and "barely budged" (HN's friction stops it at once), at three times that still too little; now a full
+			// fist sends a chair ~8 m/s and a vase ~10, a sword (attack damage 7) half as much again, a sprint more.
+			// Quick repeated attacks (Minecraft's uncharged swings) still push, at about two thirds.
 			const float mass = mass_of(best);
 			const float weapon = 0.7f + 0.06f * std::clamp(punch.damage, 1.0f, 12.0f);
-			const float dv = 600.0f / (1.0f + mass / 500.0f) * weapon * (0.5f + 0.5f * std::clamp(punch.strength, 0.0f, 1.0f)) *
+			const float dv = 1800.0f / (1.0f + mass / 500.0f) * weapon * (0.5f + 0.5f * std::clamp(punch.strength, 0.0f, 1.0f)) *
 							 (punch.sprint ? 1.4f : 1.0f);
 			const float impulse = mass * dv;
 			Call(best, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{dir.x * impulse, dir.y * impulse, dir.z * impulse + impulse * 0.15f})
 				.set(STR("Location"), bestPoint).set(STR("BoneName"), NameParam{}).invoke();
+			// Minecraft plays its attack sound for a hit that moved something
+			sendf("{\"t\":\"punched\",\"s\":%.3f,\"sprint\":%s}", punch.strength, punch.sprint ? "true" : "false");
 			if (logged++ < 40)
 			{
 				UObject *owner = owner_of(best);
 				log(L"physics: punch on " + (owner ? owner->GetName() : best->GetName()) + L" (" + std::to_wstring(int(mass)) + L" kg): " +
 					std::to_wstring(int(impulse)) + L" kg cm/s, " + std::to_wstring(int(impulse / mass)) + L" cm/s");
 			}
+		}
+
+		// ---- carrying HN's objects in Minecraft's inventory ----------------------------------------------------------
+		// Hold right click on a loose object (simulating physics, its own actor, not a door or drawer, not one of HN's
+		// story items with an InteractiveComponent, which keep HN's own pickup): after kPickupHold it leaves HN's world
+		// for Minecraft's inventory. The object is never destroyed or copied: it stays in the level hidden, without
+		// collision or physics, while Minecraft holds a token for it (Carry.java). Selected in the hotbar, HN shows that
+		// very object where Minecraft's hand is (real mesh, HN's lighting). Right click with it puts it down where Steve
+		// looks, Q throws it. Each step is confirmed by the other side before anything is removed.
+
+		constexpr DWORD kPickupHold = 350;    // ms of holding right click to pick up
+		constexpr float kPickupReach = 300.0f; // cm
+
+		struct Carried
+		{
+			UObject *actor = nullptr;
+			UObject *body = nullptr;   // the simulating component (the actor's root)
+			std::wstring cls;          // class path, to make a new one when the object is gone (another level)
+			Vec3f scale{1, 1, 1};
+			float extent = 20.0f;      // half size (cm, largest axis) at its own scale
+			float mass = 10.0f;
+			bool confirmed = false;    // Minecraft has its token
+			UObject *level = nullptr;  // the player controller of its level (gone with it)
+		};
+		std::unordered_map<std::string, Carried> g_carried;
+		std::string g_shownId;           // what is shown in the hand now
+		int g_carryCounter = 0;
+
+		struct PickupTry
+		{
+			UObject *actor = nullptr;
+			UObject *body = nullptr;
+			DWORD start = 0;
+			bool active = false;
+		} g_pickup;
+
+		std::string narrow(const std::wstring &w)
+		{
+			std::string s;
+			for (wchar_t c : w)
+				s += c < 128 && c != '"' && c != '\\' ? char(c) : '_';
+			return s;
+		}
+
+		/// A readable name from the class: BP_Dining_chair_C -> "Dining chair", BP_Mug_apartments_C -> "Mug".
+		std::string object_name(UObject *actor)
+		{
+			std::wstring cls = actor->GetClassPrivate()->GetName();
+			if (cls.starts_with(L"BP_"))
+				cls = cls.substr(3);
+			if (cls.ends_with(L"_C"))
+				cls = cls.substr(0, cls.size() - 2);
+			std::string out;
+			size_t at = 0;
+			while (at <= cls.size())
+			{
+				size_t next = cls.find(L'_', at);
+				if (next == std::wstring::npos)
+					next = cls.size();
+				std::wstring part = cls.substr(at, next - at);
+				while (!part.empty() && iswdigit(part.back()))
+					part.pop_back();
+				if (!part.empty() && part != L"apartments" && part != L"house" && part != L"new" && part != L"NEW")
+					out += (out.empty() ? "" : " ") + narrow(part);
+				at = next + 1;
+			}
+			return out.empty() ? "Object" : out;
+		}
+
+		Vec3f look_dir()
+		{
+			const float d2r = 3.14159265f / 180.0f;
+			const float yaw = g_mcLookYaw * d2r, pitch = g_mcLookPitch * d2r;
+			return {-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch)};
+		}
+
+		/// The loose object under the crosshair, if it can be carried (else nullptr).
+		UObject *pickup_target(UObject *pawn, UObject **bodyOut)
+		{
+			if (!g_haveEye)
+				return nullptr;
+			const Vec3f dir = look_dir();
+			Call c(kismet(), STR("LineTraceSingle"));
+			if (!c)
+				return nullptr;
+			c.set<UObject *>(STR("WorldContextObject"), pawn)
+				.set(STR("Start"), g_eye)
+				.set(STR("End"), Vec3f{g_eye.x + dir.x * kPickupReach, g_eye.y + dir.y * kPickupReach, g_eye.z + dir.z * kPickupReach})
+				.set<uint8_t>(STR("TraceChannel"), 0)
+				.set(STR("ActorsToIgnore"), ScriptArray{nullptr, 0, 0})
+				.set_bool(STR("bTraceComplex"), false)
+				.set<uint8_t>(STR("DrawDebugType"), 0)
+				.set_bool(STR("bIgnoreSelf"), true);
+			c.invoke();
+			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
+			FProperty *outHit = c.property(STR("OutHit"));
+			if (!ok || !*ok || !outHit)
+				return nullptr;
+			Call brk(gameplay_statics(), STR("BreakHitResult"));
+			FProperty *hitParam = brk.property(STR("Hit"));
+			if (!brk || !hitParam)
+				return nullptr;
+			std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
+			brk.invoke();
+			UObject *const *actor = brk.param<UObject *>(STR("HitActor"));
+			UObject *const *component = brk.param<UObject *>(STR("HitComponent"));
+			if (!actor || !*actor || !component || !*component)
+				return nullptr;
+			Call simulating(*component, STR("IsSimulatingPhysics"));
+			simulating.set(STR("BoneName"), NameParam{}).invoke();
+			if (const uint8_t *yes = simulating.param<uint8_t>(STR("ReturnValue")); !yes || !*yes)
+				return nullptr;
+			Call root(*actor, STR("K2_GetRootComponent"));
+			root.invoke();
+			UObject *const *r = root.param<UObject *>(STR("ReturnValue"));
+			if (!r || *r != *component || hinged_part(*component))
+				return nullptr;
+			if (interactive_actor(*actor)) // a door, or one of HN's story items (keys...): HN's own pickup
+				return nullptr;
+			if (bodyOut)
+				*bodyOut = *component;
+			return *actor;
+		}
+
+		void set_carried_state(UObject *actor, UObject *body, bool inWorld)
+		{
+			Call(actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), !inWorld).invoke();
+			Call(actor, STR("SetActorEnableCollision")).set_bool(STR("bNewActorEnableCollision"), inWorld).invoke();
+			if (body)
+				Call(body, STR("SetSimulatePhysics")).set_bool(STR("bSimulate"), inWorld).invoke();
+		}
+
+		Vec3f actor_scale(UObject *actor)
+		{
+			Call c(actor, STR("GetActorScale3D"));
+			c.invoke();
+			const Vec3f *v = c.param<Vec3f>(STR("ReturnValue"));
+			return v ? *v : Vec3f{1, 1, 1};
+		}
+
+		void set_actor_scale(UObject *actor, const Vec3f &scale)
+		{
+			Call(actor, STR("SetActorScale3D")).set(STR("NewScale3D"), scale).invoke();
+		}
+
+		void place_actor(UObject *actor, const Vec3f &at, float yaw)
+		{
+			Call c(actor, STR("K2_SetActorLocationAndRotation"));
+			c.set(STR("NewLocation"), at).set(STR("NewRotation"), Rot3f{0.0f, yaw, 0.0f}).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+		}
+
+		/// Pickup completes: out of HN's world (hidden, no collision, no physics), and Minecraft is asked for a slot.
+		void complete_pickup(UObject *pc, UObject *actor, UObject *body)
+		{
+			Vec3f origin, extent;
+			Carried c;
+			c.actor = actor;
+			c.body = body;
+			c.cls = actor->GetClassPrivate()->GetFullName();
+			if (const size_t space = c.cls.find(L' '); space != std::wstring::npos)
+				c.cls = c.cls.substr(space + 1); // "BlueprintGeneratedClass /Game/...": the path
+			c.scale = actor_scale(actor);
+			if (actor_bounds(actor, origin, extent))
+				c.extent = std::max({extent.x, extent.y, extent.z, 5.0f});
+			c.mass = mass_of(body);
+			c.level = pc;
+			const std::string id = "hn" + std::to_string(++g_carryCounter) + "-" + narrow(actor->GetName());
+			set_carried_state(actor, body, false);
+			g_carried[id] = c;
+			const std::string name = object_name(actor);
+			sendf("{\"t\":\"pickup\",\"id\":\"%s\",\"name\":\"%s\",\"cls\":\"%s\",\"kg\":%d}", id.c_str(), name.c_str(), narrow(c.cls).c_str(), int(c.mass));
+			log(L"carry: picked up " + actor->GetName() + L" (" + std::wstring(name.begin(), name.end()) + L", " + std::to_wstring(int(c.mass)) +
+				L" kg, " + std::to_wstring(int(c.extent)) + L" cm) as " + std::wstring(id.begin(), id.end()) + L", waiting for Minecraft's inventory");
+		}
+
+		/// Minecraft's answer to a pickup: the token is in (the object stays out of HN's world) or not (it comes back).
+		void carry_answer(const std::string &id, bool ok, const std::string &why)
+		{
+			auto it = g_carried.find(id);
+			if (it == g_carried.end())
+				return;
+			if (ok)
+			{
+				it->second.confirmed = true;
+				return;
+			}
+			set_carried_state(it->second.actor, it->second.body, true);
+			log(L"carry: Minecraft didn't take " + std::wstring(id.begin(), id.end()) + L" (" + std::wstring(why.begin(), why.end()) + L"): back in HN's world");
+			notify(why == "inventory full" ? "Inventory full" : "Couldn't pick that up");
+			g_carried.erase(it);
+		}
+
+		bool overlaps_world(UObject *pawn, const Vec3f &at, float extent, UObject *ignore)
+		{
+			static const uint8_t types[] = {0, 1, 2, 3}; // WorldStatic, WorldDynamic, Pawn, PhysicsBody
+			Call c(kismet(), STR("BoxOverlapComponents"));
+			if (!c)
+				return false;
+			UObject *ignored[1] = {ignore};
+			const float e = extent * 0.9f;
+			c.set<UObject *>(STR("WorldContextObject"), pawn)
+				.set(STR("BoxPos"), at)
+				.set(STR("Extent"), Vec3f{e, e, e})
+				.set(STR("ObjectTypes"), ScriptArray{types, 4, 4})
+				.set<UObject *>(STR("ComponentClassFilter"), nullptr)
+				.set(STR("ActorsToIgnore"), ScriptArray{ignored, ignore ? 1 : 0, ignore ? 1 : 0});
+			c.invoke();
+			const uint8_t *any = c.param<uint8_t>(STR("ReturnValue"));
+			return any && *any;
+		}
+
+		/// The carried object for an id: the hidden one, or a new one of its class (the old one went with its level).
+		Carried *carried_for(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls)
+		{
+			if (auto it = g_carried.find(id); it != g_carried.end() && it->second.level == pc)
+				return &it->second;
+			g_carried.erase(id);
+			UObject *klass = cls.empty() ? nullptr : UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, std::wstring(cls.begin(), cls.end()).c_str());
+			UObject *statics = gameplay_statics();
+			if (!klass || !statics)
+			{
+				log(L"carry: " + std::wstring(id.begin(), id.end()) + L" can't be made again in this level (class not loaded)");
+				return nullptr;
+			}
+			Transform4 t;
+			t.pos[0] = g_eye.x, t.pos[1] = g_eye.y, t.pos[2] = g_eye.z - 1000.0f;
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), klass).set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
+			if (!begin.invoke())
+				return nullptr;
+			UObject **actor = begin.param<UObject *>(STR("ReturnValue"));
+			if (!actor || !*actor)
+				return nullptr;
+			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
+			Call root(*actor, STR("K2_GetRootComponent"));
+			root.invoke();
+			UObject *const *r = root.param<UObject *>(STR("ReturnValue"));
+			Carried c;
+			c.actor = *actor;
+			c.body = r ? *r : nullptr;
+			c.cls = std::wstring(cls.begin(), cls.end());
+			c.scale = actor_scale(*actor);
+			Vec3f origin, extent;
+			if (actor_bounds(*actor, origin, extent))
+				c.extent = std::max({extent.x, extent.y, extent.z, 5.0f});
+			c.mass = c.body ? mass_of(c.body) : 10.0f;
+			c.confirmed = true;
+			c.level = pc;
+			set_carried_state(c.actor, c.body, false);
+			log(L"carry: made a new " + (*actor)->GetName() + L" for " + std::wstring(id.begin(), id.end()));
+			return &(g_carried[id] = c);
+		}
+
+		/// Back into HN's world at `at`, as itself (scale, collision, physics), moving with `velocity`; Minecraft's
+		/// token goes after.
+		void release(const std::string &id, Carried &c, const Vec3f &at, const Vec3f &velocity)
+		{
+			set_actor_scale(c.actor, c.scale);
+			place_actor(c.actor, at, g_mcLookYaw + 90.0f);
+			set_carried_state(c.actor, c.body, true);
+			if (c.body)
+				Call(c.body, STR("SetPhysicsLinearVelocity")).set(STR("NewVel"), velocity).set_bool(STR("bAddToCurrent"), false)
+					.set(STR("BoneName"), NameParam{}).invoke();
+			sendf("{\"t\":\"consume\",\"id\":\"%s\"}", id.c_str());
+			if (g_shownId == id)
+				g_shownId.clear();
+			g_carried.erase(id);
+		}
+
+		/// Right click holding a carried object: put it down where Steve looks (on what the look meets, out of walls).
+		bool carry_place(UObject *pc, UObject *pawn)
+		{
+			Carried *c = carried_for(pc, pawn, g_heldId, g_heldCls);
+			if (!c)
+				return false;
+			const std::string id = g_heldId;
+			const Vec3f dir = look_dir();
+			const float reach = 250.0f;
+			Vec3f at{g_eye.x + dir.x * 120.0f, g_eye.y + dir.y * 120.0f, g_eye.z + dir.z * 120.0f};
+			Call trace(kismet(), STR("LineTraceSingle"));
+			UObject *ignored[1] = {c->actor};
+			trace.set<UObject *>(STR("WorldContextObject"), pawn).set(STR("Start"), g_eye)
+				.set(STR("End"), Vec3f{g_eye.x + dir.x * reach, g_eye.y + dir.y * reach, g_eye.z + dir.z * reach})
+				.set<uint8_t>(STR("TraceChannel"), 0).set(STR("ActorsToIgnore"), ScriptArray{ignored, 1, 1})
+				.set_bool(STR("bTraceComplex"), false).set<uint8_t>(STR("DrawDebugType"), 0).set_bool(STR("bIgnoreSelf"), true);
+			trace.invoke();
+			if (const uint8_t *hit = trace.param<uint8_t>(STR("ReturnValue")); hit && *hit)
+			{
+				Vec3f p;
+				if (impact_point(trace, p))
+				{
+					// back off the surface along the look by the object's half size
+					const float back = c->extent + 3.0f;
+					at = {p.x - dir.x * back, p.y - dir.y * back, p.z - dir.z * back + (dir.z < -0.3f ? c->extent : 0.0f)};
+				}
+			}
+			const float fromEye = std::hypot(at.x - g_eye.x, at.y - g_eye.y);
+			bool free = false;
+			for (int lift = 0; lift < 4 && !free; ++lift)
+			{
+				const Vec3f tryAt{at.x, at.y, at.z + lift * 10.0f};
+				if (!overlaps_world(pawn, tryAt, c->extent, c->actor) && fromEye > 20.0f)
+				{
+					at = tryAt;
+					free = true;
+				}
+			}
+			if (!free)
+			{
+				notify("No room to put it there");
+				log(L"carry: no room to place " + std::wstring(id.begin(), id.end()));
+				return false;
+			}
+			log(L"carry: placed " + std::wstring(id.begin(), id.end()));
+			release(id, *c, at, Vec3f{});
+			return true;
+		}
+
+		/// Q holding a carried object: thrown along the look, a little upwards, from just in front of Steve.
+		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls)
+		{
+			Carried *c = carried_for(pc, pawn, id, cls);
+			if (!c)
+				return false;
+			const Vec3f dir = look_dir();
+			const float out = g_steveWidth * 0.5f + c->extent + 10.0f;
+			const Vec3f at{g_eye.x + dir.x * out, g_eye.y + dir.y * out, g_eye.z - 20.0f + dir.z * out};
+			if (overlaps_world(pawn, at, c->extent, c->actor))
+			{
+				notify("No room to throw it");
+				log(L"carry: no room to throw " + std::wstring(id.begin(), id.end()));
+				return false;
+			}
+			// lighter objects fly further; on HN's mass scale (props 30-400 kg) 6-11 m/s
+			const float speed = std::clamp(1100.0f / (1.0f + c->mass / 600.0f), 600.0f, 1100.0f);
+			const Vec3f v{dir.x * speed, dir.y * speed, dir.z * speed + 200.0f};
+			log(L"carry: threw " + std::wstring(id.begin(), id.end()) + L" at " + std::to_wstring(int(speed)) + L" cm/s");
+			release(id, *c, at, v);
+			g_ws.send("{\"t\":\"swing\"}");
+			return true;
+		}
+
+		bool carry_start_pickup(UObject *pawn)
+		{
+			UObject *body = nullptr;
+			UObject *actor = pickup_target(pawn, &body);
+			if (!actor)
+				return false;
+			g_pickup = {actor, body, GetTickCount(), true};
+			return true;
+		}
+
+		void carry_cancel_pickup()
+		{
+			if (g_pickup.active)
+				notify("");
+			g_pickup.active = false;
+		}
+
+		/// Every tick while Minecraft drives: the pickup in progress, and the carried object in the hand.
+		void carry_tick(UObject *pc, UObject *pawn)
+		{
+			// a level change took the hidden objects with it
+			for (auto it = g_carried.begin(); it != g_carried.end();)
+				it = it->second.level != pc ? g_carried.erase(it) : std::next(it);
+			if (g_pickup.active)
+			{
+				UObject *body = nullptr;
+				UObject *now = pickup_target(pawn, &body);
+				const DWORD held = GetTickCount() - g_pickup.start;
+				if (now != g_pickup.actor)
+				{
+					g_pickup.active = false;
+					notify("");
+				}
+				else if (held >= kPickupHold)
+				{
+					g_pickup.active = false;
+					notify("");
+					complete_pickup(pc, g_pickup.actor, g_pickup.body);
+				}
+				else
+				{
+					static DWORD nextNote = 0;
+					if (GetTickCount() > nextNote)
+					{
+						nextNote = GetTickCount() + 100;
+						const int filled = int(10 * held / kPickupHold);
+						notify("Picking up " + object_name(g_pickup.actor) + " [" + std::string(filled, '#') + std::string(10 - filled, '.') + "]");
+					}
+				}
+			}
+			// the object in the selected slot, where Minecraft's hand is: right of and below the view, its size
+			// fitted (at most ~35 cm across), turned with the look
+			if (g_shownId != g_heldId)
+			{
+				if (auto it = g_carried.find(g_shownId); it != g_carried.end())
+				{
+					set_actor_scale(it->second.actor, it->second.scale);
+					set_carried_state(it->second.actor, nullptr, false);
+					Call(it->second.actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
+				}
+				g_shownId.clear();
+			}
+			if (g_heldId.empty())
+				return;
+			Carried *c = nullptr;
+			if (auto it = g_carried.find(g_heldId); it != g_carried.end() && it->second.confirmed)
+				c = &it->second;
+			if (!c)
+				return;
+			g_shownId = g_heldId;
+			const float fit = std::min(1.0f, 17.0f / c->extent);
+			set_actor_scale(c->actor, Vec3f{c->scale.x * fit, c->scale.y * fit, c->scale.z * fit});
+			Call(c->actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), false).invoke();
+			const Vec3f fwd = look_dir();
+			const float d2r = 3.14159265f / 180.0f;
+			const float yaw = g_mcLookYaw * d2r;
+			const Vec3f right{-std::cos(yaw), -std::sin(yaw), 0.0f};
+			const Vec3f hand{g_mcCamera.x + fwd.x * 45.0f + right.x * 22.0f, g_mcCamera.y + fwd.y * 45.0f + right.y * 22.0f,
+				g_mcCamera.z + fwd.z * 45.0f - 22.0f};
+			place_actor(c->actor, hand, g_mcLookYaw + 90.0f);
 		}
 
 		// ---- doors ----------------------------------------------------------------------------------------------------
@@ -2706,21 +3218,23 @@ namespace nc
 						}
 			}
 			// what changed since last tick goes to Minecraft (with the block's static shape)
+			// blocks whose moving collision changed: sent again, and their static part probed again (a probe taken
+			// while the part was there may hold pieces of it; the moving collision has it now)
+			auto restale = [](unsigned long long key) {
+				BlockBits &b = g_bits[key];
+				b.boxKnown = false;
+				g_columns.erase(cell_key(cell_x(key), 0, cell_z(key)));
+				g_dirty.insert(key);
+			};
 			for (auto &[key, bits] : now)
 			{
 				const auto old = g_dynBits.find(key);
 				if (old == g_dynBits.end() || old->second != bits)
-				{
-					g_bits[key];
-					g_dirty.insert(key);
-				}
+					restale(key);
 			}
 			for (auto &[key, bits] : g_dynBits)
 				if (!now.count(key))
-				{
-					g_bits[key];
-					g_dirty.insert(key);
-				}
+					restale(key);
 			g_dynBits = std::move(now);
 		}
 
@@ -2892,6 +3406,46 @@ namespace nc
 		compositor::set_active(false);
 		compositor::unregister(g_module);
 		g_ws.stop();
+	}
+
+	// HN's frame times while Minecraft drives, and the world probe's share (every 5 s in the log): the evidence for
+	// stutter (a hill's re-probing used the probe's whole budget frame after frame)
+	struct FrameStats
+	{
+		double frameSum = 0, frameMax = 0, probeSum = 0, probeMax = 0;
+		int frames = 0, hitches = 0;
+		std::chrono::steady_clock::time_point last{}, next{};
+	} g_frameStats;
+
+	void frame_stats(double probeMs)
+	{
+		FrameStats &f = g_frameStats;
+		const auto now = std::chrono::steady_clock::now();
+		if (f.last.time_since_epoch().count() != 0 && g_driving)
+		{
+			const double ms = std::chrono::duration<double, std::milli>(now - f.last).count();
+			f.frameSum += ms;
+			f.frameMax = std::max(f.frameMax, ms);
+			f.hitches += ms > 50.0;
+			f.probeSum += probeMs;
+			f.probeMax = std::max(f.probeMax, probeMs);
+			++f.frames;
+		}
+		f.last = now;
+		if (now > f.next)
+		{
+			if (f.frames > 0)
+			{
+				wchar_t text[256];
+				swprintf(text, 256, L"frames: %d in 5 s, average %.1f ms, worst %.1f ms, %d over 50 ms; world probe average %.2f ms, worst %.1f ms",
+					f.frames, f.frameSum / f.frames, f.frameMax, f.hitches, f.probeSum / f.frames, f.probeMax);
+				log(text);
+			}
+			const auto next = now + std::chrono::seconds(5);
+			f = FrameStats{};
+			f.last = now;
+			f.next = next;
+		}
 	}
 
 	void tick(void *engine_object, float)
@@ -3130,10 +3684,15 @@ namespace nc
 			physics_tick(pawn);
 			for (const Punch &punch : g_punches)
 				physics_punch(pawn, punch);
+			g_controlsPc = pc;
+			carry_tick(pc, pawn);
+			for (const std::string &id : g_throwRequests)
+				carry_throw(pc, pawn, id, g_heldId == id ? g_heldCls : std::string{});
 		}
 		else
 			g_nearPhysics.clear();
 		g_punches.clear();
+		g_throwRequests.clear();
 		if (g_driving && g_mcReady)
 			dynamic_tick(pc);
 		// The loose objects near Steve are moving collision (see the moving parts), so the world probe looks past them:
@@ -3160,7 +3719,9 @@ namespace nc
 			if (standalone)
 				g_probeIgnoreNow.push_back(*actor);
 		}
+		const auto probeStart = std::chrono::steady_clock::now();
 		const bool ready = g_mcReady && sample_world(pawn, g_driving && g_haveEye ? g_eye : cam.loc);
+		frame_stats(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - probeStart).count());
 		if (g_gridPhysics && !g_driving && ready)
 		{
 			// the house around the player is known: Minecraft takes over the walking

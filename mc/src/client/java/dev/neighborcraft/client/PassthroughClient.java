@@ -96,7 +96,22 @@ public class PassthroughClient implements ClientModInitializer {
 		});
 	}
 
+	private static String heldReported = null;
+	private static int heldRepeat;
+
 	private static void tick(final Minecraft minecraft) {
+		// the Hello Neighbor object in the selected hotbar slot (if any): HN shows that very object in the hand
+		if (minecraft.player != null) {
+			var data = dev.neighborcraft.Carry.data(minecraft.player.getMainHandItem());
+			String id = data.getStringOr("id", "");
+			if (!id.equals(heldReported) || ++heldRepeat >= 40) {
+				heldReported = id;
+				heldRepeat = 0;
+				dev.neighborcraft.Passthrough.events.accept(String.format(java.util.Locale.ROOT, "{\"t\":\"held\",\"id\":\"%s\",\"cls\":\"%s\"}",
+					id, data.getStringOr("cls", "")));
+			}
+		}
+
 		// a death (the void) would leave the death screen over the host's picture: respawn straight away
 		if (minecraft.player != null && minecraft.gui.screen() instanceof DeathScreen && --respawnIn <= 0) {
 			respawnIn = 40;

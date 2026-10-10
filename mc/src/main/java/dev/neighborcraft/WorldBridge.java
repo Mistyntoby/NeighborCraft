@@ -16,6 +16,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 /** Server-side half: Hello Neighbor's collision as invisible barrier blocks, commands, and events back to the host. */
@@ -58,7 +59,7 @@ public final class WorldBridge {
 		return server != null;
 	}
 
-	static MinecraftServer server() {
+	public static MinecraftServer server() {
 		return server;
 	}
 
@@ -215,7 +216,7 @@ public final class WorldBridge {
 					HostBlock.SHAPES.put(pos.asLong(), built[mask]);
 					mask++;
 				} else {
-					HostBlock.SHAPES.remove(pos.asLong());
+					HostBlock.SHAPES.put(pos.asLong(), Shapes.block()); // full: said, never assumed (see HostBlock.shape)
 				}
 
 				if (current.isAir() || current.is(Blocks.BARRIER)) {

@@ -9,6 +9,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.BlockBehaviour;
@@ -29,6 +30,8 @@ public class Passthrough implements ModInitializer {
 	public static volatile Consumer<String> events = message -> {};
 	/** Hello Neighbor's world: invisible blocks shaped like HN's geometry (see HostBlock). */
 	public static Block HOST;
+	/** A Hello Neighbor object carried in Minecraft's inventory (see Carry). */
+	public static Item HN_OBJECT;
 	/** The block standing for HN's surface material under the player (grass, wood, tiles ...), from the host. */
 	public static volatile BlockState surface;
 
@@ -44,6 +47,9 @@ public class Passthrough implements ModInitializer {
 		HOST = Registry.register(BuiltInRegistries.BLOCK, key, new HostBlock(BlockBehaviour.Properties.of()
 			.setId(key).strength(-1.0F, 3600000.0F).noLootTable().noOcclusion().dynamicShape()
 			.isSuffocating((state, level, pos) -> false)));
+		ResourceKey<Item> itemKey = ResourceKey.create(Registries.ITEM, Identifier.fromNamespaceAndPath(ID, "hn_object"));
+		HN_OBJECT = Registry.register(BuiltInRegistries.ITEM, itemKey, new Item(new Item.Properties().setId(itemKey).stacksTo(1)));
+		ServerTickEvents.END_SERVER_TICK.register(Carry::tick);
 		// HN's world can't be broken from Minecraft (creative would otherwise break it instantly)
 		PlayerBlockBreakEvents.BEFORE.register((level, player, pos, state, entity) -> !state.is(HOST));
 		ServerLifecycleEvents.SERVER_STARTED.register(WorldBridge::attach);

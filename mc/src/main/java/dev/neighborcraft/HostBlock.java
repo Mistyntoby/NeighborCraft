@@ -29,9 +29,16 @@ public final class HostBlock extends Block {
 		super(properties);
 	}
 
+	/**
+	 * The shape at a position; none known: empty. The map is shared by the server and the client (one process), and
+	 * when HN empties a block (a door leaf swung away) the server drops its shape before the client hears the block is
+	 * gone: for that moment the client had a host block without a shape, which was a full cube, at Steve's head beside
+	 * an opening door, and Minecraft made him crawl (the recorder: a whole block in his standing box the tick before
+	 * every forced crawl, gone the tick after). A host block without a shape is on its way out; full ones say so.
+	 */
 	static VoxelShape shape(final BlockPos pos) {
 		VoxelShape s = SHAPES.get(pos.asLong());
-		return s == null ? Shapes.block() : s;
+		return s == null ? Shapes.empty() : s;
 	}
 
 	/**
