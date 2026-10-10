@@ -9,7 +9,7 @@
 //
 // Coordinates: 1 metre = 1 block. Unreal (x, y, z) in cm, z up, left-handed -> Minecraft (x/100, z/100 + yOffset,
 // y/100) (swapping y and z also turns the handedness right). Minecraft yaw = Unreal yaw - 90, pitch = -pitch.
-// yOffset puts the ground where the player first stands on a whole block.
+// yOffset (~140) keeps all of HN's height inside Minecraft's world and puts the ground on a whole block.
 //
 // Keys: Minecraft's own (see minecraft_controls), F7 passthrough on/off, F8 re-level, F9 reflection dump,
 // F10 Minecraft physics (blocky collision) on/off.
@@ -52,6 +52,7 @@ namespace nc
 		constexpr DWORD kVoxRefreshMs = 1500;
 		constexpr int kDriveReadyRadius = 2;   // cells known around the player before Minecraft takes over
 		constexpr float kResyncCm = 150.0f;    // HN moved its player itself (caught, cutscene): follow it
+		constexpr double kYBase = 140.0;       // Minecraft y of HN height 0 (see relevel)
 
 		WsClient g_ws;
 		void *g_module = nullptr;
@@ -1018,7 +1019,10 @@ namespace nc
 			if (!ground_below(pawn, p, groundZ))
 				return;
 			const double metres = groundZ / 100.0;
-			g_yOffset = std::round(metres) - metres;
+			// HN spans more height than Minecraft's world (-64..320): its nightmare rooms are ~140 m under the house, so
+			// HN height 0 sits at Minecraft y ~140 (HN -200 m .. +180 m fit); the fraction puts the ground here on a
+			// whole block, and the shift is constant so the yard and the nightmare rooms keep their relative heights
+			g_yOffset = kYBase + std::round(metres) - metres;
 			g_haveOffset = true;
 			g_cells.clear();
 			g_bits.clear();
