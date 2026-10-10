@@ -56,7 +56,7 @@ namespace
 		resource tex = {0};
 		resource_view srv = {0};
 	};
-	Layer g_world, g_depth, g_overlay;
+	Layer g_world, g_depth, g_overlay, g_hand;
 	uint32_t g_width = 0, g_height = 0;
 	bool g_hasFrame = false;
 	float g_mcNear = 0.05f, g_mcFar = 2048.0f;
@@ -105,7 +105,7 @@ namespace
 
 	void destroy_layers(device *dev)
 	{
-		for (Layer *layer : {&g_world, &g_depth, &g_overlay})
+		for (Layer *layer : {&g_world, &g_depth, &g_overlay, &g_hand})
 		{
 			if (layer->srv.handle != 0)
 				dev->destroy_resource_view(layer->srv);
@@ -131,6 +131,7 @@ namespace
 		runtime->update_texture_bindings("MCWORLD", g_world.srv, g_world.srv);
 		runtime->update_texture_bindings("MCDEPTH", g_depth.srv, g_depth.srv);
 		runtime->update_texture_bindings("MCOVERLAY", g_overlay.srv, g_overlay.srv);
+		runtime->update_texture_bindings("MCHAND", g_hand.srv, g_hand.srv);
 	}
 
 	/// Upload the newest published Minecraft frame, if there is one we haven't shown yet.
@@ -155,7 +156,8 @@ namespace
 			destroy_layers(dev);
 			if (!create_layer(dev, g_world, w, h, format::r8g8b8a8_unorm) ||
 				!create_layer(dev, g_depth, w, h, format::r32_float) ||
-				!create_layer(dev, g_overlay, w, h, format::r8g8b8a8_unorm))
+				!create_layer(dev, g_overlay, w, h, format::r8g8b8a8_unorm) ||
+				!create_layer(dev, g_hand, w, h, format::r8g8b8a8_unorm))
 			{
 				destroy_layers(dev);
 				return;
@@ -175,6 +177,8 @@ namespace
 		dev->update_texture_region(data, g_depth.tex, 0);
 		data.data = const_cast<uint8_t *>(base + 2 * layer);
 		dev->update_texture_region(data, g_overlay.tex, 0);
+		data.data = const_cast<uint8_t *>(base + 3 * layer);
+		dev->update_texture_region(data, g_hand.tex, 0);
 		if (read<int64_t>(desc) != seq)
 			return; // Minecraft rewrote the slot mid-copy: show the next one instead
 		g_lastPublish = published;

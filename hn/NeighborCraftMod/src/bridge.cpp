@@ -74,6 +74,7 @@ namespace nc
 		uint8_t g_savedMovementMode = 1;
 
 		// Minecraft's controls and camera
+		UObject *g_controlsPawn = nullptr; // HN's player this tick (for the controls' traces)
 		std::atomic<bool> g_minecraftInput{false};  // swallow HN's copies of Minecraft's keys
 		std::atomic<bool> g_minecraftScreen{false}; // a Minecraft screen is open: the mouse is Minecraft's too
 		std::atomic<int> g_wheel{0};                // wheel notches since the last tick
@@ -357,9 +358,11 @@ namespace nc
 		/// Neighbor (he moves).
 		std::vector<UObject *> g_probeIgnore;
 
+		std::vector<UObject *> g_probeIgnoreNow; // g_probeIgnore plus this tick's physics objects near Steve
+
 		ScriptArray ignore_list()
 		{
-			return {g_probeIgnore.data(), int32(g_probeIgnore.size()), int32(g_probeIgnore.size())};
+			return {g_probeIgnoreNow.data(), int32(g_probeIgnoreNow.size()), int32(g_probeIgnoreNow.size())};
 		}
 
 		/// Offset of OutHit.ImpactPoint in a trace function's parameter block.
@@ -1482,6 +1485,8 @@ namespace nc
 		/// Minecraft's use (place a block, use the item).
 		void right_click(UObject *pawn = nullptr);
 
+		void physics_swing(UObject *pawn);
+
 		/// Minecraft's keybinds, sent every tick (held keys) or on change (presses).
 		void minecraft_controls(UObject *pc)
 		{
@@ -1497,21 +1502,32 @@ namespace nc
 			if (g_minecraftScreen)
 			{
 				// the inventory: HN's cursor and buttons drive Minecraft's screen
+				// the cursor as a fraction of HN's client area (Minecraft's window has its own pixel size and GUI scale)
 				POINT cursor;
+				RECT client;
 				GetCursorPos(&cursor);
 				ScreenToClient(g_hnWindow, &cursor);
-				sendf("{\"t\":\"mouse\",\"x\":%d,\"y\":%d}", cursor.x, cursor.y);
+				GetClientRect(g_hnWindow, &client);
+				const double nx = double(cursor.x) / std::max<LONG>(1, client.right - client.left);
+				const double ny = double(cursor.y) / std::max<LONG>(1, client.bottom - client.top);
+				sendf("{\"t\":\"mouse\",\"x\":%.5f,\"y\":%.5f}", nx, ny);
 				const int buttons[3] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON};
 				for (int b = 0; b < 3; ++b)
 					if (const int e = edge(buttons[b]))
-						sendf("{\"t\":\"click\",\"b\":%d,\"down\":%s,\"x\":%d,\"y\":%d}", b, e > 0 ? "true" : "false", cursor.x, cursor.y);
+						sendf("{\"t\":\"click\",\"b\":%d,\"down\":%s,\"x\":%.5f,\"y\":%.5f}", b, e > 0 ? "true" : "false", nx, ny);
 				if (wheel)
-					sendf("{\"t\":\"wheel\",\"d\":%d,\"x\":%d,\"y\":%d}", wheel, cursor.x, cursor.y);
+					sendf("{\"t\":\"wheel\",\"d\":%d,\"x\":%.5f,\"y\":%.5f}", wheel, nx, ny);
 				if (pressed(VK_ESCAPE))
 					g_ws.send("{\"t\":\"key\",\"k\":\"escape\",\"down\":true}");
 				return;
 			}
-			forward_key(VK_LBUTTON, "attack");
+			// Minecraft's attack; a swing also pushes the physics object it hits in HN
+			if (const int attack = edge(VK_LBUTTON))
+			{
+				sendf("{\"t\":\"key\",\"k\":\"attack\",\"down\":%s}", attack > 0 ? "true" : "false");
+				if (attack > 0 && g_controlsPawn)
+					physics_swing(g_controlsPawn);
+			}
 			right_click();
 			forward_key(VK_MBUTTON, "pick");
 			for (int i = 0; i < 9; ++i)
@@ -1522,7 +1538,6 @@ namespace nc
 		}
 
 		bool g_rightClickHN = false; // the held right click went to HN (its E)
-		UObject *g_controlsPawn = nullptr;
 
 		void right_click(UObject *)
 		{
@@ -1552,14 +1567,36 @@ namespace nc
 			}
 		}
 
-		/// While a Minecraft screen is open HN shows its cursor and stops turning the camera.
+		/// The cursor to the middle of HN's view (a menu opening: never left wherever the hidden game cursor was).
+		void centre_cursor(UObject *pc)
+		{
+			RECT r;
+			if (!g_hnWindow || !GetClientRect(g_hnWindow, &r))
+				return;
+			Call(pc, STR("SetMouseLocation")).set<int32>(STR("X"), (r.right - r.left) / 2).set<int32>(STR("Y"), (r.bottom - r.top) / 2).invoke();
+		}
+
+		/// While a Minecraft screen (the inventory) is open: HN's cursor shows and moves freely (game and UI input, not
+		/// locked to the window), starting in the middle; HN's camera doesn't turn (the look is ours and is paused).
+		/// Back to game-only input, cursor hidden, when it closes.
 		void minecraft_screen_mode(UObject *pc, bool open)
 		{
 			static bool applied = false;
 			if (applied == open)
 				return;
 			applied = open;
+			static UObject *widgets = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/UMG.Default__WidgetBlueprintLibrary"));
 			set_bool_property(pc, STR("bShowMouseCursor"), open);
+			if (widgets)
+			{
+				if (open)
+					Call(widgets, STR("SetInputMode_GameAndUIEx")).set<UObject *>(STR("PlayerController"), pc).set<UObject *>(STR("InWidgetToFocus"), nullptr)
+						.set<uint8_t>(STR("InMouseLockMode"), 0).set_bool(STR("bHideCursorDuringCapture"), false).invoke();
+				else
+					Call(widgets, STR("SetInputMode_GameOnly")).set<UObject *>(STR("PlayerController"), pc).invoke();
+			}
+			if (open)
+				centre_cursor(pc);
 		}
 
 		// ---- HN renders from Minecraft's camera ------------------------------------------------------------
@@ -1766,6 +1803,213 @@ namespace nc
 			notify("NeighborCraft: collision map written");
 		}
 
+		// ---- physics objects: Steve nudges what he walks into and pushes what he hits ---------------------------------
+		// HN's loose objects simulate physics (PhysicsBody). Within reach of Steve they stay out of the world probe (so
+		// Minecraft doesn't treat them as walls), and HN's physics moves them: walking into one gives it a velocity
+		// change towards where Steve goes (less for heavier ones); a swing gives the object hit an impulse at the hit
+		// point (its mass decides how far it goes), once per swing.
+
+		struct ObjectArray
+		{
+			UObject **data;
+			int32 num, max;
+		};
+		const uint8_t kPhysicsTypes[] = {3}; // ObjectTypeQuery4 = PhysicsBody
+		std::vector<UObject *> g_nearPhysics; // components simulating physics near Steve, this tick only
+
+		std::vector<UObject *> physics_near(UObject *pawn, const Vec3f &at, float radius)
+		{
+			std::vector<UObject *> out;
+			Call c(kismet(), STR("SphereOverlapComponents"));
+			if (!c)
+				return out;
+			c.set<UObject *>(STR("WorldContextObject"), pawn)
+				.set(STR("SpherePos"), at)
+				.set(STR("SphereRadius"), radius)
+				.set(STR("ObjectTypes"), ScriptArray{kPhysicsTypes, 1, 1})
+				.set<UObject *>(STR("ComponentClassFilter"), nullptr)
+				.set(STR("ActorsToIgnore"), ScriptArray{nullptr, 0, 0});
+			c.invoke();
+			if (const ObjectArray *found = c.param<ObjectArray>(STR("OutComponents")); found && found->data)
+				for (int32 i = 0; i < found->num; ++i)
+				{
+					UObject *component = found->data[i];
+					Call simulating(component, STR("IsSimulatingPhysics"));
+					simulating.set(STR("BoneName"), NameParam{}).invoke();
+					if (const uint8_t *yes = simulating.param<uint8_t>(STR("ReturnValue")); yes && *yes)
+						out.push_back(component);
+				}
+			return out;
+		}
+
+		float mass_of(UObject *component)
+		{
+			Call c(component, STR("GetMass"));
+			c.invoke();
+			const float *m = c.param<float>(STR("ReturnValue"));
+			return m && *m > 0.0f ? *m : 10.0f;
+		}
+
+		Vec3f component_location(UObject *component)
+		{
+			Call c(component, STR("K2_GetComponentLocation"));
+			c.invoke();
+			const Vec3f *v = c.param<Vec3f>(STR("ReturnValue"));
+			return v ? *v : Vec3f{};
+		}
+
+		/// Every tick while Minecraft drives: the physics objects around Steve (kept out of this tick's probes), and a
+		/// nudge for the ones he walks into.
+		void physics_tick(UObject *pawn)
+		{
+			static Vec3f lastEye;
+			static bool haveLast = false;
+			static DWORD lastTime = 0;
+			g_nearPhysics.clear();
+			if (!g_haveEye)
+				return;
+			const Vec3f body{g_eye.x, g_eye.y, g_eye.z - 80.0f};
+			g_nearPhysics = physics_near(pawn, body, 250.0f);
+			const DWORD now = GetTickCount();
+			const float dt = haveLast ? std::max(1.0f, float(now - lastTime)) / 1000.0f : 0.0f;
+			const Vec3f v = haveLast && dt > 0.0f ? Vec3f{(g_eye.x - lastEye.x) / dt, (g_eye.y - lastEye.y) / dt, 0.0f} : Vec3f{};
+			lastEye = g_eye;
+			lastTime = now;
+			haveLast = true;
+			const float speed = std::hypot(v.x, v.y);
+			if (speed < 50.0f) // walking speed in cm/s
+				return;
+			for (UObject *component : g_nearPhysics)
+			{
+				const Vec3f at = component_location(component);
+				const float dx = at.x - body.x, dy = at.y - body.y, d = std::hypot(dx, dy);
+				if (d > 80.0f || std::abs(at.z - body.z) > 100.0f || d < 1.0f)
+					continue;
+				// only what Steve walks towards, and gently: a share of his speed, less the heavier it is
+				const float towards = (dx * v.x + dy * v.y) / (d * speed);
+				if (towards < 0.3f)
+					continue;
+				const float dv = std::min(speed * 0.6f, 300.0f) * towards / (1.0f + mass_of(component) / 20.0f);
+				Call(component, STR("AddImpulse")).set(STR("Impulse"), Vec3f{v.x / speed * dv, v.y / speed * dv, 0.0f})
+					.set(STR("BoneName"), NameParam{}).set_bool(STR("bVelChange"), true).invoke();
+			}
+		}
+
+		/// A swing (Minecraft's attack): the physics object under the crosshair within reach gets an impulse at the hit
+		/// point along the look; at most one per 0.4 s.
+		void physics_swing(UObject *pawn)
+		{
+			static DWORD next = 0;
+			if (!g_haveMcCamera || GetTickCount() < next)
+				return;
+			const float d2r = 3.14159265f / 180.0f;
+			const float yaw = g_mcYaw * d2r, pitch = g_mcPitch * d2r;
+			const Vec3f dir{-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch)};
+			Call c(kismet(), STR("LineTraceSingleForObjects"));
+			if (!c)
+				return;
+			c.set<UObject *>(STR("WorldContextObject"), pawn)
+				.set(STR("Start"), g_mcCamera)
+				.set(STR("End"), Vec3f{g_mcCamera.x + dir.x * 300.0f, g_mcCamera.y + dir.y * 300.0f, g_mcCamera.z + dir.z * 300.0f})
+				.set(STR("ObjectTypes"), ScriptArray{kPhysicsTypes, 1, 1})
+				.set(STR("ActorsToIgnore"), ScriptArray{nullptr, 0, 0})
+				.set_bool(STR("bTraceComplex"), false)
+				.set<uint8_t>(STR("DrawDebugType"), 0)
+				.set_bool(STR("bIgnoreSelf"), true);
+			c.invoke();
+			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
+			FProperty *outHit = c.property(STR("OutHit"));
+			if (!ok || !*ok || !outHit)
+				return;
+			Call brk(gameplay_statics(), STR("BreakHitResult"));
+			FProperty *hitParam = brk.property(STR("Hit"));
+			if (!brk || !hitParam)
+				return;
+			std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
+			brk.invoke();
+			UObject *const *component = brk.param<UObject *>(STR("HitComponent"));
+			const Vec3f *point = brk.param<Vec3f>(STR("ImpactPoint"));
+			if (!component || !*component || !point)
+				return;
+			Call simulating(*component, STR("IsSimulatingPhysics"));
+			simulating.set(STR("BoneName"), NameParam{}).invoke();
+			if (const uint8_t *yes = simulating.param<uint8_t>(STR("ReturnValue")); !yes || !*yes)
+				return;
+			next = GetTickCount() + 400;
+			const float impulse = 1800.0f; // kg cm/s: a 5 kg box flies off at ~3.6 m/s, a 30 kg one shifts
+			Call(*component, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{dir.x * impulse, dir.y * impulse, dir.z * impulse + impulse * 0.25f})
+				.set(STR("Location"), *point).set(STR("BoneName"), NameParam{}).invoke();
+		}
+
+		// ---- HN's surface material under Steve, for Minecraft's particles and footsteps -----------------------------
+
+		/// HN's physical material name (PM_Grass, Wood, Tile ...) as the Minecraft block that looks and sounds like it.
+		const char *block_for_material(const std::wstring &name)
+		{
+			std::wstring n = name;
+			std::transform(n.begin(), n.end(), n.begin(), ::towlower);
+			struct Pair
+			{
+				const wchar_t *key;
+				const char *block;
+			};
+			static const Pair map[] = {
+				{L"grass", "minecraft:grass_block"}, {L"earth", "minecraft:dirt"}, {L"dirt", "minecraft:dirt"}, {L"ground", "minecraft:dirt"},
+				{L"sand", "minecraft:sand"}, {L"wood", "minecraft:oak_planks"}, {L"furniture", "minecraft:oak_planks"}, {L"parquet", "minecraft:oak_planks"},
+				{L"tile", "minecraft:smooth_stone"}, {L"road", "minecraft:gray_concrete"}, {L"asphalt", "minecraft:gray_concrete"},
+				{L"concrete", "minecraft:light_gray_concrete"}, {L"stone", "minecraft:stone"}, {L"carpet", "minecraft:white_wool"},
+				{L"metal", "minecraft:iron_block"}, {L"rail", "minecraft:iron_block"}, {L"ice", "minecraft:ice"}, {L"water", "minecraft:water"},
+				{L"plastic", "minecraft:white_concrete"}, {L"flour", "minecraft:white_concrete_powder"}, {L"glue", "minecraft:slime_block"},
+				{L"paper", "minecraft:white_wool"}, {L"glass", "minecraft:glass"},
+			};
+			for (const Pair &p : map)
+				if (n.find(p.key) != std::wstring::npos)
+					return p.block;
+			return "minecraft:stone";
+		}
+
+		void surface_tick(UObject *pawn)
+		{
+			static DWORD next = 0;
+			static std::string sent;
+			if (!g_haveEye || GetTickCount() < next)
+				return;
+			next = GetTickCount() + 250;
+			Call c(kismet(), STR("LineTraceSingle"));
+			if (!c)
+				return;
+			c.set<UObject *>(STR("WorldContextObject"), pawn)
+				.set(STR("Start"), g_eye)
+				.set(STR("End"), Vec3f{g_eye.x, g_eye.y, g_eye.z - 250.0f})
+				.set<uint8_t>(STR("TraceChannel"), 0)
+				.set(STR("ActorsToIgnore"), ignore_list())
+				.set_bool(STR("bTraceComplex"), true)
+				.set<uint8_t>(STR("DrawDebugType"), 0)
+				.set_bool(STR("bIgnoreSelf"), true);
+			c.invoke();
+			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
+			FProperty *outHit = c.property(STR("OutHit"));
+			if (!ok || !*ok || !outHit)
+				return;
+			Call brk(gameplay_statics(), STR("BreakHitResult"));
+			FProperty *hitParam = brk.property(STR("Hit"));
+			if (!brk || !hitParam)
+				return;
+			std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
+			brk.invoke();
+			UObject *const *material = brk.param<UObject *>(STR("PhysMat"));
+			const std::string block = material && *material ? block_for_material((*material)->GetName()) : "minecraft:stone";
+			if (block != sent)
+			{
+				sent = block;
+				sendf("{\"t\":\"surface\",\"b\":\"%s\"}", block.c_str());
+				static int logged = 0;
+				if (logged++ < 30)
+					log(L"surface: " + (material && *material ? (*material)->GetName() : StringType(L"(none)")) + L" -> " +
+						std::wstring(block.begin(), block.end()));
+			}
+		}
+
 		// ---- F9 dump -----------------------------------------------------------------------------------------
 
 		void dump_object(std::wofstream &f, UObject *o, const wchar_t *label)
@@ -1850,6 +2094,14 @@ namespace nc
 			hide_minecraft_window();
 		}
 
+		if (pressed(VK_F12))
+		{
+			static bool debug = false;
+			debug = !debug;
+			sendf("{\"t\":\"debug\",\"on\":%s}", debug ? "true" : "false");
+			log(debug ? L"collision recorder + debug view on (F12)" : L"collision recorder off");
+			notify(debug ? "Collision recorder ON (F12 to stop)" : "Collision recorder off");
+		}
 		if (pressed(VK_F7))
 		{
 			g_enabled = !g_enabled;
@@ -1870,6 +2122,10 @@ namespace nc
 
 		Camera cam;
 		const bool gameplay = pawn && in_gameplay(pc);
+		static bool wasGameplay = false;
+		if (wasGameplay && !gameplay && pc)
+			centre_cursor(pc);
+		wasGameplay = gameplay;
 		// Minecraft pauses whenever HN isn't in gameplay (pause menu, main menu) or the passthrough is off
 		static bool mcPaused = false;
 		if (!g_ws.connected())
@@ -2051,6 +2307,18 @@ namespace nc
 			notify(g_gridPhysics ? "Minecraft physics: blocky collision" : "HN collision, Minecraft movement");
 		}
 		refresh_probe_ignore(pawn);
+		if (g_driving)
+			physics_tick(pawn);
+		else
+			g_nearPhysics.clear();
+		g_probeIgnoreNow = g_probeIgnore;
+		for (UObject *component : g_nearPhysics)
+		{
+			Call owner(component, STR("GetOwner"));
+			owner.invoke();
+			if (UObject *const *actor = owner.param<UObject *>(STR("ReturnValue")); actor && *actor)
+				g_probeIgnoreNow.push_back(*actor);
+		}
 		const bool ready = g_mcReady && sample_world(pawn, g_driving && g_haveEye ? g_eye : cam.loc);
 		if (g_gridPhysics && !g_driving && ready)
 		{
@@ -2130,6 +2398,8 @@ namespace nc
 
 		g_controlsPawn = pawn;
 		minecraft_controls(pc);
+		if (g_driving)
+			surface_tick(pawn);
 		hide_hn_cursor(pawn, true);
 		movement_report(pawn);
 		if (pressed(VK_F11) && g_haveEye)

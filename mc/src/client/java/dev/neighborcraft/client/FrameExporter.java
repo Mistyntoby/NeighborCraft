@@ -44,7 +44,7 @@ public final class FrameExporter {
 	private static final int MAX_W = 3840;
 	private static final int MAX_H = 2160;
 	private static final long LAYER_MAX = (long)MAX_W * MAX_H * 4;
-	private static final long STRIDE = LAYER_MAX * 3;
+	private static final long STRIDE = LAYER_MAX * 4;
 	private static final int RING = 3;
 	private static final long STUCK_NANOS = 1_000_000_000L;
 	private static final Vector4f TRANSPARENT = new Vector4f(0.0F, 0.0F, 0.0F, 0.0F);
@@ -73,6 +73,7 @@ public final class FrameExporter {
 		GpuBuffer color;
 		GpuBuffer depth;
 		GpuBuffer overlay;
+		GpuBuffer hand;
 		int width;
 		int height;
 		long generation;
@@ -96,18 +97,19 @@ public final class FrameExporter {
 			this.color = RenderSystem.getDevice().createBuffer(() -> "passthrough world colour", usage, n);
 			this.depth = RenderSystem.getDevice().createBuffer(() -> "passthrough world depth", usage, n);
 			this.overlay = RenderSystem.getDevice().createBuffer(() -> "passthrough overlay", usage, n);
+			this.hand = RenderSystem.getDevice().createBuffer(() -> "passthrough hand", usage, n);
 			this.width = w;
 			this.height = h;
 		}
 
 		void free() {
-			for (GpuBuffer b : new GpuBuffer[]{this.color, this.depth, this.overlay}) {
+			for (GpuBuffer b : new GpuBuffer[]{this.color, this.depth, this.overlay, this.hand}) {
 				if (b != null) {
 					b.close();
 				}
 			}
 
-			this.color = this.depth = this.overlay = null;
+			this.color = this.depth = this.overlay = this.hand = null;
 		}
 	}
 
@@ -202,7 +204,19 @@ public final class FrameExporter {
 		current = c;
 	}
 
-	/** End of GameRenderer.render: the overlay (hand, screen effects, GUI) is complete. */
+	/** Right after the first-person hand is drawn: it alone is in the colour target (cleared after the world). */
+	public static void captureHand(final RenderTarget target) {
+		Capture c = current;
+		if (c == null || target.width != c.width || target.height != c.height) {
+			return;
+		}
+
+		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
+		encoder.copyTextureToBuffer(target.getColorTexture(), c.hand, 0L, () -> {}, 0);
+		encoder.clearColorTexture(target.getColorTexture(), TRANSPARENT);
+	}
+
+	/** End of GameRenderer.render: the overlay (screen effects, GUI) is complete. */
 	public static void captureOverlay(final RenderTarget target) {
 		Capture c = current;
 		current = null;
@@ -242,6 +256,7 @@ public final class FrameExporter {
 			copy(c.color, m, base, n);
 			copy(c.depth, m, base + n, n);
 			copy(c.overlay, m, base + 2 * n, n);
+			copy(c.hand, m, base + 3 * n, n);
 			HostState.Pose p = c.pose;
 			m.set(LONG, desc + 8, c.frame);
 			m.set(LONG, desc + 16, p.hostFrame());

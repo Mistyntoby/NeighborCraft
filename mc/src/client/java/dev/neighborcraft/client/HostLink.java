@@ -8,6 +8,9 @@ import dev.neighborcraft.WorldBridge;
 import java.net.InetSocketAddress;
 import java.util.Locale;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.block.Block;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
@@ -23,6 +26,8 @@ import org.java_websocket.server.WebSocketServer;
  * <li>{"t":"shape","c":[x,y,z,kind, ...],"m":[hex, ...],"f":[heights, ...]}: HN's geometry per block (see WorldBridge.shapes)</li>
  * <li>{"t":"tp","p":[x,y,z]}: put the player's feet here (before Minecraft starts moving it)</li>
  * <li>{"t":"move","m":bits}: movement keys held in the host (Minecraft moves the player; see ClientInput)</li>
+ * <li>{"t":"surface","b":"minecraft:grass_block"}: HN's surface material under the player, as a block (particles, steps)</li>
+ * <li>{"t":"debug","on":bool}: the collision recorder and debug view (CollisionRecorder)</li>
  * <li>{"t":"blocksync","r":radius}: report every solid block near the player (the host rebuilds its colliders)</li>
  * <li>{"t":"cmd","c":"time set noon"}: a server command</li>
  * <li>{"t":"key","k":"use|attack|pick|inventory|drop|swap|escape","down":bool}</li>
@@ -105,6 +110,9 @@ public final class HostLink extends WebSocketServer {
 						(int) Math.floor(at.get(1).getAsDouble()), (int) Math.floor(at.get(2).getAsDouble())));
 				}
 				case "dev" -> this.relay(conn, message);
+				case "surface" -> Passthrough.surface = BuiltInRegistries.BLOCK.getOptional(Identifier.parse(m.get("b").getAsString()))
+					.map(Block::defaultBlockState).orElse(null);
+				case "debug" -> CollisionRecorder.setOn(m.get("on").getAsBoolean());
 				default -> {
 					Minecraft minecraft = Minecraft.getInstance();
 					minecraft.execute(() -> ClientInput.handle(minecraft, m));

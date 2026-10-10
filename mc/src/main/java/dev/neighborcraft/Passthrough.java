@@ -7,7 +7,10 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -26,6 +29,14 @@ public class Passthrough implements ModInitializer {
 	public static volatile Consumer<String> events = message -> {};
 	/** Hello Neighbor's world: invisible blocks shaped like HN's geometry (see HostBlock). */
 	public static Block HOST;
+	/** The block standing for HN's surface material under the player (grass, wood, tiles ...), from the host. */
+	public static volatile BlockState surface;
+
+	/** For a player's movement effects (particles, footsteps): HN's surface instead of the invisible host block. */
+	public static BlockState surface(final Entity entity, final BlockState state) {
+		BlockState s = surface;
+		return s != null && entity instanceof Player && state.is(HOST) ? s : state;
+	}
 
 	@Override
 	public void onInitialize() {

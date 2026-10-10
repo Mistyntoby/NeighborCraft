@@ -3,8 +3,10 @@ package dev.neighborcraft.client;
 import com.google.gson.JsonObject;
 import dev.neighborcraft.Passthrough;
 import dev.neighborcraft.client.mixin.KeyMappingAccessor;
+import dev.neighborcraft.client.mixin.MouseHandlerAccessor;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.MouseHandler;
 import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
@@ -73,8 +75,10 @@ final class ClientInput {
 				}
 
 				Window window = minecraft.getWindow();
-				double gx = m.get("x").getAsDouble() * window.getGuiScaledWidth() / Math.max(1, window.getScreenWidth());
-				double gy = m.get("y").getAsDouble() * window.getGuiScaledHeight() / Math.max(1, window.getScreenHeight());
+				double px = m.get("x").getAsDouble() * window.getScreenWidth(), py = m.get("y").getAsDouble() * window.getScreenHeight();
+				((MouseHandlerAccessor) minecraft.mouseHandler).passthrough$setXpos(px);
+				((MouseHandlerAccessor) minecraft.mouseHandler).passthrough$setYpos(py);
+				double gx = MouseHandler.getScaledXPos(window, px), gy = MouseHandler.getScaledYPos(window, py);
 				switch (m.get("t").getAsString()) {
 					case "mouse" -> {
 						if (heldButton >= 0) {

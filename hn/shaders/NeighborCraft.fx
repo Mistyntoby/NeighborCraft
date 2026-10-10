@@ -9,9 +9,11 @@
 texture MCWorldTex : MCWORLD;
 texture MCDepthTex : MCDEPTH;
 texture MCOverlayTex : MCOVERLAY;
+texture MCHandTex : MCHAND;
 sampler sWorld { Texture = MCWorldTex; AddressU = CLAMP; AddressV = CLAMP; };
 sampler sDepth { Texture = MCDepthTex; MinFilter = POINT; MagFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
 sampler sOverlay { Texture = MCOverlayTex; AddressU = CLAMP; AddressV = CLAMP; };
+sampler sHand { Texture = MCHandTex; AddressU = CLAMP; AddressV = CLAMP; };
 
 // x = near, y = far, z = flags (1: [0,1] depth, 2: rows bottom-up, 4: reversed Z). Set by the add-on.
 uniform float3 McPlanes = float3(0.05, 2048.0, 7.0);
@@ -311,7 +313,12 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 		const float3 purple = color * float3(0.72, 0.38, 1.25) + float3(0.12, 0.0, 0.22) * (0.6 + 0.4 * sin(t * 3.0 + r * 9.0));
 		color = lerp(color, purple, saturate(PortalWarp * (0.55 + r * 0.6)));
 	}
-	const float4 overlay = tex2D(sOverlay, float2(uv.x, 1.0 - uv.y)); // hand and HUD are screen-space: never shaken
+	// the first-person hand: lit like Minecraft's world in the scene (the host's light around it, its colour grade),
+	// so it darkens indoors and takes the room's colour; its own layer, so the GUI above stays as it is
+	const float4 hand = tex2D(sHand, float2(uv.x, 1.0 - uv.y));
+	if (hand.a > 0.0)
+		color = relight(hand.rgb, uv, 0.5) + saturate(color) * (1.0 - hand.a);
+	const float4 overlay = tex2D(sOverlay, float2(uv.x, 1.0 - uv.y)); // HUD and screens are screen-space: never shaken
 	return overlay.rgb + saturate(color) * (1.0 - overlay.a);
 }
 

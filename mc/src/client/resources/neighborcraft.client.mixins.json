@@ -2,6 +2,6 @@
 	"required": true,
 	"package": "dev.neighborcraft.client.mixin",
 	"compatibilityLevel": "JAVA_25",
-	"client": ["AbstractClientPlayerMixin", "CameraMixin", "ClientLevelMixin", "EntityPickMixin", "LivingEntityMixin", "FogRendererMixin", "GameRendererMixin", "GlCommandEncoderMixin", "KeyMappingAccessor", "LevelRendererMixin", "LocalPlayerMixin", "ToastManagerMixin"],
+	"client": ["AbstractClientPlayerMixin", "CameraMixin", "ClientLevelMixin", "EntityMoveMixin", "EntityPickMixin", "LivingEntityMixin", "FogRendererMixin", "GameRendererMixin", "GlCommandEncoderMixin", "KeyMappingAccessor", "LevelRendererMixin", "LocalPlayerMixin", "MouseHandlerAccessor", "ToastManagerMixin"],
 	"injectors": { "defaultRequire": 1 }
 }

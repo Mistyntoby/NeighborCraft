@@ -67,6 +67,14 @@ abstract class GameRendererMixin {
 		FrameExporter.captureWorld(this.mainRenderTarget);
 	}
 
+	@Inject(
+		method = "renderLevel",
+		at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/GameRenderer;render3dHud(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/OptionsRenderState;Z)V", shift = At.Shift.AFTER)
+	)
+	private void passthrough$captureHand(final CallbackInfo ci) {
+		FrameExporter.captureHand(this.mainRenderTarget);
+	}
+
 	@Inject(method = "render", at = @At("TAIL"))
 	private void passthrough$captureOverlay(final CallbackInfo ci) {
 		FrameExporter.captureOverlay(this.mainRenderTarget);
