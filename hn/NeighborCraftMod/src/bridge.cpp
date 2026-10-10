@@ -19,6 +19,7 @@
 #include "ws.h"
 
 #include <DynamicOutput/DynamicOutput.hpp>
+#include <Unreal/FString.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
@@ -771,7 +772,17 @@ namespace nc
 		/// floor heights in `floor`: 16 thousandths of a block, 0 for none).
 		int block_shape(const BlockBits &b, std::string &hex, std::string &floor)
 		{
-			const uint8_t *bits = b.box;
+			// where a ray found the floor's exact height, the box probe's cell holding that surface goes: it is rounded up
+			// to the cell's top (Steve stood up to 12.5 cm above HN's floor, and stair treads got lips)
+			uint8_t bits[64];
+			std::memcpy(bits, b.box, 64);
+			for (int c = 0; c < 16; ++c)
+				if (b.floor[c] > 0.0f)
+				{
+					const int layer = std::clamp(int(b.floor[c] * 8.0f - 1e-3f), 0, 7);
+					for (int sx = (c >> 2) * 2; sx < (c >> 2) * 2 + 2; ++sx)
+						bits[sx * 8 + layer] &= uint8_t(~(3u << ((c & 3) * 2)));
+				}
 			int set = 0;
 			for (int i = 0; i < 64; ++i)
 				set += std::popcount(bits[i]);
@@ -1518,6 +1529,11 @@ namespace nc
 				Call place(camera, STR("K2_SetActorLocationAndRotation"));
 				place.set(STR("NewLocation"), pose.loc).set(STR("NewRotation"), pose.rot).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
 				const float hfov = float(2.0 * std::atan(std::tan(g_mcFov * 3.14159265358979 / 360.0) * aspect) * 180.0 / 3.14159265358979);
+				// HN's next frame is rendered from exactly this pose: the compositor re-projects Minecraft's frame onto it
+				// (reading HN's camera back on the game thread could be a frame ahead of the picture being presented)
+				double mx, my, mz;
+				to_mc(g_mcCamera, mx, my, mz);
+				compositor::set_host_pose(g_mcYaw, g_mcPitch, g_mcRoll, g_mcFov, mx, my, mz);
 				if (UObject **component = camera->GetValuePtrByPropertyNameInChain<UObject *>(STR("CameraComponent")); component && *component)
 					Call(*component, STR("SetFieldOfView")).set(STR("InFieldOfView"), hfov).invoke();
 			}
@@ -1827,8 +1843,20 @@ namespace nc
 		const float vfov = float(2.0 * std::atan(std::tan(cam.hfov * 3.14159265358979 / 360.0) / aspect) * 180.0 / 3.14159265358979);
 		double cx, cy, cz;
 		to_mc(cam.loc, cx, cy, cz);
-		// Unreal's roll is clockwise-positive, Minecraft's camera roll counter-clockwise-positive
-		compositor::set_host_pose(cam.rot.yaw - 90.0f, -cam.rot.pitch, -cam.rot.roll, vfov, cx, cy, cz);
+		// Unreal's roll is clockwise-positive, Minecraft's camera roll counter-clockwise-positive (driving: the pose
+		// Minecraft's camera gives HN, set where HN's camera is placed)
+		if (!g_driving)
+			compositor::set_host_pose(cam.rot.yaw - 90.0f, -cam.rot.pitch, -cam.rot.roll, vfov, cx, cy, cz);
+		// Unreal renders a frame while the game thread is already on the next one: no overlap, so the frame presented is
+		// the one the pose above was set for
+		static UObject *lagOffFor = nullptr;
+		if (lagOffFor != pc)
+		{
+			lagOffFor = pc;
+			Call(kismet(), STR("ExecuteConsoleCommand")).set<UObject *>(STR("WorldContextObject"), pawn)
+				.set(STR("Command"), FString(STR("r.OneFrameThreadLag 0"))).invoke();
+			log(L"r.OneFrameThreadLag 0");
+		}
 		// where the player looks (HN's mouse look: the control rotation; the camera itself follows Minecraft when it
 		// drives), and HN's own base FOV for Minecraft to apply its FOV effects to
 		Rot3f look = cam.rot;
