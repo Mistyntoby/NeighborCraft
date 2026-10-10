@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.MouseHandler;
 import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.gui.screens.PauseScreen;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.MouseButtonInfo;
@@ -95,9 +96,10 @@ final class ClientInput {
 							heldButton = button;
 							boolean handled = screen.mouseClicked(event, false);
 							if (clicksLogged++ < 40) {
-								Passthrough.LOG.info("screen click: button {} at gui {} {} (window {} x {}) on {}: {}", button, Math.round(gx),
+								Passthrough.LOG.info("screen click: button {} at gui {} {} (window {} x {}) on {}: {}, carrying {}", button, Math.round(gx),
 									Math.round(gy), window.getGuiScaledWidth(), window.getGuiScaledHeight(), screen.getClass().getSimpleName(),
-									handled ? "handled" : "not handled");
+									handled ? "handled" : "not handled",
+									screen instanceof AbstractContainerScreen<?> container ? container.getMenu().getCarried() : "-");
 							}
 						} else {
 							heldButton = -1;

@@ -25,6 +25,7 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
@@ -80,6 +81,7 @@ namespace nc
 		std::atomic<bool> g_minecraftScreen{false}; // a Minecraft screen is open: the mouse is Minecraft's too
 		std::atomic<int> g_wheel{0};                // wheel notches since the last tick
 		std::atomic<int> g_injectedE{0};            // E messages we posted ourselves (let through)
+		std::atomic<int> g_injectedClicks{0};       // left clicks we posted ourselves (HN's throw while holding)
 		std::atomic<bool> g_minecraftDriving{false}; // HN's movement keys are Minecraft's too (swallowed)
 		std::atomic<long> g_mouseDx{0}, g_mouseDy{0};  // raw mouse counts since the last tick
 		std::atomic<bool> g_rawMouseSeen{false};
@@ -718,6 +720,7 @@ namespace nc
 			bool boxKnown = false;
 		};
 		std::unordered_map<unsigned long long, BlockBits> g_bits;
+		std::unordered_map<unsigned long long, std::array<uint8_t, 64>> g_dynBits; // moving parts' sub-cells, per block
 		std::unordered_map<unsigned long long, DWORD> g_columns; // column (x, z) -> when its rays were cast
 		std::unordered_set<unsigned long long> g_dirty;          // blocks whose shape may have changed, to send
 
@@ -857,6 +860,9 @@ namespace nc
 					for (int sx = (c >> 2) * 2; sx < (c >> 2) * 2 + 2; ++sx)
 						bits[sx * 8 + layer] &= uint8_t(~(3u << ((c & 3) * 2)));
 				}
+			if (const auto dyn = g_dynBits.find(key); dyn != g_dynBits.end())
+				for (int i = 0; i < 64; ++i)
+					bits[i] |= dyn->second[i];
 			int set = 0;
 			for (int i = 0; i < 64; ++i)
 				set += std::popcount(bits[i]);
@@ -1359,6 +1365,12 @@ namespace nc
 					return 0;
 				case WM_LBUTTONDOWN:
 				case WM_LBUTTONUP:
+					if (g_injectedClicks > 0)
+					{
+						--g_injectedClicks;
+						break;
+					}
+					return 0;
 				case WM_LBUTTONDBLCLK:
 				case WM_MBUTTONDOWN:
 				case WM_MBUTTONUP:
@@ -1525,8 +1537,25 @@ namespace nc
 					g_ws.send("{\"t\":\"key\",\"k\":\"escape\",\"down\":true}");
 				return;
 			}
-			// Minecraft's attack; a swing also pushes the physics object it hits in HN
-			if (const int attack = edge(VK_LBUTTON))
+			// holding one of HN's objects: left click is HN's own (throw it); otherwise Minecraft's attack, and a swing
+			// also pushes the physics object it hits in HN
+			bool holding = false;
+			if (g_controlsPawn)
+			{
+				Call held(g_controlsPawn, STR("GetHoldingItem"));
+				if (held.invoke())
+					if (UObject *const *item = held.param<UObject *>(STR("ReturnValue")); item && *item)
+						holding = true;
+			}
+			if (holding)
+			{
+				if (const int e = edge(VK_LBUTTON))
+				{
+					++g_injectedClicks;
+					PostMessageW(g_hnWindow, e > 0 ? WM_LBUTTONDOWN : WM_LBUTTONUP, e > 0 ? MK_LBUTTON : 0, 0);
+				}
+			}
+			else if (const int attack = edge(VK_LBUTTON))
 			{
 				sendf("{\"t\":\"key\",\"k\":\"attack\",\"down\":%s}", attack > 0 ? "true" : "false");
 				if (attack > 0 && g_controlsPawn)
@@ -1900,9 +1929,13 @@ namespace nc
 				const float towards = d < 20.0f ? 1.0f : (dx * v.x + dy * v.y) / (d * speed);
 				if (towards < 0.2f)
 					continue;
-				const float dv = std::min(speed * 0.7f, 350.0f) * towards / (1.0f + mass_of(component) / 20.0f);
-				Call(component, STR("AddImpulse")).set(STR("Impulse"), Vec3f{v.x / speed * dv, v.y / speed * dv, 0.0f})
-					.set(STR("BoneName"), NameParam{}).set_bool(STR("bVelChange"), true).invoke();
+				// an impulse (mass decides the response) at the contact: the object's side facing Steve, at his waist
+				// height, so tall objects tip over and low, light ones slide
+				const float mass = mass_of(component);
+				const float dv = std::min(speed * 0.7f, 350.0f) * towards / (1.0f + mass / 20.0f);
+				const Vec3f contact{at.x - dx / d * 15.0f, at.y - dy / d * 15.0f, std::max(at.z, g_eye.z - 70.0f)};
+				Call(component, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{v.x / speed * dv * mass, v.y / speed * dv * mass, 0.0f})
+					.set(STR("Location"), contact).set(STR("BoneName"), NameParam{}).invoke();
 				static int logged = 0;
 				if (logged++ < 10)
 					log(L"physics: nudged " + component->GetName() + L" (" + std::to_wstring(int(mass_of(component))) + L" kg) by " +
@@ -2035,6 +2068,208 @@ namespace nc
 						std::max(origin.z + extent.z, last.origin.z + last.extent.z)});
 				last = {origin, extent};
 			}
+		}
+
+		// ---- moving parts as collision, from their real geometry ------------------------------------------------------
+		// The world probe asks HN what blocks a player. Moving parts don't fit that: HN makes an open door leaf
+		// non-blocking for the player (Steve walked through open doors once the probe caught up), and loose objects
+		// move all the time. So every tick, the moving components near Steve are turned into Minecraft collision from
+		// their own geometry: the mesh's local bounding box at the component's current world transform, voxelised at
+		// 1/8 block. Doors, drawers and cabinet parts join once they have moved (their frames stay in the world probe);
+		// loose objects simulating physics always. No collision queries: just transforms, so it keeps up every tick.
+
+		struct Watched
+		{
+			UObject *component;
+			Transform4 first;   // where it was when first seen (a part that has moved since is a moving part)
+			bool moving;
+		};
+		std::vector<Watched> g_watched;           // the parts of HN's interactive actors (this level)
+		UObject *g_watchedLevel = nullptr;
+
+		bool component_transform(UObject *component, Transform4 &t)
+		{
+			Call c(component, STR("K2_GetComponentToWorld"));
+			if (!c.invoke())
+				return false;
+			const Transform4 *v = c.param<Transform4>(STR("ReturnValue"));
+			if (!v)
+				return false;
+			t = *v;
+			return true;
+		}
+
+		bool local_bounds(UObject *component, Vec3f &lo, Vec3f &hi)
+		{
+			Call c(component, STR("GetLocalBounds"));
+			if (!c.invoke())
+				return false;
+			const Vec3f *a = c.param<Vec3f>(STR("Min")), *b = c.param<Vec3f>(STR("Max"));
+			if (!a || !b)
+				return false;
+			lo = *a;
+			hi = *b;
+			return hi.x > lo.x && hi.y > lo.y && hi.z > lo.z;
+		}
+
+		/// v rotated by the unit quaternion q (x, y, z, w).
+		Vec3f rotate(const float q[4], const Vec3f &v)
+		{
+			const float x = q[0], y = q[1], z = q[2], w = q[3];
+			const float tx = 2.0f * (y * v.z - z * v.y), ty = 2.0f * (z * v.x - x * v.z), tz = 2.0f * (x * v.y - y * v.x);
+			return {v.x + w * tx + (y * tz - z * ty), v.y + w * ty + (z * tx - x * tz), v.z + w * tz + (x * ty - y * tx)};
+		}
+
+		/// Mark the sub-cells (1/8 block) whose centres lie in a component's oriented box (local bounds at its transform),
+		/// grown by half a sub-cell so thin parts (a door leaf) are never missed.
+		void voxelise(UObject *component, std::unordered_map<unsigned long long, std::array<uint8_t, 64>> &out)
+		{
+			Transform4 t;
+			Vec3f lo, hi;
+			if (!component_transform(component, t) || !local_bounds(component, lo, hi))
+				return;
+			const float inv[4] = {-t.rot[0], -t.rot[1], -t.rot[2], t.rot[3]};
+			const Vec3f pos{t.pos[0], t.pos[1], t.pos[2]};
+			const float grow = 6.25f; // half a sub-cell, cm
+			// the box's world corners -> the Minecraft blocks to look at
+			double bx0 = 1e18, by0 = 1e18, bz0 = 1e18, bx1 = -1e18, by1 = -1e18, bz1 = -1e18;
+			for (int i = 0; i < 8; ++i)
+			{
+				const Vec3f local{(i & 1 ? hi.x : lo.x) * t.scale[0], (i & 2 ? hi.y : lo.y) * t.scale[1], (i & 4 ? hi.z : lo.z) * t.scale[2]};
+				const Vec3f r = rotate(t.rot, local);
+				double mx, my, mz;
+				to_mc({pos.x + r.x, pos.y + r.y, pos.z + r.z}, mx, my, mz);
+				bx0 = std::min(bx0, mx), by0 = std::min(by0, my), bz0 = std::min(bz0, mz);
+				bx1 = std::max(bx1, mx), by1 = std::max(by1, my), bz1 = std::max(bz1, mz);
+			}
+			if (bx1 - bx0 > 12 || by1 - by0 > 12 || bz1 - bz0 > 12)
+				return; // not a small moving part (a whole building): leave it to the world probe
+			for (int x = int(std::floor(bx0)); x <= int(std::floor(bx1)); ++x)
+				for (int y = int(std::floor(by0)); y <= int(std::floor(by1)); ++y)
+					for (int z = int(std::floor(bz0)); z <= int(std::floor(bz1)); ++z)
+					{
+						std::array<uint8_t, 64> *bits = nullptr;
+						for (int sx = 0; sx < 8; ++sx)
+							for (int sy = 0; sy < 8; ++sy)
+								for (int sz = 0; sz < 8; ++sz)
+								{
+									const Vec3f c = to_ue(x + (sx + 0.5) / 8.0, y + (sy + 0.5) / 8.0, z + (sz + 0.5) / 8.0);
+									const Vec3f l = rotate(inv, {c.x - pos.x, c.y - pos.y, c.z - pos.z});
+									const float lx = l.x / t.scale[0], ly = l.y / t.scale[1], lz = l.z / t.scale[2];
+									if (lx < lo.x - grow || lx > hi.x + grow || ly < lo.y - grow || ly > hi.y + grow || lz < lo.z - grow || lz > hi.z + grow)
+										continue;
+									if (!bits)
+										bits = &out[cell_key(x, y, z)];
+									(*bits)[sx * 8 + sy] |= uint8_t(1u << sz);
+								}
+					}
+		}
+
+		/// The parts of HN's interactive actors (doors, drawers, cabinets ...): their static mesh components, once per
+		/// level (the arrays the engine returns are kept: one small allocation per actor and level).
+		void watch_interactives(UObject *pc)
+		{
+			if (pc == g_watchedLevel)
+				return;
+			g_watchedLevel = pc;
+			g_watched.clear();
+			static UObject *meshClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshComponent"));
+			std::unordered_set<UObject *> actors;
+			for (UObject *door : g_doors)
+				actors.insert(door);
+			for (UObject *component : find_all(L"InteractiveComponent"))
+			{
+				Call owner(component, STR("GetOwner"));
+				owner.invoke();
+				if (UObject *const *actor = owner.param<UObject *>(STR("ReturnValue")); actor && *actor)
+					actors.insert(*actor);
+			}
+			for (UObject *actor : actors)
+			{
+				Call parts(actor, STR("GetComponentsByClass"));
+				parts.set<UObject *>(STR("ComponentClass"), meshClass).invoke();
+				const ObjectArray *list = parts.param<ObjectArray>(STR("ReturnValue"));
+				for (int32 i = 0; list && list->data && i < list->num; ++i)
+				{
+					Transform4 t;
+					if (list->data[i] && component_transform(list->data[i], t))
+						g_watched.push_back({list->data[i], t, false});
+				}
+			}
+			log(L"moving parts: watching " + std::to_wstring(g_watched.size()) + L" parts of " + std::to_wstring(actors.size()) +
+				L" interactive objects");
+		}
+
+		/// Every tick: the moving parts near Steve and the loose objects around him, as collision; blocks whose moving
+		/// collision changed are sent again.
+		UObject *owner_of(UObject *component)
+		{
+			Call c(component, STR("GetOwner"));
+			c.invoke();
+			UObject *const *a = c.param<UObject *>(STR("ReturnValue"));
+			return a ? *a : nullptr;
+		}
+
+		void dynamic_tick(UObject *pc)
+		{
+			watch_interactives(pc);
+			if (!g_haveEye)
+				return;
+			// what the player holds in HN (attached in front of the camera) is never collision
+			UObject *held = nullptr;
+			if (g_controlsPawn)
+			{
+				Call h(g_controlsPawn, STR("GetHoldingItem"));
+				if (h.invoke())
+					if (UObject *const *item = h.param<UObject *>(STR("ReturnValue")))
+						held = *item;
+			}
+			std::unordered_map<unsigned long long, std::array<uint8_t, 64>> now;
+			for (Watched &w : g_watched)
+			{
+				if (held && owner_of(w.component) == held)
+					continue;
+				Transform4 t;
+				if (!component_transform(w.component, t))
+					continue;
+				if (std::hypot(t.pos[0] - g_eye.x, t.pos[1] - g_eye.y) > 800.0f)
+					continue;
+				if (!w.moving)
+				{
+					float d = 0.0f;
+					for (int i = 0; i < 4; ++i)
+						d += std::abs(t.rot[i] - w.first.rot[i]);
+					for (int i = 0; i < 3; ++i)
+						d += std::abs(t.pos[i] - w.first.pos[i]) * 0.01f;
+					if (d < 0.01f)
+						continue;
+					w.moving = true; // it has moved: from now on it is a moving part
+					static int logged = 0;
+					if (logged++ < 20)
+						log(L"moving part: " + w.component->GetFullName());
+				}
+				voxelise(w.component, now);
+			}
+			for (UObject *component : g_nearPhysics)
+				if (!held || owner_of(component) != held)
+					voxelise(component, now);
+			// what changed since last tick goes to Minecraft (with the block's static shape)
+			for (auto &[key, bits] : now)
+			{
+				const auto old = g_dynBits.find(key);
+				if (old == g_dynBits.end() || old->second != bits)
+				{
+					g_bits[key];
+					g_dirty.insert(key);
+				}
+			}
+			for (auto &[key, bits] : g_dynBits)
+				if (!now.count(key))
+				{
+					g_bits[key];
+					g_dirty.insert(key);
+				}
+			g_dynBits = std::move(now);
 		}
 
 		// ---- HN's surface material under Steve, for Minecraft's particles and footsteps -----------------------------
@@ -2408,6 +2643,8 @@ namespace nc
 			physics_tick(pawn);
 		else
 			g_nearPhysics.clear();
+		if (g_driving && g_mcReady)
+			dynamic_tick(pc);
 		g_probeIgnoreNow = g_probeIgnore;
 		for (UObject *component : g_nearPhysics)
 		{
