@@ -28,6 +28,8 @@ public final class HostState {
 	private static volatile Pose latest;
 	/** The pose this frame renders with, taken once per frame so every hook agrees. Render thread only. */
 	private static Pose frame;
+	/** The host frame the last Minecraft frame was rendered for. Render thread only. */
+	private static long renderedHostFrame = -1;
 
 	private HostState() {
 	}
@@ -67,8 +69,25 @@ public final class HostState {
 		return frame;
 	}
 
+	/**
+	 * Lock-step with the host: each Minecraft frame waits (up to 25 ms) for the host's next camera, so both games make
+	 * exactly one frame per host frame. Running freely, Minecraft's 120 fps against the host's own rate meant the host
+	 * picked up Minecraft poses of uneven age: judder, worst while falling.
+	 */
 	public static void beginFrame() {
+		Pose before = latest;
+		if (before != null && System.nanoTime() - before.receivedNanos() < TIMEOUT_NANOS && before.hostFrame() == renderedHostFrame) {
+			long until = System.nanoTime() + 25_000_000L;
+			while (latest == before && System.nanoTime() < until) {
+				java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+			}
+		}
+
 		frame = live();
+		if (frame != null) {
+			renderedHostFrame = frame.hostFrame();
+		}
+
 		Passthrough.active = frame != null;
 		Passthrough.driving = frame != null && frame.drive();
 	}

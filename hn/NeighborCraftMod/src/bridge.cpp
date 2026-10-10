@@ -11,7 +11,7 @@
 // y/100) (swapping y and z also turns the handedness right). Minecraft yaw = Unreal yaw - 90, pitch = -pitch.
 // yOffset puts the ground where the player first stands on a whole block.
 //
-// Keys: F6 Minecraft hands (mouse + 1-9 go to Minecraft), F7 passthrough on/off, F8 re-level, F9 reflection dump,
+// Keys: Minecraft's own (see minecraft_controls), F7 passthrough on/off, F8 re-level, F9 reflection dump,
 // F10 Minecraft physics (blocky collision) on/off.
 #include "bridge.hpp"
 #include "compositor.h"
@@ -24,6 +24,7 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -54,7 +55,6 @@ namespace nc
 		WsClient g_ws;
 		void *g_module = nullptr;
 		bool g_enabled = true;
-		bool g_hands = false;
 		int g_generation = -1;
 		long long g_frame = 0;
 		double g_yOffset = 0.0;
@@ -71,6 +71,15 @@ namespace nc
 		bool g_placed = false;
 		Vec3f g_lastPlaced;          // where we put HN's pawn last tick
 		uint8_t g_savedMovementMode = 1;
+
+		// Minecraft's controls and camera
+		std::atomic<bool> g_minecraftInput{false};  // swallow HN's copies of Minecraft's keys
+		std::atomic<bool> g_minecraftScreen{false}; // a Minecraft screen is open: the mouse is Minecraft's too
+		std::atomic<int> g_wheel{0};                // wheel notches since the last tick
+		std::atomic<int> g_injectedE{0};            // E messages we posted ourselves (let through)
+		bool g_haveMcCamera = false;
+		Vec3f g_mcCamera;
+		float g_mcYaw = 0, g_mcPitch = 0, g_mcFov = 70; // Minecraft's camera (Minecraft degrees, vertical FOV)
 
 		// Minecraft's process (from its hello): its window is hidden, and it can be started from here
 		DWORD g_mcPid = 0;
@@ -1023,6 +1032,24 @@ namespace nc
 			return true;
 		}
 
+		/// The first `n` numbers of the array under `key`.
+		bool json_numbers(const std::string &m, const char *key, double *v, int n)
+		{
+			size_t at = m.find(std::string("\"") + key + "\":[");
+			if (at == std::string::npos)
+				return false;
+			const char *p = m.c_str() + at + std::strlen(key) + 4;
+			for (int i = 0; i < n; ++i)
+			{
+				char *end = nullptr;
+				v[i] = std::strtod(p, &end);
+				if (end == p)
+					return false;
+				p = end + (*end == ',' ? 1 : 0);
+			}
+			return true;
+		}
+
 		/// The first three numbers of the array under `key`.
 		bool json_vec3(const std::string &m, const char *key, double v[3])
 		{
@@ -1081,13 +1108,23 @@ namespace nc
 			}
 			else if (m.find("\"t\":\"mcpos\"") != std::string::npos)
 			{
-				double eye[3];
+				double eye[3], camera[3], rot[2], fov = 0;
 				if (json_vec3(m, "eye", eye))
 				{
 					g_eye = to_ue(eye[0], eye[1], eye[2]);
 					g_haveEye = true;
 				}
+				if (json_vec3(m, "cam", camera) && json_numbers(m, "rot", rot, 2) && json_number(m, "fov", fov))
+				{
+					g_mcCamera = to_ue(camera[0], camera[1], camera[2]);
+					g_mcYaw = float(rot[0]);
+					g_mcPitch = float(rot[1]);
+					g_mcFov = float(fov);
+					g_haveMcCamera = true;
+				}
 			}
+			else if (m.find("\"t\":\"screen\"") != std::string::npos)
+				g_minecraftScreen = m.find("\"open\":true") != std::string::npos;
 			else if (m.find("\"t\":\"hello\"") != std::string::npos)
 			{
 				double pid = 0;
@@ -1157,6 +1194,222 @@ namespace nc
 				sendf("{\"t\":\"key\",\"k\":\"%s\",\"down\":%s}", key, e > 0 ? "true" : "false");
 		}
 
+		// ---- Minecraft's controls inside HN's window ---------------------------------------------------------
+		// HN has the focus, so its window procedure is subclassed: the keys Minecraft owns never reach HN (E is
+		// Minecraft's inventory, Q drop, F swap hands, F5 perspective, 1-9 and the wheel the hotbar), the wheel is
+		// counted for Minecraft, and the right mouse button is also HN's interact key (E): doors and objects open.
+		// Minecraft reads the held keys with GetAsyncKeyState (the physical state), so swallowing them here is fine.
+
+		HWND g_hnWindow = nullptr;
+		WNDPROC g_hnProc = nullptr;
+
+		bool minecraft_key(WPARAM vk)
+		{
+			return vk == 'E' || vk == 'Q' || vk == 'F' || vk == VK_F5 || (vk >= '1' && vk <= '9');
+		}
+
+		LRESULT CALLBACK hn_window_proc(HWND window, UINT msg, WPARAM wparam, LPARAM lparam)
+		{
+			if (g_minecraftInput)
+			{
+				switch (msg)
+				{
+				case WM_MOUSEWHEEL:
+					g_wheel += GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
+					return 0;
+				case WM_LBUTTONDOWN:
+				case WM_LBUTTONUP:
+				case WM_LBUTTONDBLCLK:
+				case WM_MBUTTONDOWN:
+				case WM_MBUTTONUP:
+					return 0; // Minecraft's attack and pick block
+				case WM_RBUTTONDOWN:
+				case WM_RBUTTONUP:
+					if (!g_minecraftScreen)
+					{
+						// also HN's interact (its E): open doors, take objects
+						++g_injectedE;
+						PostMessageW(window, msg == WM_RBUTTONDOWN ? WM_KEYDOWN : WM_KEYUP, 'E',
+							msg == WM_RBUTTONDOWN ? 0x00120001 : 0xC0120001);
+					}
+					return 0;
+				case WM_KEYDOWN:
+				case WM_KEYUP:
+					if (wparam == 'E' && g_injectedE > 0)
+					{
+						--g_injectedE;
+						break;
+					}
+					if (minecraft_key(wparam) || (g_minecraftScreen && wparam == VK_ESCAPE))
+						return 0;
+					break;
+				default:
+					break;
+				}
+			}
+			return CallWindowProcW(g_hnProc, window, msg, wparam, lparam);
+		}
+
+		void hook_hn_window()
+		{
+			if (g_hnProc)
+				return;
+			struct Search
+			{
+				DWORD pid;
+				HWND found;
+			} s{GetCurrentProcessId(), nullptr};
+			EnumWindows(
+				[](HWND h, LPARAM p) -> BOOL {
+					auto *s = reinterpret_cast<Search *>(p);
+					DWORD pid = 0;
+					GetWindowThreadProcessId(h, &pid);
+					wchar_t cls[64] = {};
+					GetClassNameW(h, cls, 64);
+					if (pid == s->pid && IsWindowVisible(h) && wcscmp(cls, L"UnrealWindow") == 0)
+					{
+						s->found = h;
+						return FALSE;
+					}
+					return TRUE;
+				},
+				reinterpret_cast<LPARAM>(&s));
+			if (!s.found)
+				return;
+			g_hnWindow = s.found;
+			g_hnProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_hnWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(hn_window_proc)));
+			log(L"HN's window hooked for Minecraft's controls");
+		}
+
+		void unhook_hn_window()
+		{
+			if (g_hnProc && g_hnWindow)
+				SetWindowLongPtrW(g_hnWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_hnProc));
+			g_hnProc = nullptr;
+		}
+
+		/// Minecraft's keybinds, sent every tick (held keys) or on change (presses).
+		void minecraft_controls(UObject *pc)
+		{
+			// movement (Minecraft's: Shift sneaks, Ctrl sprints), every tick
+			const int bits = (key_held('W') ? 1 : 0) | (key_held('S') ? 2 : 0) | (key_held('A') ? 4 : 0) | (key_held('D') ? 8 : 0) |
+							 (key_held(VK_SPACE) ? 16 : 0) | (key_held(VK_SHIFT) ? 32 : 0) | (key_held(VK_CONTROL) ? 64 : 0);
+			sendf("{\"t\":\"move\",\"m\":%d}", g_minecraftScreen ? 0 : bits);
+			forward_key('E', "inventory");
+			forward_key('Q', "drop");
+			forward_key('F', "swap");
+			forward_key(VK_F5, "perspective");
+			const int wheel = g_wheel.exchange(0);
+			if (g_minecraftScreen)
+			{
+				// the inventory: HN's cursor and buttons drive Minecraft's screen
+				POINT cursor;
+				GetCursorPos(&cursor);
+				ScreenToClient(g_hnWindow, &cursor);
+				sendf("{\"t\":\"mouse\",\"x\":%d,\"y\":%d}", cursor.x, cursor.y);
+				const int buttons[3] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON};
+				for (int b = 0; b < 3; ++b)
+					if (const int e = edge(buttons[b]))
+						sendf("{\"t\":\"click\",\"b\":%d,\"down\":%s,\"x\":%d,\"y\":%d}", b, e > 0 ? "true" : "false", cursor.x, cursor.y);
+				if (wheel)
+					sendf("{\"t\":\"wheel\",\"d\":%d,\"x\":%d,\"y\":%d}", wheel, cursor.x, cursor.y);
+				if (pressed(VK_ESCAPE))
+					g_ws.send("{\"t\":\"key\",\"k\":\"escape\",\"down\":true}");
+				return;
+			}
+			forward_key(VK_LBUTTON, "attack");
+			forward_key(VK_RBUTTON, "use");
+			forward_key(VK_MBUTTON, "pick");
+			for (int i = 0; i < 9; ++i)
+				if (pressed('1' + i))
+					sendf("{\"t\":\"slot\",\"n\":%d}", i);
+			if (wheel)
+				sendf("{\"t\":\"scroll\",\"d\":%d}", wheel);
+		}
+
+		/// While a Minecraft screen is open HN shows its cursor and stops turning the camera.
+		void minecraft_screen_mode(UObject *pc, bool open)
+		{
+			static bool applied = false;
+			if (applied == open)
+				return;
+			applied = open;
+			set_bool_property(pc, STR("bShowMouseCursor"), open);
+			Call(pc, STR("SetIgnoreLookInput")).set_bool(STR("bNewLookInput"), open).invoke();
+			if (!open)
+				Call(pc, STR("ResetIgnoreLookInput")).invoke();
+		}
+
+		// ---- HN renders from Minecraft's camera ------------------------------------------------------------
+		// A CameraActor of ours is HN's view target, placed every tick where Minecraft's camera is (first or third
+		// person) with Minecraft's FOV (sprinting widens it): no HN head bob, and HN's picture is exactly Minecraft's
+		// view. HN's own camera shakes are stopped.
+
+		UObject *g_viewCamera = nullptr;
+		UObject *g_viewCameraLevel = nullptr;
+
+		UObject *view_camera(UObject *pc, UObject *pawn)
+		{
+			if (g_viewCamera && g_viewCameraLevel == pc)
+				return g_viewCamera;
+			g_viewCamera = nullptr;
+			g_viewCameraLevel = pc;
+			UObject *statics = gameplay_statics();
+			UObject *cls = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.CameraActor"));
+			if (!statics || !cls)
+				return nullptr;
+			Transform4 t;
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), pawn)
+				.set<UObject *>(STR("ActorClass"), cls)
+				.set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1)
+				.set<UObject *>(STR("Owner"), nullptr);
+			if (!begin.invoke() || !*begin.param<UObject *>(STR("ReturnValue")))
+				return nullptr;
+			UObject *camera = *begin.param<UObject *>(STR("ReturnValue"));
+			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), camera).set(STR("SpawnTransform"), t).invoke();
+			if (UObject **component = camera->GetValuePtrByPropertyNameInChain<UObject *>(STR("CameraComponent")); component && *component)
+			{
+				set_bool_property(*component, STR("bConstrainAspectRatio"), false);
+				set_bool_property(*component, STR("bUsePawnControlRotation"), false);
+			}
+			g_viewCamera = camera;
+			log(L"view camera: " + camera->GetFullName());
+			return camera;
+		}
+
+		/// Our camera as HN's view, placed at Minecraft's camera; `on` false gives the view back to HN's player.
+		void minecraft_view(UObject *pc, UObject *pawn, bool on, double aspect)
+		{
+			UObject *camera = on ? view_camera(pc, pawn) : g_viewCamera;
+			if (!camera || g_viewCameraLevel != pc)
+				return;
+			if (on && g_haveMcCamera)
+			{
+				struct
+				{
+					Vec3f loc;
+					Rot3f rot;
+				} pose{g_mcCamera, {-g_mcPitch, g_mcYaw + 90.0f, 0.0f}};
+				Call place(camera, STR("K2_SetActorLocationAndRotation"));
+				place.set(STR("NewLocation"), pose.loc).set(STR("NewRotation"), pose.rot).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+				const float hfov = float(2.0 * std::atan(std::tan(g_mcFov * 3.14159265358979 / 360.0) * aspect) * 180.0 / 3.14159265358979);
+				if (UObject **component = camera->GetValuePtrByPropertyNameInChain<UObject *>(STR("CameraComponent")); component && *component)
+					Call(*component, STR("SetFieldOfView")).set(STR("InFieldOfView"), hfov).invoke();
+			}
+			// the view target: ours while Minecraft drives (re-applied if HN takes it), the player's otherwise
+			Call current(pc, STR("GetViewTarget"));
+			current.invoke();
+			UObject *const *target = current.param<UObject *>(STR("ReturnValue"));
+			UObject *want = on ? camera : pawn;
+			if (target && *target != want)
+				Call(pc, STR("SetViewTargetWithBlend")).set<UObject *>(STR("NewViewTarget"), want).set(STR("BlendTime"), 0.0f).invoke();
+			if (on)
+				if (UObject **pcm = pc->GetValuePtrByPropertyNameInChain<UObject *>(STR("PlayerCameraManager")); pcm && *pcm)
+					Call(*pcm, STR("StopAllCameraShakes")).set_bool(STR("bImmediately"), true).invoke();
+		}
+
 		// ---- F9 dump -----------------------------------------------------------------------------------------
 
 		void dump_object(std::wofstream &f, UObject *o, const wchar_t *label)
@@ -1220,6 +1473,7 @@ namespace nc
 
 	void stop()
 	{
+		unhook_hn_window();
 		compositor::set_active(false);
 		compositor::unregister(g_module);
 		g_ws.stop();
@@ -1228,6 +1482,7 @@ namespace nc
 	void tick(void *engine_object, float)
 	{
 		compositor::try_register(g_module);
+		hook_hn_window();
 		++g_frame;
 
 		// Minecraft: started from here if it isn't running, and kept out of sight
@@ -1244,12 +1499,6 @@ namespace nc
 			g_enabled = !g_enabled;
 			log(g_enabled ? L"passthrough on" : L"passthrough off");
 			notify(g_enabled ? "NeighborCraft on" : "NeighborCraft off");
-		}
-		if (pressed(VK_F6))
-		{
-			g_hands = !g_hands;
-			log(g_hands ? L"Minecraft hands on (mouse and 1-9 go to Minecraft)" : L"Minecraft hands off");
-			notify(g_hands ? "Minecraft hands ON (mouse + 1-9 go to Minecraft)" : "Minecraft hands off");
 		}
 
 		UObject *pc = player_controller(static_cast<UObject *>(engine_object));
@@ -1275,8 +1524,13 @@ namespace nc
 		const bool live = g_enabled && g_ws.connected() && gameplay && read_camera(pc, cam);
 		compositor::set_active(live);
 		set_player_hidden(pawn, live);
+		g_minecraftInput = live;
+		if (pc)
+			minecraft_screen_mode(pc, live && g_minecraftScreen);
 		if (!live)
 		{
+			if (pc && pawn)
+				minecraft_view(pc, pawn, false, 1.0);
 			if (pawn)
 				minecraft_movement(pawn, false);
 			if (pawn && g_driving)
@@ -1345,8 +1599,22 @@ namespace nc
 		double cx, cy, cz;
 		to_mc(cam.loc, cx, cy, cz);
 		// Unreal's roll is clockwise-positive, Minecraft's camera roll counter-clockwise-positive
-		const float yaw = cam.rot.yaw - 90.0f, pitch = -cam.rot.pitch, roll = -cam.rot.roll;
-		compositor::set_host_pose(yaw, pitch, roll, vfov, cx, cy, cz);
+		compositor::set_host_pose(cam.rot.yaw - 90.0f, -cam.rot.pitch, -cam.rot.roll, vfov, cx, cy, cz);
+		// where the player looks (HN's mouse look: the control rotation; the camera itself follows Minecraft when it
+		// drives), and HN's own base FOV for Minecraft to apply its FOV effects to
+		Rot3f look = cam.rot;
+		{
+			Call control(pc, STR("GetControlRotation"));
+			if (control.invoke())
+				if (const Rot3f *r = control.param<Rot3f>(STR("ReturnValue")))
+					look = *r;
+		}
+		float baseHfov = cam.hfov;
+		if (UObject **pcm = pc->GetValuePtrByPropertyNameInChain<UObject *>(STR("PlayerCameraManager")); pcm && *pcm)
+			if (const float *f = (*pcm)->GetValuePtrByPropertyNameInChain<float>(STR("DefaultFOV")); f && *f > 1.0f)
+				baseHfov = *f;
+		const float baseVfov = float(2.0 * std::atan(std::tan(baseHfov * 3.14159265358979 / 360.0) / aspect) * 180.0 / 3.14159265358979);
+		const float yaw = look.yaw - 90.0f, pitch = -look.pitch, roll = 0.0f;
 
 		// F10: Minecraft's own physics against the voxels (blocky collision) instead of HN's exact collision
 		if (pressed(VK_F10))
@@ -1408,18 +1676,17 @@ namespace nc
 					nextGroundCheck = GetTickCount() + 1000; // give the teleport time to land
 				}
 			}
-			// HN's camera goes to Minecraft's eyes: move the pawn by the camera's offset from it
+			// HN's player stands where Steve does (its eyes at his), and HN sees through Minecraft's camera
 			if (g_haveEye && !underWorld)
 			{
-				const Vec3f target{g_eye.x - (cam.loc.x - p.x), g_eye.y - (cam.loc.y - p.y), g_eye.z - (cam.loc.z - p.z)};
+				const float *eyeHeight = pawn->GetValuePtrByPropertyNameInChain<float>(STR("BaseEyeHeight"));
+				const Vec3f target{g_eye.x, g_eye.y, g_eye.z - (eyeHeight ? *eyeHeight : 64.0f)};
 				set_actor_location(pawn, target);
 				g_lastPlaced = target;
 				g_placed = true;
 			}
-			const int bits = (key_held('W') ? 1 : 0) | (key_held('S') ? 2 : 0) | (key_held('A') ? 4 : 0) | (key_held('D') ? 8 : 0) |
-							 (key_held(VK_SPACE) ? 16 : 0) | (key_held(VK_CONTROL) ? 32 : 0) | (key_held(VK_SHIFT) ? 64 : 0);
-			sendf("{\"t\":\"cam\",\"drive\":true,\"f\":%lld,\"r\":[%.3f,%.3f,%.3f],\"fov\":%.3f}", g_frame, yaw, pitch, roll, vfov);
-			sendf("{\"t\":\"move\",\"m\":%d}", bits);
+			minecraft_view(pc, pawn, !underWorld, aspect);
+			sendf("{\"t\":\"cam\",\"drive\":true,\"f\":%lld,\"r\":[%.3f,%.3f,%.3f],\"fov\":%.3f}", g_frame, yaw, pitch, roll, baseVfov);
 		}
 		else
 		{
@@ -1428,18 +1695,11 @@ namespace nc
 			UObject *cmc = movement_component(pawn);
 			const uint8_t *mode = cmc ? cmc->GetValuePtrByPropertyNameInChain<uint8_t>(STR("MovementMode")) : nullptr;
 			const bool air = mode && *mode == 3; // MOVE_Falling
+			minecraft_view(pc, pawn, false, aspect);
 			sendf("{\"t\":\"cam\",\"f\":%lld,\"p\":[%.4f,%.4f,%.4f],\"r\":[%.3f,%.3f,%.3f],\"fov\":%.3f,\"fp\":true,\"air\":%s}",
 				g_frame, cx, cy, cz, yaw, pitch, roll, vfov, air ? "true" : "false");
 		}
 
-		if (g_hands)
-		{
-			forward_key(VK_LBUTTON, "attack");
-			forward_key(VK_RBUTTON, "use");
-			forward_key(VK_MBUTTON, "pick");
-			for (int i = 0; i < 9; ++i)
-				if (pressed('1' + i))
-					sendf("{\"t\":\"slot\",\"n\":%d}", i);
-		}
+		minecraft_controls(pc);
 	}
 }

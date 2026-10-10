@@ -13,6 +13,7 @@ import net.minecraft.client.InactivityFpsLimit;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.DeathScreen;
+import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.tutorial.TutorialSteps;
 import net.minecraft.core.HolderLookup;
@@ -73,6 +74,7 @@ public class PassthroughClient implements ClientModInitializer {
 	private static final long HOST_GONE_NANOS = 20_000_000_000L;
 	private static long hostLastSeen = System.nanoTime();
 	private static boolean hostEverSeen;
+	private static boolean screenWasOpen;
 
 	@Override
 	public void onInitializeClient() {
@@ -105,6 +107,14 @@ public class PassthroughClient implements ClientModInitializer {
 			configure(minecraft.options);
 		}
 
+		// a Minecraft screen (inventory, ...) over HN: HN shows its cursor and stops turning the camera meanwhile
+		boolean screenOpen = minecraft.gui.screen() != null && !(minecraft.gui.screen() instanceof PauseScreen)
+			&& !(minecraft.gui.screen() instanceof DeathScreen);
+		if (screenOpen != screenWasOpen) {
+			screenWasOpen = screenOpen;
+			Passthrough.events.accept("{\"t\":\"screen\",\"open\":" + screenOpen + "}");
+		}
+
 		if (HostLink.connected()) {
 			hostLastSeen = System.nanoTime();
 			hostEverSeen = true;
@@ -134,7 +144,8 @@ public class PassthroughClient implements ClientModInitializer {
 		options.vignette().set(false);
 		options.improvedTransparency().set(false);
 		options.inactivityFpsLimit().set(InactivityFpsLimit.MINIMIZED);
-		options.fovEffectScale().set(0.0);
+		// Minecraft's FOV effects (sprinting): Hello Neighbor's camera takes Minecraft's FOV while Minecraft drives
+		options.fovEffectScale().set(1.0);
 		options.damageTiltStrength().set(0.0);
 		options.menuBackgroundBlurriness().set(0);
 		options.enableVsync().set(false);

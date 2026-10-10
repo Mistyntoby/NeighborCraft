@@ -6,7 +6,10 @@ import dev.neighborcraft.client.PlayerSync;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
+import dev.neighborcraft.Passthrough;
+import java.util.Locale;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.joml.Vector3fc;
@@ -34,6 +37,8 @@ abstract class CameraMixin {
 	@Shadow private boolean detached;
 	@Shadow private int matrixPropertiesDirty;
 	@Shadow private float depthFar;
+	/** The FOV the last frame was rendered with (driving), sent to the host with the camera. */
+	private static float lastFov;
 
 	@Shadow
 	protected abstract void setPosition(double x, double y, double z);
@@ -70,13 +75,35 @@ abstract class CameraMixin {
 	@Inject(method = "calculateFov", at = @At("HEAD"), cancellable = true)
 	private void passthrough$hostFov(final float partialTicks, final CallbackInfoReturnable<Float> cir) {
 		HostState.Pose p = HostState.frame();
-		if (p != null) {
+		if (p != null && !p.drive()) {
 			cir.setReturnValue(p.fov());
+		}
+	}
+
+	/** Driving: Minecraft's FOV with its effects (sprint, ...), relative to the host's base FOV instead of Minecraft's. */
+	@Inject(method = "calculateFov", at = @At("RETURN"), cancellable = true)
+	private void passthrough$minecraftFovEffects(final float partialTicks, final CallbackInfoReturnable<Float> cir) {
+		HostState.Pose p = HostState.frame();
+		if (p != null && p.drive()) {
+			float fov = cir.getReturnValueF() * p.fov() / Minecraft.getInstance().options.fov().get();
+			cir.setReturnValue(fov);
+			lastFov = fov;
 		}
 	}
 
 	@Inject(method = "update", at = @At("TAIL"))
 	private void passthrough$planes(final DeltaTracker deltaTracker, final CallbackInfo ci) {
 		FrameExporter.setFar(this.depthFar);
+		HostState.Pose p = HostState.frame();
+		Entity player = Minecraft.getInstance().player;
+		if (p != null && p.drive() && player != null) {
+			// the host renders from exactly this camera (first or third person), and puts its player at the eyes
+			Camera self = (Camera) (Object) this;
+			Vec3 cam = self.position();
+			Vec3 eye = player.getEyePosition(deltaTracker.getGameTimeDeltaPartialTick(true));
+			Passthrough.events.accept(String.format(Locale.ROOT,
+				"{\"t\":\"mcpos\",\"eye\":[%.4f,%.4f,%.4f],\"cam\":[%.4f,%.4f,%.4f],\"rot\":[%.3f,%.3f],\"fov\":%.3f,\"tn\":%d}",
+				eye.x, eye.y, eye.z, cam.x, cam.y, cam.z, self.yRot(), self.xRot(), lastFov > 0.0F ? lastFov : p.fov(), System.nanoTime()));
+		}
 	}
 }

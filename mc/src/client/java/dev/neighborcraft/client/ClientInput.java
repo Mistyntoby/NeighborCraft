@@ -5,7 +5,11 @@ import dev.neighborcraft.Passthrough;
 import dev.neighborcraft.client.mixin.KeyMappingAccessor;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.gui.screens.PauseScreen;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.MouseButtonEvent;
+import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.entity.player.Inventory;
@@ -13,6 +17,10 @@ import org.lwjgl.sdl.SDLVideo;
 
 /** Host input, applied on the client thread: the host window has the focus, so Minecraft never sees these itself. */
 final class ClientInput {
+	/** The mouse button held over an open screen (-1: none), and where the cursor was, for drags. */
+	private static int heldButton = -1;
+	private static double lastX, lastY;
+
 	private ClientInput() {
 	}
 
@@ -37,6 +45,7 @@ final class ClientInput {
 					case "inventory" -> minecraft.options.keyInventory;
 					case "drop" -> minecraft.options.keyDrop;
 					case "swap" -> minecraft.options.keySwapOffhand;
+					case "perspective" -> minecraft.options.keyTogglePerspective;
 					default -> null;
 				};
 				if (k.equals("attack") && down && player != null
@@ -53,6 +62,41 @@ final class ClientInput {
 
 					key.setDown(down);
 				}
+			}
+			case "mouse", "click", "wheel" -> {
+				// a Minecraft screen (inventory) is open over HN: HN's cursor, in HN's window pixels, drives it
+				Screen screen = minecraft.gui.screen();
+				if (screen == null || !m.has("x")) {
+					break;
+				}
+
+				Window window = minecraft.getWindow();
+				double gx = m.get("x").getAsDouble() * window.getGuiScaledWidth() / Math.max(1, window.getScreenWidth());
+				double gy = m.get("y").getAsDouble() * window.getGuiScaledHeight() / Math.max(1, window.getScreenHeight());
+				switch (m.get("t").getAsString()) {
+					case "mouse" -> {
+						if (heldButton >= 0) {
+							screen.mouseDragged(new MouseButtonEvent(gx, gy, new MouseButtonInfo(heldButton, 0)), gx - lastX, gy - lastY);
+						}
+
+						screen.mouseMoved(gx, gy);
+					}
+					case "click" -> {
+						int button = m.get("b").getAsInt();
+						MouseButtonEvent event = new MouseButtonEvent(gx, gy, new MouseButtonInfo(button, 0));
+						if (m.get("down").getAsBoolean()) {
+							heldButton = button;
+							screen.mouseClicked(event, false);
+						} else {
+							heldButton = -1;
+							screen.mouseReleased(event);
+						}
+					}
+					default -> screen.mouseScrolled(gx, gy, 0.0, m.get("d").getAsDouble());
+				}
+
+				lastX = gx;
+				lastY = gy;
 			}
 			case "pause" -> {
 				// Hello Neighbor paused (or left gameplay): Minecraft's world stops too (single player pauses while the

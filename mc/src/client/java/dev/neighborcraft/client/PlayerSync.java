@@ -46,13 +46,7 @@ public final class PlayerSync {
 			player.yRotO = p.yaw();
 			player.xRotO = p.pitch();
 			player.yHeadRot = player.yHeadRotO = p.yaw();
-			if (minecraft.options.getCameraType() != CameraType.FIRST_PERSON) {
-				minecraft.options.setCameraType(CameraType.FIRST_PERSON);
-			}
-
-			Vec3 eye = player.getEyePosition(partialTick);
-			Passthrough.events.accept(String.format(Locale.ROOT, "{\"t\":\"mcpos\",\"eye\":[%.4f,%.4f,%.4f],\"feet\":%.4f,\"ground\":%b,\"tn\":%d}",
-				eye.x, eye.y, eye.z, player.getPosition(partialTick).y, player.onGround(), System.nanoTime()));
+			// Minecraft's own camera type (F5 cycles it); the camera that results goes to HN (CameraMixin)
 			return;
 		}
 
