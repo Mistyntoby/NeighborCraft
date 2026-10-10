@@ -93,7 +93,7 @@ public final class WorldBridge {
 	 * "m", 8x8x8 bits, and the next floor in "f": 16 surface heights, see HostBlock.fromMask).
 	 * Only air and our own host blocks are ever replaced; the player's blocks are never touched.
 	 */
-	public static void shapes(final int[] cells, final String[] masks, final String[] floors) {
+	public static void shapes(final int[] cells, final String[] masks, final String[] floors, final String[] ceilings) {
 		MinecraftServer s = server;
 		if (s == null) {
 			return;
@@ -128,7 +128,7 @@ public final class WorldBridge {
 				}
 
 				if (kind == 2) {
-					HostBlock.SHAPES.put(pos.asLong(), HostBlock.fromMask(masks[mask], floors[mask]));
+					HostBlock.SHAPES.put(pos.asLong(), HostBlock.fromMask(masks[mask], floors[mask], ceilings[mask]));
 					mask++;
 				} else {
 					HostBlock.SHAPES.remove(pos.asLong());

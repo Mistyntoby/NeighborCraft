@@ -86,6 +86,9 @@ namespace nc
 		bool g_haveMcCamera = false;
 		Vec3f g_mcCamera;
 		float g_mcYaw = 0, g_mcPitch = 0, g_mcRoll = 0, g_mcFov = 70; // Minecraft's camera (Minecraft degrees, vertical FOV)
+		float g_mcLookYaw = 0, g_mcLookPitch = 0; // the look that camera was rendered for
+		bool g_mcFirstPerson = true;
+		float g_setHfov = 0;                      // the FOV last given to HN's camera (horizontal degrees)
 
 		// Minecraft's process (from its hello): its window is hidden, and it can be started from here
 		DWORD g_mcPid = 0;
@@ -678,7 +681,8 @@ namespace nc
 			return kind;
 		}
 
-		/// A line trace against what blocks a player in HN (the "Pawn" profile); the impact point on a hit.
+		/// A line trace against what blocks a player in HN (the "Pawn" profile), against the rendered triangles
+		/// (complex collision: simple collision shapes can sit above what is seen); the impact point on a hit.
 		bool ray_blocks_player(UObject *self, const Vec3f &a, const Vec3f &b, Vec3f &hit)
 		{
 			Call c(kismet(), STR("LineTraceSingleByProfile"));
@@ -690,7 +694,7 @@ namespace nc
 				.set(STR("End"), b)
 				.set(STR("ProfileName"), pawnProfile)
 				.set(STR("ActorsToIgnore"), ignore_list())
-				.set_bool(STR("bTraceComplex"), false)
+				.set_bool(STR("bTraceComplex"), true)
 				.set<uint8_t>(STR("DrawDebugType"), 0)
 				.set_bool(STR("bIgnoreSelf"), true);
 			c.invoke();
@@ -705,7 +709,8 @@ namespace nc
 		struct BlockBits
 		{
 			uint8_t box[64] = {};     // from the box probe (walls, furniture)
-			float floor[16] = {};     // from the column rays: surface height in the block (0..1], per 1/4 x 1/4 column
+			float floor[64] = {};     // floor rays: highest surface in the block (0..1], per 1/8 x 1/8 column (x * 8 + z)
+			float ceiling[16] = {};   // ceiling rays: lowest underside in the block [0..1), per 1/4 x 1/4 column, 0 none
 			bool boxKnown = false;
 		};
 		std::unordered_map<unsigned long long, BlockBits> g_bits;
@@ -727,7 +732,10 @@ namespace nc
 			return int(int64_t(key << 43) >> 43);
 		}
 
-		/// Cast the rays of column (x, z) between Minecraft heights yLo and yHi; rewrites the floor layers of its blocks.
+		/// Cast the rays of column (x, z) between Minecraft heights yLo and yHi: 8x8 straight down (each surface a ray
+		/// meets; it goes on below what it hit, so every storey), then 4x4 straight up from just above the lowest floor
+		/// (ceiling undersides; starting above the ground, a ray can't catch the ground from below). Rewrites the floor
+		/// and ceiling heights of the column's blocks.
 		int probe_column(UObject *pawn, int x, int z, int yLo, int yHi)
 		{
 			for (int y = yLo; y < yHi; ++y)
@@ -735,13 +743,16 @@ namespace nc
 				const unsigned long long key = cell_key(x, y, z);
 				BlockBits &b = g_bits[key];
 				std::fill(std::begin(b.floor), std::end(b.floor), 0.0f);
+				std::fill(std::begin(b.ceiling), std::end(b.ceiling), 0.0f);
 				g_dirty.insert(key);
 			}
 			int queries = 0;
-			for (int i = 0; i < 4; ++i)
-				for (int k = 0; k < 4; ++k)
+			double lowest[16];
+			std::fill(std::begin(lowest), std::end(lowest), double(yLo));
+			for (int i = 0; i < 8; ++i)
+				for (int k = 0; k < 8; ++k)
 				{
-					const double mx = x + (i + 0.5) / 4.0, mz = z + (k + 0.5) / 4.0;
+					const double mx = x + (i + 0.5) / 8.0, mz = z + (k + 0.5) / 8.0;
 					Vec3f from = to_ue(mx, yHi, mz);
 					const Vec3f to = to_ue(mx, yLo, mz);
 					for (int surfaces = 0; surfaces < 6; ++surfaces)
@@ -752,34 +763,82 @@ namespace nc
 							break;
 						double hx, hy, hz;
 						to_mc(hit, hx, hy, hz);
-						// the surface's exact height, in the block it lies in (a surface on a block boundary belongs to the
-						// block below: its top face)
+						// a surface on a block boundary belongs to the block below (its top face)
 						const int by = int(std::floor(hy - 1e-4));
 						if (by >= yLo && by < yHi)
 						{
-							float &top = g_bits[cell_key(x, by, z)].floor[i * 4 + k];
+							float &top = g_bits[cell_key(x, by, z)].floor[i * 8 + k];
 							top = std::max(top, float(hy - by));
 						}
+						double &low = lowest[(i / 2) * 4 + k / 2];
+						low = surfaces == 0 ? hy : std::min(low, hy);
 						from = {hit.x, hit.y, hit.z - 3.0f}; // on below this surface: the storey under it
 						if (from.z <= to.z)
 							break;
 					}
 				}
+			for (int i = 0; i < 4; ++i)
+				for (int k = 0; k < 4; ++k)
+				{
+					const double mx = x + (i + 0.5) / 4.0, mz = z + (k + 0.5) / 4.0;
+					Vec3f from = to_ue(mx, lowest[i * 4 + k] + 0.02, mz);
+					const Vec3f to = to_ue(mx, yHi, mz);
+					for (int surfaces = 0; surfaces < 4 && from.z < to.z; ++surfaces)
+					{
+						Vec3f hit;
+						++queries;
+						if (!ray_blocks_player(pawn, from, to, hit))
+							break;
+						double hx, hy, hz;
+						to_mc(hit, hx, hy, hz);
+						const int by = int(std::floor(hy + 1e-4)); // on a boundary: the block above (its bottom face)
+						if (by >= yLo && by < yHi)
+						{
+							float &bottom = g_bits[cell_key(x, by, z)].ceiling[i * 4 + k];
+							const float local = std::max(float(hy - by), 0.0005f);
+							bottom = bottom > 0.0f ? std::min(bottom, local) : local;
+						}
+						from = {hit.x, hit.y, hit.z + 3.0f}; // on above it: the storey over it
+					}
+				}
 			return queries;
 		}
 
-		/// The block's shape: what the box probe and the floor rays found. 0 empty, 1 full, 2 partial (mask in `hex`,
-		/// floor heights in `floor`: 16 thousandths of a block, 0 for none).
-		int block_shape(const BlockBits &b, std::string &hex, std::string &floor)
+		/// The block's shape: the box probe's cells, corrected by the rays. 0 empty, 1 full, 2 partial (mask in `hex`,
+		/// floor heights in `floor`: 64 thousandths of a block, ceilings in `ceiling`: 16; "" when there are none).
+		///  - Where a ray measured a floor, the box cells holding it (and the one above, where simple collision can sit a
+		///    little over the seen surface) go: the box probe rounds surfaces up to its 12.5 cm cells, so Steve floated.
+		///  - Step-sized obstacles (a neighbouring floor at most 0.6 blocks higher: stairs, curbs, sills) are floor heights
+		///    only: box cells below that neighbouring floor go, so treads and curbs have no lips to catch on. Taller things
+		///    (walls, tables) keep their box shape.
+		///  - Where a ray measured a ceiling, the box cell holding it goes (rounded down, it took away clearance and made
+		///    Minecraft crouch or crawl).
+		int block_shape(const BlockBits &b, std::string &hex, std::string &floor, std::string &ceiling)
 		{
-			// where a ray found the floor's exact height, the box probe's cell holding that surface goes: it is rounded up
-			// to the cell's top (Steve stood up to 12.5 cm above HN's floor, and stair treads got lips)
 			uint8_t bits[64];
 			std::memcpy(bits, b.box, 64);
-			for (int c = 0; c < 16; ++c)
-				if (b.floor[c] > 0.0f)
+			for (int sx = 0; sx < 8; ++sx)
+				for (int sz = 0; sz < 8; ++sz)
 				{
-					const int layer = std::clamp(int(b.floor[c] * 8.0f - 1e-3f), 0, 7);
+					const float own = b.floor[sx * 8 + sz];
+					float highest = own;
+					for (int dx = -1; dx <= 1; ++dx)
+						for (int dz = -1; dz <= 1; ++dz)
+						{
+							const int nx = sx + dx, nz = sz + dz;
+							if (nx >= 0 && nx < 8 && nz >= 0 && nz < 8)
+								highest = std::max(highest, b.floor[nx * 8 + nz]);
+						}
+					float clearBelow = own > 0.0f ? std::min(own + 0.125f, 1.0f) : 0.0f;
+					if (highest > 0.0f && highest - own <= 0.6f)
+						clearBelow = std::max(clearBelow, highest);
+					for (int layer = 0; layer < 8 && layer / 8.0f < clearBelow - 1e-4f; ++layer)
+						bits[sx * 8 + layer] &= uint8_t(~(1u << sz));
+				}
+			for (int c = 0; c < 16; ++c)
+				if (b.ceiling[c] > 0.0f)
+				{
+					const int layer = std::clamp(int(b.ceiling[c] * 8.0f), 0, 7);
 					for (int sx = (c >> 2) * 2; sx < (c >> 2) * 2 + 2; ++sx)
 						bits[sx * 8 + layer] &= uint8_t(~(3u << ((c & 3) * 2)));
 				}
@@ -788,18 +847,22 @@ namespace nc
 				set += std::popcount(bits[i]);
 			if (set == 512)
 				return 1;
-			floor.clear();
-			bool anyFloor = false;
-			for (int i = 0; i < 16; ++i)
-			{
-				const int h = int(std::lround(b.floor[i] * 1000.0f));
-				anyFloor |= h > 0;
-				floor += (i ? "," : "") + std::to_string(h);
-			}
-			if (set == 0 && !anyFloor)
+			auto heights = [](const float *v, int n, std::string &out) {
+				out.clear();
+				bool any = false;
+				for (int i = 0; i < n; ++i)
+				{
+					const int h = int(std::lround(v[i] * 1000.0f));
+					any |= h > 0;
+					out += (i ? "," : "") + std::to_string(h);
+				}
+				if (!any)
+					out.clear();
+				return any;
+			};
+			const bool anyFloor = heights(b.floor, 64, floor), anyCeiling = heights(b.ceiling, 16, ceiling);
+			if (set == 0 && !anyFloor && !anyCeiling)
 				return 0;
-			if (!anyFloor)
-				floor.clear();
 			static const char digits[] = "0123456789abcdef";
 			hex.resize(128);
 			for (int i = 0; i < 64; ++i)
@@ -869,11 +932,8 @@ namespace nc
 					continue;
 				if (!boxKnown && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
 					ready = false;
-				const bool inPlayer = x + 1 > ex - 0.35 && x < ex + 0.35 && z + 1 > ez - 0.35 && z < ez + 0.35 && y + 1 > ey - 1.5 &&
-									  y < ey + 0.25;
 				BlockBits &b = g_bits[key];
 				std::fill(std::begin(b.box), std::end(b.box), uint8_t(0));
-				if (!inPlayer)
 				{
 					hex.clear();
 					const int kind = probe_block(pawn, x, y, z, hex, queries);
@@ -890,15 +950,17 @@ namespace nc
 				queries += 1;
 			}
 			// send the blocks whose shape changed
-			std::string cells, masks, floors, floor;
+			std::string cells, masks, floors, ceilings, floor, ceiling;
 			for (unsigned long long key : g_dirty)
 			{
 				const auto bit = g_bits.find(key);
 				if (bit == g_bits.end())
 					continue;
-				const int kind = block_shape(bit->second, hex, floor);
+				const int kind = block_shape(bit->second, hex, floor, ceiling);
 				auto [cell, added] = g_cells.try_emplace(key, Cell{~0ull, 0});
-				const unsigned long long sig = kind == 2 ? ((std::hash<std::string>()(hex) ^ std::hash<std::string>()(floor) * 31) | 3) : unsigned(kind);
+				const unsigned long long sig = kind == 2 ? ((std::hash<std::string>()(hex) ^ std::hash<std::string>()(floor) * 31 ^
+															   std::hash<std::string>()(ceiling) * 131) | 3)
+														 : unsigned(kind);
 				if (!added && cell->second.signature == sig)
 					continue;
 				cell->second.signature = sig;
@@ -908,13 +970,15 @@ namespace nc
 				cells += entry;
 				if (kind == 2)
 				{
-					masks += (masks.empty() ? "\"" : ",\"") + hex + "\"";
-					floors += (floors.empty() && masks.size() == hex.size() + 2 ? "\"" : ",\"") + floor + "\"";
+					const bool first = masks.empty();
+					masks += (first ? "\"" : ",\"") + hex + "\"";
+					floors += (first ? "\"" : ",\"") + floor + "\"";
+					ceilings += (first ? "\"" : ",\"") + ceiling + "\"";
 				}
 			}
 			g_dirty.clear();
 			if (!cells.empty())
-				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "],\"f\":[" + floors + "]}");
+				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "],\"f\":[" + floors + "],\"g\":[" + ceilings + "]}");
 			static DWORD nextStats = 0;
 			if (now > nextStats)
 			{
@@ -1151,6 +1215,13 @@ namespace nc
 					g_mcYaw = float(rot[0]);
 					g_mcPitch = float(rot[1]);
 					g_mcRoll = float(rot[2]);
+					double look[2];
+					if (json_numbers(m, "look", look, 2))
+					{
+						g_mcLookYaw = float(look[0]);
+						g_mcLookPitch = float(look[1]);
+					}
+					g_mcFirstPerson = m.find("\"fp\":false") == std::string::npos;
 					g_mcFov = float(fov);
 					g_haveMcCamera = true;
 				}
@@ -1521,11 +1592,19 @@ namespace nc
 				return;
 			if (on && g_haveMcCamera)
 			{
+				// first person: the look as of now (mouse input reaches HN's camera this frame, not after a round trip through
+				// Minecraft) plus Minecraft's view-bob offset from the look it rendered with; third person: Minecraft's camera
+				float yaw = g_mcYaw, pitch = g_mcPitch;
+				if (g_mcFirstPerson && g_lookOwned)
+				{
+					yaw = float(g_lookYaw) + (g_mcYaw - g_mcLookYaw);
+					pitch = std::clamp(float(g_lookPitch) + (g_mcPitch - g_mcLookPitch), -90.0f, 90.0f);
+				}
 				struct
 				{
 					Vec3f loc;
 					Rot3f rot;
-				} pose{g_mcCamera, {-g_mcPitch, g_mcYaw + 90.0f, -g_mcRoll}};
+				} pose{g_mcCamera, {-pitch, yaw + 90.0f, -g_mcRoll}};
 				Call place(camera, STR("K2_SetActorLocationAndRotation"));
 				place.set(STR("NewLocation"), pose.loc).set(STR("NewRotation"), pose.rot).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
 				const float hfov = float(2.0 * std::atan(std::tan(g_mcFov * 3.14159265358979 / 360.0) * aspect) * 180.0 / 3.14159265358979);
@@ -1533,7 +1612,8 @@ namespace nc
 				// (reading HN's camera back on the game thread could be a frame ahead of the picture being presented)
 				double mx, my, mz;
 				to_mc(g_mcCamera, mx, my, mz);
-				compositor::set_host_pose(g_mcYaw, g_mcPitch, g_mcRoll, g_mcFov, mx, my, mz);
+				compositor::set_host_pose(yaw, pitch, g_mcRoll, g_mcFov, mx, my, mz);
+				g_setHfov = hfov;
 				if (UObject **component = camera->GetValuePtrByPropertyNameInChain<UObject *>(STR("CameraComponent")); component && *component)
 					Call(*component, STR("SetFieldOfView")).set(STR("InFieldOfView"), hfov).invoke();
 			}
@@ -1546,7 +1626,24 @@ namespace nc
 				Call(pc, STR("SetViewTargetWithBlend")).set<UObject *>(STR("NewViewTarget"), want).set(STR("BlendTime"), 0.0f).invoke();
 			if (on)
 				if (UObject **pcm = pc->GetValuePtrByPropertyNameInChain<UObject *>(STR("PlayerCameraManager")); pcm && *pcm)
+				{
 					Call(*pcm, STR("StopAllCameraShakes")).set_bool(STR("bImmediately"), true).invoke();
+					// HN's camera modifiers (FOV, bob or zoom effects of its own) would stack on Minecraft's camera
+					static DWORD nextModifiers = 0;
+					if (GetTickCount() > nextModifiers)
+					{
+						nextModifiers = GetTickCount() + 1000;
+						struct ObjectArray
+						{
+							UObject **data;
+							int32 num, max;
+						};
+						if (auto *mods = (*pcm)->GetValuePtrByPropertyNameInChain<ObjectArray>(STR("ModifierList")); mods && mods->data)
+							for (int32 i = 0; i < mods->num; ++i)
+								if (mods->data[i])
+									Call(mods->data[i], STR("DisableModifier")).set_bool(STR("bImmediate"), true).invoke();
+					}
+				}
 		}
 
 		/// HN's interaction circle (the player's cursor widget, m_pCursor) is hidden while Minecraft shows, and put back
@@ -1766,6 +1863,16 @@ namespace nc
 			sendf("{\"t\":\"pause\",\"on\":%s}", mcPaused ? "true" : "false");
 		}
 		const bool live = g_enabled && g_ws.connected() && gameplay && read_camera(pc, cam);
+		if (live && g_driving && g_setHfov > 0.0f && std::abs(cam.hfov - g_setHfov) > 0.2f)
+		{
+			static DWORD nextFovLog = 0;
+			if (GetTickCount() > nextFovLog)
+			{
+				nextFovLog = GetTickCount() + 3000;
+				log(L"FOV: HN rendered " + std::to_wstring(cam.hfov) + L" degrees, it was given " + std::to_wstring(g_setHfov) +
+					L" (something in HN changes the camera's FOV)");
+			}
+		}
 		compositor::set_active(live);
 		set_player_hidden(pawn, live);
 		g_minecraftInput = live;
@@ -1853,10 +1960,16 @@ namespace nc
 		if (lagOffFor != pc)
 		{
 			lagOffFor = pc;
-			Call(kismet(), STR("ExecuteConsoleCommand")).set<UObject *>(STR("WorldContextObject"), pawn)
-				.set(STR("Command"), FString(STR("r.OneFrameThreadLag 0"))).invoke();
-			log(L"r.OneFrameThreadLag 0");
+			// no render-thread overlap; no motion blur (HN's picture smeared when turning while Minecraft's stays sharp)
+			for (const TCHAR *command : {STR("r.OneFrameThreadLag 0"), STR("r.MotionBlurQuality 0")})
+			{
+				Call(kismet(), STR("ExecuteConsoleCommand")).set<UObject *>(STR("WorldContextObject"), pawn).set(STR("Command"), FString(command)).invoke();
+				log(L"console: " + std::wstring(command));
+			}
 		}
+		// HN's camera for the next frame is placed after this frame's scene, and the UI (where Minecraft is composited)
+		// is drawn after this tick: while driving, the frame on screen was rendered with the pose set one tick earlier
+		compositor::set_pose_lag(g_driving ? 1 : 0);
 		// where the player looks (HN's mouse look: the control rotation; the camera itself follows Minecraft when it
 		// drives), and HN's own base FOV for Minecraft to apply its FOV effects to
 		Rot3f look = cam.rot;

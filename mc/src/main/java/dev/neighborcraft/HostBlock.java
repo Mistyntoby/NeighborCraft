@@ -30,22 +30,39 @@ public final class HostBlock extends Block {
 	}
 
 	/**
-	 * An 8x8x8 occupancy mask (bit x * 64 + y * 8 + z, 64 bytes as hex: walls, furniture) plus the floor (16 surface
-	 * heights in thousandths of a block, one per 1/4 x 1/4 column, x * 4 + z, 0: none) as a shape. Floors keep their
-	 * exact height (a 1/8 block thick slab under it), so stairs and sills are their real steps.
+	 * Heights in thousandths of a block, one per column of an n x n grid over the block (x * n + z; 0: none), as
+	 * slabs: `up` true for floors (the slab is under the surface), false for ceilings (above it).
 	 */
-	static VoxelShape fromMask(final String hex, final String floor) {
-		VoxelShape shape = Shapes.empty();
-		if (!floor.isEmpty()) {
-			String[] heights = floor.split(",");
-			for (int i = 0; i < heights.length && i < 16; i++) {
-				double top = Integer.parseInt(heights[i]) / 1000.0;
-				if (top > 0.0) {
-					double x = (i >> 2) / 4.0, z = (i & 3) / 4.0;
-					shape = Shapes.or(shape, Shapes.box(x, Math.max(0.0, top - 0.125), z, x + 0.25, Math.min(1.0, top), z + 0.25));
-				}
+	private static VoxelShape surfaces(VoxelShape shape, final String heights, final boolean up) {
+		if (heights.isEmpty()) {
+			return shape;
+		}
+
+		String[] h = heights.split(",");
+		int n = (int) Math.round(Math.sqrt(h.length));
+		for (int i = 0; i < h.length; i++) {
+			double at = Integer.parseInt(h[i]) / 1000.0;
+			if (at <= 0.0) {
+				continue;
+			}
+
+			double x = (i / n) / (double) n, z = (i % n) / (double) n, w = 1.0 / n;
+			double lo = up ? Math.max(0.0, at - 0.125) : Math.min(at, 1.0), hi = up ? Math.min(1.0, at) : Math.min(1.0, at + 0.125);
+			if (hi > lo) {
+				shape = Shapes.or(shape, Shapes.box(x, lo, z, x + w, hi, z + w));
 			}
 		}
+
+		return shape;
+	}
+
+	/**
+	 * An 8x8x8 occupancy mask (bit x * 64 + y * 8 + z, 64 bytes as hex: walls, furniture) plus the exact floor and
+	 * ceiling surfaces measured by rays (see surfaces) as a shape: floors and ceilings sit at their real heights, so
+	 * Steve stands on HN's ground, stairs are their real steps and low ceilings their real clearance.
+	 */
+	static VoxelShape fromMask(final String hex, final String floor, final String ceiling) {
+		VoxelShape shape = surfaces(surfaces(Shapes.empty(), floor, true), ceiling, false);
 
 		for (int x = 0; x < 8; x++) {
 			for (int y = 0; y < 8; y++) {

@@ -85,14 +85,17 @@ public final class HostLink extends WebSocketServer {
 				case "shape" -> {
 					JsonArray masks = m.has("m") ? m.getAsJsonArray("m") : new JsonArray();
 					JsonArray floors = m.has("f") ? m.getAsJsonArray("f") : new JsonArray();
+					JsonArray ceilings = m.has("g") ? m.getAsJsonArray("g") : new JsonArray();
 					String[] hex = new String[masks.size()];
 					String[] floor = new String[masks.size()];
+					String[] ceiling = new String[masks.size()];
 					for (int i = 0; i < hex.length; i++) {
 						hex[i] = masks.get(i).getAsString();
 						floor[i] = i < floors.size() ? floors.get(i).getAsString() : "";
+						ceiling[i] = i < ceilings.size() ? ceilings.get(i).getAsString() : "";
 					}
 
-					WorldBridge.shapes(ints(m.getAsJsonArray("c")), hex, floor);
+					WorldBridge.shapes(ints(m.getAsJsonArray("c")), hex, floor, ceiling);
 				}
 				case "tp" -> {
 					JsonArray at = m.getAsJsonArray("p");
