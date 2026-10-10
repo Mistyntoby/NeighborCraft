@@ -67,9 +67,10 @@ public final class HostBlock extends Block {
 		return shape(pos);
 	}
 
+	/** The third-person camera stops at visual shapes: it stays out of HN's walls as it does out of blocks. */
 	@Override
 	protected VoxelShape getVisualShape(final BlockState state, final BlockGetter level, final BlockPos pos, final CollisionContext context) {
-		return Shapes.empty();
+		return shape(pos);
 	}
 
 	@Override

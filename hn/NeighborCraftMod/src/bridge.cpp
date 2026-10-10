@@ -77,9 +77,14 @@ namespace nc
 		std::atomic<bool> g_minecraftScreen{false}; // a Minecraft screen is open: the mouse is Minecraft's too
 		std::atomic<int> g_wheel{0};                // wheel notches since the last tick
 		std::atomic<int> g_injectedE{0};            // E messages we posted ourselves (let through)
+		std::atomic<bool> g_minecraftDriving{false}; // HN's movement keys are Minecraft's too (swallowed)
+		std::atomic<long> g_mouseDx{0}, g_mouseDy{0};  // raw mouse counts since the last tick
+		std::atomic<bool> g_rawMouseSeen{false};
+		double g_lookYaw = 0, g_lookPitch = 0;         // the look while Minecraft drives (Minecraft degrees, yaw unwrapped)
+		bool g_lookOwned = false;
 		bool g_haveMcCamera = false;
 		Vec3f g_mcCamera;
-		float g_mcYaw = 0, g_mcPitch = 0, g_mcFov = 70; // Minecraft's camera (Minecraft degrees, vertical FOV)
+		float g_mcYaw = 0, g_mcPitch = 0, g_mcRoll = 0, g_mcFov = 70; // Minecraft's camera (Minecraft degrees, vertical FOV)
 
 		// Minecraft's process (from its hello): its window is hidden, and it can be started from here
 		DWORD g_mcPid = 0;
@@ -1108,17 +1113,18 @@ namespace nc
 			}
 			else if (m.find("\"t\":\"mcpos\"") != std::string::npos)
 			{
-				double eye[3], camera[3], rot[2], fov = 0;
+				double eye[3], camera[3], rot[3], fov = 0;
 				if (json_vec3(m, "eye", eye))
 				{
 					g_eye = to_ue(eye[0], eye[1], eye[2]);
 					g_haveEye = true;
 				}
-				if (json_vec3(m, "cam", camera) && json_numbers(m, "rot", rot, 2) && json_number(m, "fov", fov))
+				if (json_vec3(m, "cam", camera) && json_numbers(m, "rot", rot, 3) && json_number(m, "fov", fov))
 				{
 					g_mcCamera = to_ue(camera[0], camera[1], camera[2]);
 					g_mcYaw = float(rot[0]);
 					g_mcPitch = float(rot[1]);
+					g_mcRoll = float(rot[2]);
 					g_mcFov = float(fov);
 					g_haveMcCamera = true;
 				}
@@ -1214,6 +1220,19 @@ namespace nc
 			{
 				switch (msg)
 				{
+				case WM_INPUT:
+				{
+					RAWINPUT input;
+					UINT size = sizeof(input);
+					if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER)) != UINT(-1) &&
+						input.header.dwType == RIM_TYPEMOUSE && !(input.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE))
+					{
+						g_mouseDx += input.data.mouse.lLastX;
+						g_mouseDy += input.data.mouse.lLastY;
+						g_rawMouseSeen = true;
+					}
+					break;
+				}
 				case WM_MOUSEWHEEL:
 					g_wheel += GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
 					return 0;
@@ -1241,6 +1260,10 @@ namespace nc
 						break;
 					}
 					if (minecraft_key(wparam) || (g_minecraftScreen && wparam == VK_ESCAPE))
+						return 0;
+					// while Minecraft walks the player, HN never sees its movement keys (no HN crouch, run or jump)
+					if (g_minecraftDriving && (wparam == 'W' || wparam == 'A' || wparam == 'S' || wparam == 'D' || wparam == VK_SPACE ||
+												  wparam == VK_SHIFT || wparam == VK_CONTROL || wparam == 'C'))
 						return 0;
 					break;
 				default:
@@ -1335,9 +1358,6 @@ namespace nc
 				return;
 			applied = open;
 			set_bool_property(pc, STR("bShowMouseCursor"), open);
-			Call(pc, STR("SetIgnoreLookInput")).set_bool(STR("bNewLookInput"), open).invoke();
-			if (!open)
-				Call(pc, STR("ResetIgnoreLookInput")).invoke();
 		}
 
 		// ---- HN renders from Minecraft's camera ------------------------------------------------------------
@@ -1391,7 +1411,7 @@ namespace nc
 				{
 					Vec3f loc;
 					Rot3f rot;
-				} pose{g_mcCamera, {-g_mcPitch, g_mcYaw + 90.0f, 0.0f}};
+				} pose{g_mcCamera, {-g_mcPitch, g_mcYaw + 90.0f, -g_mcRoll}};
 				Call place(camera, STR("K2_SetActorLocationAndRotation"));
 				place.set(STR("NewLocation"), pose.loc).set(STR("NewRotation"), pose.rot).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
 				const float hfov = float(2.0 * std::atan(std::tan(g_mcFov * 3.14159265358979 / 360.0) * aspect) * 180.0 / 3.14159265358979);
@@ -1506,6 +1526,8 @@ namespace nc
 		if (pressed(VK_F9))
 			dump(pc, pawn);
 
+		if (!g_ws.connected())
+			g_mcReady = false; // a new Minecraft says "ready" again once its world is loaded
 		std::string message;
 		while (g_ws.poll(message))
 			handle(message);
@@ -1571,7 +1593,6 @@ namespace nc
 			// (re)connected: start the world over and show Minecraft's HUD
 			g_generation = g_ws.generation();
 			g_haveOffset = false;
-			g_mcReady = false;
 			g_viewW = g_viewH = 0;
 			g_ws.send("{\"t\":\"hud\",\"hidden\":false}");
 		}
@@ -1614,7 +1635,48 @@ namespace nc
 			if (const float *f = (*pcm)->GetValuePtrByPropertyNameInChain<float>(STR("DefaultFOV")); f && *f > 1.0f)
 				baseHfov = *f;
 		const float baseVfov = float(2.0 * std::atan(std::tan(baseHfov * 3.14159265358979 / 360.0) / aspect) * 180.0 / 3.14159265358979);
-		const float yaw = look.yaw - 90.0f, pitch = -look.pitch, roll = 0.0f;
+		float yaw = look.yaw - 90.0f, pitch = -look.pitch;
+		const float roll = 0.0f;
+		if (g_driving)
+		{
+			if (!g_lookOwned)
+			{
+				// Minecraft takes the look over from where HN's was; HN's own mouse look stops
+				g_lookOwned = true;
+				g_lookYaw = yaw;
+				g_lookPitch = pitch;
+				Call(pc, STR("SetIgnoreLookInput")).set_bool(STR("bNewLookInput"), true).invoke();
+			}
+			const long dx = g_mouseDx.exchange(0), dy = g_mouseDy.exchange(0);
+			if (!g_minecraftScreen)
+			{
+				if (g_rawMouseSeen)
+				{
+					// Minecraft's MouseHandler: f = sensitivity * 0.6 + 0.2, turn = counts * f^3 * 8 * 0.15 degrees
+					const double f = 0.5 * 0.6 + 0.2, k = f * f * f * 8.0 * 0.15;
+					g_lookYaw += dx * k;
+					g_lookPitch = std::clamp(g_lookPitch + dy * k, -90.0, 90.0);
+				}
+				else
+				{
+					// no raw input in this window: follow HN's control rotation (unwrapped)
+					double d = std::fmod(yaw - g_lookYaw, 360.0);
+					d += d > 180.0 ? -360.0 : d < -180.0 ? 360.0 : 0.0;
+					g_lookYaw += d;
+					g_lookPitch = std::clamp(double(pitch), -90.0, 90.0);
+				}
+			}
+			yaw = float(g_lookYaw);
+			pitch = float(g_lookPitch);
+			// HN aims where Steve looks (its interact traces use the control rotation)
+			Call(pc, STR("SetControlRotation")).set(STR("NewRotation"), Rot3f{-pitch, yaw + 90.0f, 0.0f}).invoke();
+		}
+		else if (g_lookOwned)
+		{
+			g_lookOwned = false;
+			Call(pc, STR("ResetIgnoreLookInput")).invoke();
+		}
+		g_minecraftDriving = g_driving;
 
 		// F10: Minecraft's own physics against the voxels (blocky collision) instead of HN's exact collision
 		if (pressed(VK_F10))

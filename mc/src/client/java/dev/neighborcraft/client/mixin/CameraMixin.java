@@ -6,6 +6,7 @@ import dev.neighborcraft.client.PlayerSync;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.AbstractClientPlayer;
 import dev.neighborcraft.Passthrough;
 import java.util.Locale;
 import net.minecraft.world.entity.Entity;
@@ -80,14 +81,12 @@ abstract class CameraMixin {
 		}
 	}
 
-	/** Driving: Minecraft's FOV with its effects (sprint, ...), relative to the host's base FOV instead of Minecraft's. */
-	@Inject(method = "calculateFov", at = @At("RETURN"), cancellable = true)
-	private void passthrough$minecraftFovEffects(final float partialTicks, final CallbackInfoReturnable<Float> cir) {
+	/** Driving: Minecraft's own FOV (its setting and effects, sprinting widens it), which the host's camera takes. */
+	@Inject(method = "calculateFov", at = @At("RETURN"))
+	private void passthrough$minecraftFov(final float partialTicks, final CallbackInfoReturnable<Float> cir) {
 		HostState.Pose p = HostState.frame();
 		if (p != null && p.drive()) {
-			float fov = cir.getReturnValueF() * p.fov() / Minecraft.getInstance().options.fov().get();
-			cir.setReturnValue(fov);
-			lastFov = fov;
+			lastFov = cir.getReturnValueF();
 		}
 	}
 
@@ -96,14 +95,48 @@ abstract class CameraMixin {
 		FrameExporter.setFar(this.depthFar);
 		HostState.Pose p = HostState.frame();
 		Entity player = Minecraft.getInstance().player;
+		Camera self = (Camera) (Object) this;
+		float partial = deltaTracker.getGameTimeDeltaPartialTick(true);
 		if (p != null && p.drive() && player != null) {
+			// vanilla's view bob, as a camera transform: the world is never bobbed separately (GameRendererMixin), so
+			// Minecraft's frame and the host's camera (which takes this pose) bob together, exactly once
+			if (Minecraft.getInstance().options.bobView().get() && player instanceof AbstractClientPlayer avatar) {
+				this.passthrough$applyViewBob(avatar, partial);
+			}
+
+			Vector3f euler = this.rotation.getEulerAnglesYXZ(new Vector3f());
+			float yaw = 180.0F - euler.y / DEG, pitch = -euler.x / DEG, roll = euler.z / DEG;
+			HostState.setRenderedCamera(yaw, pitch, roll);
 			// the host renders from exactly this camera (first or third person), and puts its player at the eyes
-			Camera self = (Camera) (Object) this;
 			Vec3 cam = self.position();
-			Vec3 eye = player.getEyePosition(deltaTracker.getGameTimeDeltaPartialTick(true));
+			Vec3 eye = player.getEyePosition(partial);
 			Passthrough.events.accept(String.format(Locale.ROOT,
-				"{\"t\":\"mcpos\",\"eye\":[%.4f,%.4f,%.4f],\"cam\":[%.4f,%.4f,%.4f],\"rot\":[%.3f,%.3f],\"fov\":%.3f,\"tn\":%d}",
-				eye.x, eye.y, eye.z, cam.x, cam.y, cam.z, self.yRot(), self.xRot(), lastFov > 0.0F ? lastFov : p.fov(), System.nanoTime()));
+				"{\"t\":\"mcpos\",\"eye\":[%.4f,%.4f,%.4f],\"cam\":[%.4f,%.4f,%.4f],\"rot\":[%.3f,%.3f,%.3f],\"fov\":%.3f,\"tn\":%d}",
+				eye.x, eye.y, eye.z, cam.x, cam.y, cam.z, yaw, pitch, roll, lastFov > 0.0F ? lastFov : 70.0F, System.nanoTime()));
+		} else {
+			HostState.setRenderedCamera(self.yRot(), self.xRot(), p != null ? p.roll() : 0.0F);
 		}
+	}
+
+	/**
+	 * GameRenderer.bobView turns the world by the walk bob in view space: translate (sin(w pi) b / 2, -|cos(w pi) b|),
+	 * roll sin(w pi) b 3 degrees, pitch |cos(w pi - 0.2) b| 5 degrees (w: the backwards interpolated walk distance, b:
+	 * the interpolated bob). The same as a camera move: rotation * Rx(-pitch) * Rz(-roll), moved by minus the
+	 * translation in that rotated frame.
+	 */
+	private void passthrough$applyViewBob(final AbstractClientPlayer avatar, final float partial) {
+		float w = avatar.avatarState().getBackwardsInterpolatedWalkDistance(partial);
+		float b = avatar.avatarState().getInterpolatedBob(partial);
+		float s = (float) Math.sin(w * Math.PI), c = (float) Math.cos(w * Math.PI);
+		float tx = s * b * 0.5F, ty = -Math.abs(c * b);
+		float roll = s * b * 3.0F * DEG, pitch = Math.abs((float) Math.cos(w * Math.PI - 0.2F) * b) * 5.0F * DEG;
+		this.rotation.rotateX(-pitch).rotateZ(-roll);
+		Vector3f offset = new Vector3f(-tx, -ty, 0.0F).rotate(this.rotation);
+		Vec3 at = ((Camera) (Object) this).position();
+		this.setPosition(at.x + offset.x, at.y + offset.y, at.z + offset.z);
+		FORWARDS.rotate(this.rotation, this.forwards);
+		UP.rotate(this.rotation, this.up);
+		LEFT.rotate(this.rotation, this.left);
+		this.matrixPropertiesDirty |= 3;
 	}
 }

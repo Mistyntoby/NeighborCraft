@@ -28,6 +28,27 @@ public final class HostState {
 	private static volatile Pose latest;
 	/** The pose this frame renders with, taken once per frame so every hook agrees. Render thread only. */
 	private static Pose frame;
+	/** The camera rotation the frame being rendered uses (Minecraft degrees, view bob included). Render thread only. */
+	private static float renderedYaw, renderedPitch, renderedRoll;
+
+	public static void setRenderedCamera(final float yaw, final float pitch, final float roll) {
+		renderedYaw = yaw;
+		renderedPitch = pitch;
+		renderedRoll = roll;
+	}
+
+	public static float renderedYaw() {
+		return renderedYaw;
+	}
+
+	public static float renderedPitch() {
+		return renderedPitch;
+	}
+
+	public static float renderedRoll() {
+		return renderedRoll;
+	}
+
 	/** The host frame the last Minecraft frame was rendered for. Render thread only. */
 	private static long renderedHostFrame = -1;
 
