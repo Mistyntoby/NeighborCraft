@@ -44,6 +44,7 @@ namespace nc
 		explicit operator bool() const { return m_fn != nullptr; }
 
 		FProperty *property(const TCHAR *name) const { return find_property(m_fn, name); }
+		UFunction *function() const { return m_fn; }
 
 		/// Pointer to a parameter (or the return value, "ReturnValue") inside the parameter block.
 		template <typename T>

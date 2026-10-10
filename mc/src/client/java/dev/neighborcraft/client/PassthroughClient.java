@@ -156,6 +156,11 @@ public class PassthroughClient implements ClientModInitializer {
 		options.autoJump().set(false);
 		// the host shows ~60-120 fps: rendering faster only competes with it for the GPU
 		options.framerateLimit().set(120);
+		// Minecraft draws only the player's own blocks here (HN's world is invisible host blocks), and every chunk in
+		// view is made after HN moves its player far (a level's start): at 16, ~1100 chunks kept the server seconds
+		// behind while HN's world was due under Steve. 8 chunks (128 blocks) is ~290.
+		options.renderDistance().set(8);
+		options.simulationDistance().set(6);
 		options.save();
 	}
 

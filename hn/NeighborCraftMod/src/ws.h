@@ -11,6 +11,14 @@
 class WsClient
 {
 public:
+	/// The game quits without unloading mods: the link's thread is still running when the DLL's globals go, and a
+	/// joinable std::thread being destroyed aborts the process (HN crashed with 0xc0000409 in the CRT's DLL shutdown
+	/// every time it was closed). Windows has ended the thread by then; let it go.
+	~WsClient()
+	{
+		if (m_thread.joinable())
+			m_thread.detach();
+	}
 	void start(const char *host, int port);
 	void stop();
 	bool connected() const { return m_connected; }

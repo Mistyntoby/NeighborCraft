@@ -5,14 +5,18 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 /** Server-side half: Hello Neighbor's collision as invisible barrier blocks, commands, and events back to the host. */
 public final class WorldBridge {
@@ -87,6 +91,23 @@ public final class WorldBridge {
 	/** Host blocks we placed (HN's world): removed on a re-level, never reported back as the player's blocks. */
 	private static final Set<BlockPos> hosts = ConcurrentHashMap.newKeySet();
 
+	/** HN's collision received but not placed yet by the server (position -> messages waiting for it). */
+	private static final Map<Long, Integer> pending = new ConcurrentHashMap<>();
+
+	/**
+	 * Whether HN's world at {@code pos} is in the client's world as it will be: false while collision HN sent for it is
+	 * still waiting for the server, or the server placed it and the client hasn't received it. After a long teleport
+	 * (a level's start) the server falls seconds behind (the log: "Can't keep up! ... 12590ms behind") and the client
+	 * gets the chunks later still: Steve, moved by the client, walked onto ground that wasn't there yet and fell.
+	 */
+	public static boolean arrived(final Level clientLevel, final BlockPos pos) {
+		if (clientLevel.getBlockState(pos).is(Passthrough.HOST)) {
+			return true;
+		}
+
+		return !pending.containsKey(pos.asLong()) && !hosts.contains(pos);
+	}
+
 	/**
 	 * HN's world, block by block: {"t":"shape","c":[x,y,z,kind, ...],"m":[hex, ...],"f":[heights, ...]}. kind 0:
 	 * nothing of HN's there (our host block goes), 1: HN fills the whole block, 2: HN fills part of it (the next mask in
@@ -99,7 +120,70 @@ public final class WorldBridge {
 			return;
 		}
 
-		s.execute(() -> {
+		for (int i = 0; i + 3 < cells.length; i += 4) {
+			if (cells[i + 3] != 0) {
+				pending.merge(BlockPos.asLong(cells[i], cells[i + 1], cells[i + 2]), 1, Integer::sum);
+			}
+		}
+
+		// The shapes are built on their own thread (in order): each is up to 512 sub-cell boxes and the floor and
+		// ceiling slabs joined one by one, and built on the server thread for thousands of blocks they kept the server
+		// seconds behind ("Can't keep up! ... 10913ms") the whole way down Act 1's road, Steve waiting for his ground
+		// again and again. The server only places the finished blocks; the link's thread stays free for the camera.
+		SHAPE_BUILDER.execute(() -> {
+			long buildStart = System.nanoTime();
+			VoxelShape[] built = new VoxelShape[masks.length];
+			for (int i = 0; i < masks.length; i++) {
+				built[i] = HostBlock.fromMask(masks[i], floors[i], ceilings[i]);
+			}
+
+			long sent = System.nanoTime();
+			stats(cells.length / 4, sent - buildStart, 0L, 0L);
+			s.execute(() -> {
+				long start = System.nanoTime();
+				try {
+					placeShapes(s, cells, built);
+				} finally {
+					stats(0, 0L, start - sent, System.nanoTime() - start);
+					for (int i = 0; i + 3 < cells.length; i += 4) {
+						if (cells[i + 3] != 0) {
+							pending.computeIfPresent(BlockPos.asLong(cells[i], cells[i + 1], cells[i + 2]), (k, n) -> n > 1 ? n - 1 : null);
+						}
+					}
+				}
+			});
+		});
+	}
+
+	private static final ExecutorService SHAPE_BUILDER = Executors.newSingleThreadExecutor(r -> {
+		Thread t = new Thread(r, "NeighborCraft shapes");
+		t.setDaemon(true);
+		return t;
+	});
+
+	private static long statBlocks, statBuild, statWait, statPlace, statMaxWait, statNext;
+
+	/** Where HN's world costs time: blocks received, building their shapes, waiting for the server, placing them. */
+	private static synchronized void stats(final int blocks, final long build, final long wait, final long place) {
+		statBlocks += blocks;
+		statBuild += build;
+		statWait += wait;
+		statPlace += place;
+		statMaxWait = Math.max(statMaxWait, wait);
+		long now = System.nanoTime();
+		if (now > statNext) {
+			if (statBlocks > 0) {
+				Passthrough.LOG.info("HN's world: {} blocks in 5 s; shapes built in {} ms (link thread), placed in {} ms (server); longest wait for the server {} ms",
+					statBlocks, statBuild / 1_000_000L, statPlace / 1_000_000L, statMaxWait / 1_000_000L);
+			}
+
+			statBlocks = statBuild = statWait = statPlace = statMaxWait = 0L;
+			statNext = now + 5_000_000_000L;
+		}
+	}
+
+	private static void placeShapes(final MinecraftServer s, final int[] cells, final VoxelShape[] built) {
+		{
 			ServerLevel level = s.overworld();
 			BlockState host = Passthrough.HOST.defaultBlockState();
 			BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
@@ -128,7 +212,7 @@ public final class WorldBridge {
 				}
 
 				if (kind == 2) {
-					HostBlock.SHAPES.put(pos.asLong(), HostBlock.fromMask(masks[mask], floors[mask], ceilings[mask]));
+					HostBlock.SHAPES.put(pos.asLong(), built[mask]);
 					mask++;
 				} else {
 					HostBlock.SHAPES.remove(pos.asLong());
@@ -141,7 +225,7 @@ public final class WorldBridge {
 			}
 
 			placingGround = false;
-		});
+		}
 	}
 
 	/** Remove every barrier we placed (e.g. when the host loads another level). */
@@ -151,7 +235,8 @@ public final class WorldBridge {
 			return;
 		}
 
-		s.execute(() -> {
+		// behind the shapes still being built (they go to the server through the same queue), never before them
+		SHAPE_BUILDER.execute(() -> s.execute(() -> {
 			ServerLevel level = s.overworld();
 			placingGround = true;
 			for (BlockPos pos : barriers) {
@@ -170,7 +255,7 @@ public final class WorldBridge {
 			barriers.clear();
 			hosts.clear();
 			HostBlock.SHAPES.clear();
-		});
+		}));
 	}
 
 	/** Run a command as the server (op). Results go to the log, not to chat (send_command_feedback is off). */

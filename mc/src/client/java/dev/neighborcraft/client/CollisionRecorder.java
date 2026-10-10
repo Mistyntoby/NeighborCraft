@@ -20,7 +20,8 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
 /**
- * Collision diagnostics (toggled from the host, F12): every client tick of the player's own movement is recorded
+ * Collision diagnostics, always recording (F12 in the host adds the debug view and records every kind of event; without
+ * it only movement problems are written: blocked, failed steps, lost speed or sprint): every client tick of the player's own movement is recorded
  * (attempted and resolved movement, velocity, inputs, ground and collision flags, pose, hitbox, and the collision
  * boxes around the player), with labels for what the evidence shows. The last 10 s are kept in memory; when an event
  * worth looking at happens, the 2 s before and 1 s after it go to run/neighborcraft-collisions/session-*.jsonl,
@@ -43,7 +44,8 @@ public final class CollisionRecorder {
 	private static final long MIN_GAP_NANOS = 500_000_000L;
 	private static final int MAX_DUMPS = 400;
 
-	private static volatile boolean on;
+	private static volatile boolean on;          // the debug view (F12)
+	private static final boolean RECORDING = true; // the recording itself: always, so a sticking spot is caught when it happens
 	private static final ArrayDeque<String> ring = new ArrayDeque<>();
 	private static Vec3 posBefore;
 	private static Vec3 attempted;
@@ -73,7 +75,7 @@ public final class CollisionRecorder {
 
 	/** Entity.move HEAD, the local player's own movement. */
 	public static void beforeMove(final LocalPlayer player, final Vec3 movement) {
-		if (!on) {
+		if (!RECORDING) {
 			return;
 		}
 
@@ -84,7 +86,7 @@ public final class CollisionRecorder {
 
 	/** Entity.move RETURN. */
 	public static void afterMove(final LocalPlayer player) {
-		if (!on || posBefore == null) {
+		if (!RECORDING || posBefore == null) {
 			return;
 		}
 
@@ -180,7 +182,8 @@ public final class CollisionRecorder {
 		}
 
 		// an event worth a look (a step that worked is normal, and is only recorded around other events)
-		boolean event = labels.stream().anyMatch(l -> !l.startsWith("STEP_UP ") && !l.startsWith("MINOR"));
+		boolean event = labels.stream().anyMatch(l -> !l.startsWith("STEP_UP ") && !l.startsWith("MINOR")
+			&& (on || !l.startsWith("GROUND_CHECK") && !l.startsWith("POSE_FORCED")));
 		if (event && pendingAfter < 0 && System.nanoTime() - lastDump > MIN_GAP_NANOS && dumps < MAX_DUMPS) {
 			pendingAfter = AFTER;
 			pendingEvent = String.join(" | ", labels);

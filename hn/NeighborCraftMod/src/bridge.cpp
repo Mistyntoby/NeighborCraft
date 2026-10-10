@@ -25,6 +25,12 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -74,6 +80,10 @@ namespace nc
 		bool g_placed = false;
 		Vec3f g_lastPlaced;          // where we put HN's pawn last tick
 		uint8_t g_savedMovementMode = 1;
+		bool g_haveFeet = false;
+		Vec3f g_feet;                // Steve's feet (Unreal cm) and his hitbox (width, height, cm), from Minecraft
+		float g_steveWidth = 60.0f, g_steveHeight = 180.0f;
+		float g_savedCapsule[2] = {0, 0}; // HN's own capsule (radius, half height) while Minecraft drives
 
 		// Minecraft's controls and camera
 		UObject *g_controlsPawn = nullptr; // HN's player this tick (for the controls' traces)
@@ -109,9 +119,42 @@ namespace nc
 		std::unordered_map<unsigned long long, Cell> g_cells;
 		std::vector<int> g_voxOffsets; // dx, dy, dz triples, nearest first
 
+		// The log goes through UE4SS's Output, which takes a lock that other UE4SS threads hold too. HN froze twice
+		// with the game thread waiting inside Output::send from our log() (the watchdog's dump: the game thread in
+		// Output.hpp under bridge.cpp, ~20 engine workers parked in UE4SS, a UE4SS thread on a mutex). The game thread
+		// now only queues the line; this thread hands it to UE4SS, and may wait there instead of the game.
+		std::mutex g_logLock;
+		std::condition_variable g_logReady;
+		std::deque<std::wstring> g_logQueue;
+
+		void log_writer()
+		{
+			for (;;)
+			{
+				std::wstring line;
+				{
+					std::unique_lock lock(g_logLock);
+					g_logReady.wait(lock, [] { return !g_logQueue.empty(); });
+					line = std::move(g_logQueue.front());
+					g_logQueue.pop_front();
+				}
+				Output::send<LogLevel::Normal>(STR("[NeighborCraft] {}\n"), line);
+			}
+		}
+
 		void log(const std::wstring &text)
 		{
-			Output::send<LogLevel::Normal>(STR("[NeighborCraft] {}\n"), text);
+			static const bool started = [] {
+				std::thread(log_writer).detach();
+				return true;
+			}();
+			(void)started;
+			{
+				std::lock_guard lock(g_logLock);
+				if (g_logQueue.size() < 4096) // if UE4SS's output is stuck, don't grow without end
+					g_logQueue.push_back(text);
+			}
+			g_logReady.notify_one();
 		}
 
 		void sendf(const char *format, ...)
@@ -252,9 +295,70 @@ namespace nc
 			return m ? *m : nullptr;
 		}
 
+		UObject *capsule_of(UObject *pawn)
+		{
+			UObject *const *c = pawn ? pawn->GetValuePtrByPropertyNameInChain<UObject *>(STR("CapsuleComponent")) : nullptr;
+			return c ? *c : nullptr;
+		}
+
+		void set_capsule(UObject *pawn, float radius, float half)
+		{
+			UObject *capsule = capsule_of(pawn);
+			if (!capsule)
+				return;
+			Call(capsule, STR("SetCapsuleSize")).set(STR("InRadius"), radius).set(STR("InHalfHeight"), std::max(half, radius))
+				.set_bool(STR("bUpdateOverlaps"), true).invoke();
+			// BP_Human sizes its capsule itself when crouching (from these): Steve's standing and sneaking heights
+			if (float *h = pawn->GetValuePtrByPropertyNameInChain<float>(STR("CapsuleHalfHeight")))
+				*h = std::max(half, radius);
+			if (float *h = pawn->GetValuePtrByPropertyNameInChain<float>(STR("CapsuleCrouchHalfHeight")))
+				*h = std::max(half, radius);
+		}
+
+		/// While Minecraft drives, HN's player capsule is Steve's hitbox, where Steve is. HN's capsule (radius 51.4 cm,
+		/// 216 cm tall) was teleported to Steve every frame: it reached 21 cm further than his 30 cm. Minecraft stops
+		/// Steve at a door leaf, but HN's capsule was by then inside it, and HN's doors are physics (a leaf on a
+		/// constraint, closed by a force, reacting to hits): a closing door met the capsule standing in its swing and
+		/// stayed open. The same size, Steve's collision keeps the capsule out of everything Minecraft knows.
+		void steve_capsule(UObject *pawn)
+		{
+			UObject *capsule = capsule_of(pawn);
+			if (!capsule)
+				return;
+			const float *radius = capsule->GetValuePtrByPropertyNameInChain<float>(STR("CapsuleRadius"));
+			const float *half = capsule->GetValuePtrByPropertyNameInChain<float>(STR("CapsuleHalfHeight"));
+			if (!radius || !half)
+				return;
+			if (g_savedCapsule[0] <= 0.0f)
+			{
+				g_savedCapsule[0] = *radius;
+				g_savedCapsule[1] = *half;
+			}
+			const float wantRadius = g_steveWidth * 0.5f, wantHalf = g_steveHeight * 0.5f;
+			if (std::abs(*radius - wantRadius) > 0.5f || std::abs(*half - std::max(wantHalf, wantRadius)) > 0.5f)
+			{
+				static int logged = 0;
+				if (logged++ < 6)
+					log(L"HN's capsule set to Steve's hitbox: radius " + std::to_wstring(int(wantRadius)) + L" cm, half height " +
+						std::to_wstring(int(wantHalf)) + L" cm (was " + std::to_wstring(int(*radius)) + L", " + std::to_wstring(int(*half)) + L")");
+				set_capsule(pawn, wantRadius, wantHalf);
+			}
+		}
+
+		/// HN's own capsule back (Minecraft stops driving).
+		void hn_capsule(UObject *pawn)
+		{
+			if (g_savedCapsule[0] <= 0.0f)
+				return;
+			set_capsule(pawn, g_savedCapsule[0], g_savedCapsule[1]);
+			g_savedCapsule[0] = g_savedCapsule[1] = 0.0f;
+		}
+
 		/// HN's own movement off (MOVE_None: no walking, no gravity) while Minecraft moves the player, or back on.
 		void hn_movement(UObject *pawn, bool on)
 		{
+			if (on)
+				hn_capsule(pawn);
 			UObject *cmc = movement_component(pawn);
 			if (!cmc)
 				return;
@@ -721,7 +825,18 @@ namespace nc
 		};
 		std::unordered_map<unsigned long long, BlockBits> g_bits;
 		std::unordered_map<unsigned long long, std::array<uint8_t, 64>> g_dynBits; // moving parts' sub-cells, per block
-		std::unordered_map<unsigned long long, DWORD> g_columns; // column (x, z) -> when its rays were cast
+		/// A column's rays: when they were cast, and the Minecraft heights [lo, hi) they covered. The cache used to know
+		/// only (x, z): a column first probed while Steve stood high up kept its range for good, and on Act 1's road,
+		/// which falls ~12 blocks towards the Neighbor's house, the road surface ahead lay below every column's range.
+		/// The recorder showed Steve running down it into no collision at all (0 boxes around him) and falling until
+		/// HN's rescue put him back. A column is probed again (for the heights Steve now needs) when they aren't
+		/// covered.
+		struct Column
+		{
+			DWORD probed;
+			int lo, hi;
+		};
+		std::unordered_map<unsigned long long, Column> g_columns; // column (x, z)
 		std::unordered_set<unsigned long long> g_dirty;          // blocks whose shape may have changed, to send
 
 		int cell_x(unsigned long long key)
@@ -820,6 +935,11 @@ namespace nc
 		///    (walls, tables) keep their box shape.
 		///  - Where a ray measured a ceiling, the box cell holding it goes (rounded down, it took away clearance and made
 		///    Minecraft crouch or crawl).
+		///  - Floors within a few cm of a higher neighbouring floor are raised to it. HN's floors are not exactly level:
+		///    neighbouring 1/8 columns measured 1-3 cm apart (seams, rugs, thresholds), and each difference was a ledge
+		///    for Minecraft. The recorder caught sprints stopped dead by them (ledges of 0.7-2.4 cm under every step
+		///    candidate, so the step-up failed and the horizontal collision zeroed Steve's speed). Real steps (over 5 cm)
+		///    stay as they are.
 		int block_shape(unsigned long long key, const BlockBits &b, std::string &hex, std::string &floor, std::string &ceiling)
 		{
 			// the floors of this block and of its 8 horizontal neighbours (a riser on a block border has its upper tread
@@ -837,12 +957,26 @@ namespace nc
 				const BlockBits *n = around[ox + 1][oz + 1];
 				return n ? n->floor[(sx - ox * 8) * 8 + (sz - oz * 8)] : 0.0f;
 			};
+			const float kLevel = 0.05f; // a floor this close under a neighbouring one is the same floor
+			float level[64];
+			for (int sx = 0; sx < 8; ++sx)
+				for (int sz = 0; sz < 8; ++sz)
+				{
+					const float own = b.floor[sx * 8 + sz];
+					float to = own;
+					if (own > 0.0f)
+						for (int dx = -1; dx <= 1; ++dx)
+							for (int dz = -1; dz <= 1; ++dz)
+								if (const float n = floor_at(sx + dx, sz + dz); n > to && n - own <= kLevel)
+									to = n;
+					level[sx * 8 + sz] = to;
+				}
 			uint8_t bits[64];
 			std::memcpy(bits, b.box, 64);
 			for (int sx = 0; sx < 8; ++sx)
 				for (int sz = 0; sz < 8; ++sz)
 				{
-					const float own = b.floor[sx * 8 + sz];
+					const float own = level[sx * 8 + sz];
 					float highest = own;
 					for (int dx = -1; dx <= 1; ++dx)
 						for (int dz = -1; dz <= 1; ++dz)
@@ -881,7 +1015,7 @@ namespace nc
 					out.clear();
 				return any;
 			};
-			const bool anyFloor = heights(b.floor, 64, floor), anyCeiling = heights(b.ceiling, 16, ceiling);
+			const bool anyFloor = heights(level, 64, floor), anyCeiling = heights(b.ceiling, 16, ceiling);
 			if (set == 0 && !anyFloor && !anyCeiling)
 				return 0;
 			static const char digits[] = "0123456789abcdef";
@@ -930,13 +1064,19 @@ namespace nc
 					continue;
 				const unsigned long long col = cell_key(px + dx, 0, pz + dz);
 				auto it = g_columns.find(col);
+				const int needLo = py - kVoxBelow, needHi = py + kVoxAbove + 1;
+				const bool covered = it != g_columns.end() && it->second.lo <= needLo && it->second.hi >= needHi;
 				const bool close = std::abs(dx) <= kVoxRefreshRadius && std::abs(dz) <= kVoxRefreshRadius;
-				if (it != g_columns.end() && !(close && now - it->second > kVoxRefreshMs * 3))
+				if (covered && !(close && now - it->second.probed > kVoxRefreshMs * 3))
 					continue;
-				if (it == g_columns.end() && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
+				if (!covered && std::abs(dx) <= kDriveReadyRadius && std::abs(dz) <= kDriveReadyRadius)
 					ready = false;
-				queries += probe_column(pawn, px + dx, pz + dz, py - kVoxBelow, py + kVoxAbove + 1);
-				g_columns[col] = now;
+				queries += probe_column(pawn, px + dx, pz + dz, needLo, needHi);
+				// what is known now: these heights, joined to the earlier ones when they touch
+				if (it != g_columns.end() && it->second.lo <= needHi && it->second.hi >= needLo)
+					g_columns[col] = {now, std::min(it->second.lo, needLo), std::max(it->second.hi, needHi)};
+				else
+					g_columns[col] = {now, needLo, needHi};
 				// the neighbouring columns' shapes depend on these floors too (steps across block borders)
 				for (int nx = -1; nx <= 1; ++nx)
 					for (int nz = -1; nz <= 1; ++nz)
@@ -1212,6 +1352,13 @@ namespace nc
 		}
 
 		std::vector<int> g_pendingSet, g_pendingClear; // block changes from Minecraft, applied on the next tick
+		struct Punch
+		{
+			Vec3f at, dir;
+			float strength, damage;
+			bool sprint;
+		};
+		std::vector<Punch> g_punches; // Minecraft's attacks that hit HN's world, applied on the next tick
 
 		void handle(const std::string &m)
 		{
@@ -1239,6 +1386,14 @@ namespace nc
 					g_eye = to_ue(eye[0], eye[1], eye[2]);
 					g_haveEye = true;
 				}
+				double feet[3], size[2];
+				if (json_vec3(m, "feet", feet) && json_numbers(m, "size", size, 2))
+				{
+					g_feet = to_ue(feet[0], feet[1], feet[2]);
+					g_steveWidth = float(size[0] * 100.0);
+					g_steveHeight = float(size[1] * 100.0);
+					g_haveFeet = true;
+				}
 				if (json_vec3(m, "cam", camera) && json_numbers(m, "rot", rot, 3) && json_number(m, "fov", fov))
 				{
 					g_mcCamera = to_ue(camera[0], camera[1], camera[2]);
@@ -1254,6 +1409,18 @@ namespace nc
 					g_mcFirstPerson = m.find("\"fp\":false") == std::string::npos;
 					g_mcFov = float(fov);
 					g_haveMcCamera = true;
+				}
+			}
+			else if (m.find("\"t\":\"punch\"") != std::string::npos)
+			{
+				double at[3], dir[3], strength = 1.0, damage = 1.0;
+				if (json_vec3(m, "p", at) && json_vec3(m, "d", dir))
+				{
+					json_number(m, "s", strength);
+					json_number(m, "dmg", damage);
+					// Minecraft x, y, z -> Unreal x, z, y (a direction: no offset)
+					g_punches.push_back({to_ue(at[0], at[1], at[2]), Vec3f{float(dir[0]), float(dir[2]), float(dir[1])}, float(strength), float(damage),
+						m.find("\"sprint\":true") != std::string::npos});
 				}
 			}
 			else if (m.find("\"t\":\"screen\"") != std::string::npos)
@@ -1304,7 +1471,25 @@ namespace nc
 					if (const uint8_t *v = shown.param<uint8_t>(STR("ReturnValue")); v && *v)
 						return false;
 			}
-			return true;
+			// HN's cutscenes (Act 1 opens with one): not gameplay. Minecraft counted it as play: its HUD and hand
+			// showed over the cutscene, its starter kit filled the hotbar item by item there, and it took over moving
+			// HN's player while the cutscene was moving it (the takeover started again when the cutscene put the
+			// player down). HN's player says itself when one plays.
+			bool cutscene = false;
+			if (UObject *pawn = pawn_of(pc))
+			{
+				Call playing(pawn, STR("IsPlayCutScene"));
+				if (playing.invoke())
+					if (const uint8_t *v = playing.param<uint8_t>(STR("ReturnValue")); v && *v)
+						cutscene = true;
+			}
+			static bool wasCutscene = false;
+			if (cutscene != wasCutscene)
+			{
+				wasCutscene = cutscene;
+				log(cutscene ? L"cutscene: Minecraft waits" : L"cutscene over: gameplay");
+			}
+			return !cutscene;
 		}
 
 		/// HN's first-person arms and body are hidden while Minecraft's hand is shown, and come back otherwise.
@@ -1437,31 +1622,117 @@ namespace nc
 			g_hnProc = nullptr;
 		}
 
-		/// What the player looks at in HN (from Minecraft's camera, within reach), if it is one of HN's interactive
-		/// objects (doors, switches, things to take: they carry HN's InteractiveComponent).
-		bool looking_at_interactive(UObject *pawn)
+		std::vector<UObject *> g_interactiveActors; // this level's actors with HN's InteractiveComponent, and doors
+		bool g_debugView = false;                   // F12: collision recorder view, and what the interaction ray finds
+
+		bool class_contains(UObject *o, const wchar_t *part)
 		{
-			if (!g_haveMcCamera)
+			for (UStruct *s = o ? o->GetClassPrivate() : nullptr; s; s = s->GetSuperStruct())
+				if (s->GetName().find(part) != StringType::npos)
+					return true;
+			return false;
+		}
+
+		/// One of HN's interactive actors: carries the InteractiveComponent, or is a door.
+		bool interactive_actor(UObject *actor)
+		{
+			static UObject *interactive = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/HelloNeighbor.InteractiveComponent"));
+			if (!actor)
+				return false;
+			if (interactive)
+			{
+				Call has(actor, STR("GetComponentByClass"));
+				has.set<UObject *>(STR("ComponentClass"), interactive).invoke();
+				if (const UObject *const *component = has.param<UObject *>(STR("ReturnValue")); component && *component)
+					return true;
+			}
+			return class_contains(actor, L"Door");
+		}
+
+		bool has_component(UObject *actor, const TCHAR *path)
+		{
+			UObject *cls = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, path);
+			if (!actor || !cls)
+				return false;
+			Call has(actor, STR("GetComponentByClass"));
+			has.set<UObject *>(STR("ComponentClass"), cls).invoke();
+			const UObject *const *component = has.param<UObject *>(STR("ReturnValue"));
+			return component && *component;
+		}
+
+		/// HN's own answer for its FlatActors (cabinets, drawers, fridges, TVs, switches, panels, lamps; doors too):
+		/// their blueprints implement OnIsActionComponent, which says whether a part (the component looked at) can be
+		/// used with HN's action key (BP_Stand_tv compares it with its four drawer parts, a switch with its lever).
+		/// 1 yes, 0 no, -1 the actor has no such function.
+		int flat_actionable(UObject *actor, UObject *component)
+		{
+			Call c(actor, STR("OnIsActionComponent"));
+			if (!c || !component)
+				return -1;
+			uint8_t *result = nullptr;
+			bool given = false;
+			for (FProperty *p : TFieldRange<FProperty>(c.function(), EFieldIterationFlags::IncludeDeprecated))
+			{
+				const bool out = p->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm);
+				if (!given && !out && CastField<FObjectProperty>(p))
+				{
+					*reinterpret_cast<UObject **>(c.data() + p->GetOffset_Internal()) = component;
+					given = true;
+				}
+				else if (!result && out && CastField<FBoolProperty>(p))
+					result = c.data() + p->GetOffset_Internal();
+			}
+			if (!given || !result)
+			{
+				static int logged = 0;
+				if (logged++ < 3)
+					log(L"OnIsActionComponent on " + actor->GetClassPrivate()->GetName() + L": unexpected parameters");
+				return -1;
+			}
+			c.invoke();
+			return *result ? 1 : 0;
+		}
+
+		/// What the player looks at in HN (from Minecraft's camera, within reach), if it belongs to one of HN's
+		/// interactive objects (doors, cabinets, TVs, switches, things to take: they carry HN's InteractiveComponent).
+		/// The interaction ray (F12 shows it): Minecraft's own, from Steve's eyes along his look (not the camera's: in
+		/// F5 that one looks back at him). It used to skip the probe's ignore list, which holds every loose physics
+		/// object near Steve: the TV (a loose object) was never hit, the stand behind it was, and a loose object in
+		/// front of a cabinet sent the click to whatever stood behind. Now only what Steve holds in HN is skipped; the
+		/// nearest hit wins, and if it can't be used nothing happens (Minecraft's use).
+		std::wstring g_lastTarget; // what the last interaction check found (F12 shows it)
+
+		bool looking_at_interactive(UObject *pawn, bool quiet = false)
+		{
+			if (!g_haveEye)
 				return false;
 			const float d2r = 3.14159265f / 180.0f;
 			// Minecraft's look (yaw 0 = +Z, pitch + = down) as an Unreal direction (Minecraft x -> x, z -> y, y -> z)
-			const float yaw = g_mcYaw * d2r, pitch = g_mcPitch * d2r;
+			const float yaw = g_mcLookYaw * d2r, pitch = g_mcLookPitch * d2r;
 			const Vec3f dir{-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch)};
 			const float reach = 300.0f;
 			Call c(kismet(), STR("LineTraceSingle"));
 			if (!c)
 				return false;
+			UObject *held = nullptr;
+			{
+				Call h(pawn, STR("GetHoldingItem"));
+				if (h.invoke())
+					if (UObject *const *item = h.param<UObject *>(STR("ReturnValue")))
+						held = *item;
+			}
 			c.set<UObject *>(STR("WorldContextObject"), pawn)
-				.set(STR("Start"), g_mcCamera)
-				.set(STR("End"), Vec3f{g_mcCamera.x + dir.x * reach, g_mcCamera.y + dir.y * reach, g_mcCamera.z + dir.z * reach})
+				.set(STR("Start"), g_eye)
+				.set(STR("End"), Vec3f{g_eye.x + dir.x * reach, g_eye.y + dir.y * reach, g_eye.z + dir.z * reach})
 				.set<uint8_t>(STR("TraceChannel"), 0)
-				.set(STR("ActorsToIgnore"), ignore_list())
+				.set(STR("ActorsToIgnore"), held ? ScriptArray{&held, 1, 1} : ScriptArray{nullptr, 0, 0})
 				.set_bool(STR("bTraceComplex"), false)
 				.set<uint8_t>(STR("DrawDebugType"), 0)
 				.set_bool(STR("bIgnoreSelf"), true);
 			c.invoke();
 			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
 			FProperty *outHit = c.property(STR("OutHit"));
+			g_lastTarget = L"nothing in reach";
 			if (!ok || !*ok || !outHit)
 				return false;
 			// the hit actor, through GameplayStatics.BreakHitResult (FHitResult keeps it as a weak pointer)
@@ -1472,28 +1743,67 @@ namespace nc
 			std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
 			brk.invoke();
 			UObject *const *actor = brk.param<UObject *>(STR("HitActor"));
-			if (!actor || !*actor)
+			UObject *const *hitComponent = brk.param<UObject *>(STR("HitComponent"));
+			const Vec3f *point = brk.param<Vec3f>(STR("ImpactPoint"));
+			if (!actor || !*actor || !point)
 				return false;
-			static UObject *interactive = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/HelloNeighbor.InteractiveComponent"));
-			bool yes = false;
-			if (interactive)
+			UObject *part = hitComponent ? *hitComponent : nullptr;
+			// the hit actor, then what it is attached to
+			UObject *match = nullptr;
+			const wchar_t *how = L"";
+			std::wstring flatInfo;
+			for (UObject *a = *actor; a && !match; )
 			{
-				Call has(*actor, STR("GetComponentByClass"));
-				has.set<UObject *>(STR("ComponentClass"), interactive).invoke();
-				const UObject *const *component = has.param<UObject *>(STR("ReturnValue"));
-				yes = component && *component;
+				// HN's FlatActors decide themselves whether the part looked at can be used
+				const int flat = flat_actionable(a, part);
+				if (flat >= 0)
+					flatInfo = L", OnIsActionComponent(" + (part ? part->GetName() : std::wstring(L"-")) + L") " + (flat ? L"yes" : L"no");
+				if (flat == 1)
+					match = a, how = L"its OnIsActionComponent";
+				else if (interactive_actor(a)) // a door (leaf or frame), a thing to take: HN's action key works on it
+					match = a, how = a == *actor ? L"hit" : L"attached";
+				Call parent(a, STR("GetAttachParentActor"));
+				parent.invoke();
+				UObject *const *next = parent.param<UObject *>(STR("ReturnValue"));
+				a = next && *next != a ? *next : nullptr;
 			}
-			if (!yes)
-				for (UStruct *s = (*actor)->GetClassPrivate(); s && !yes; s = s->GetSuperStruct())
-					yes = s->GetName().find(L"Door") != StringType::npos;
+			// else a door whose bounds hold the hit point (the house's door frame was hit, around the leaf)
+			float best = 1e9f;
+			if (!match)
+				for (UObject *a : g_interactiveActors)
+				{
+					if (!class_contains(a, L"Door"))
+						continue;
+					Vec3f o, e;
+					Call b(a, STR("GetActorBounds"));
+					b.set_bool(STR("bOnlyCollidingComponents"), false);
+					if (!b.invoke())
+						continue;
+					if (const Vec3f *bo = b.param<Vec3f>(STR("Origin")), *be = b.param<Vec3f>(STR("BoxExtent")); bo && be)
+						o = *bo, e = *be;
+					else
+						continue;
+					if (e.x > 200.0f || e.y > 200.0f || e.z > 200.0f)
+						continue; // not furniture: a whole room's worth
+					const float m = 2.0f;
+					if (std::abs(point->x - o.x) > e.x + m || std::abs(point->y - o.y) > e.y + m || std::abs(point->z - o.z) > e.z + m)
+						continue;
+					const float d = std::hypot(point->x - o.x, point->y - o.y, point->z - o.z);
+					if (d < best)
+						best = d, match = a, how = L"bounds";
+				}
+			const float distance = std::hypot(point->x - g_eye.x, point->y - g_eye.y, point->z - g_eye.z);
+			wchar_t at[32];
+			swprintf(at, 32, L" at %.2f m", distance / 100.0f);
+			g_lastTarget = (*actor)->GetName() + L" / " + (part ? part->GetName() : std::wstring(L"-")) + at + flatInfo + L": " +
+						   (match ? L"HN's action on " + match->GetName() + L" (" + how + L")" : std::wstring(L"not usable, Minecraft use"));
 			static int logged = 0;
-			if (logged < 20)
+			if (!quiet && (logged < 60 || g_debugView))
 			{
 				++logged;
-				log(L"right click on " + (*actor)->GetClassPrivate()->GetName() + (yes ? L": HN interact" : L": Minecraft use") +
-					(interactive ? L"" : L" (no InteractiveComponent class)"));
+				log(L"right click: " + g_lastTarget);
 			}
-			return yes;
+			return match != nullptr;
 		}
 
 		/// Right click: on one of HN's objects HN's interact (its E: doors open, things are taken) and Minecraft's hand
@@ -1501,7 +1811,6 @@ namespace nc
 		/// Minecraft's use (place a block, use the item).
 		void right_click(UObject *pawn = nullptr);
 
-		void physics_swing(UObject *pawn);
 
 		/// Minecraft's keybinds, sent every tick (held keys) or on change (presses).
 		void minecraft_controls(UObject *pc)
@@ -1558,8 +1867,6 @@ namespace nc
 			else if (const int attack = edge(VK_LBUTTON))
 			{
 				sendf("{\"t\":\"key\",\"k\":\"attack\",\"down\":%s}", attack > 0 ? "true" : "false");
-				if (attack > 0 && g_controlsPawn)
-					physics_swing(g_controlsPawn);
 			}
 			right_click();
 			forward_key(VK_MBUTTON, "pick");
@@ -1876,6 +2183,25 @@ namespace nc
 			return out;
 		}
 
+		/// A part HN moves on its own (a door leaf, a cabinet door, a drawer): it simulates physics but belongs to a door
+		/// or interactive actor and is not that actor's root (loose things to take are their own root).
+		bool hinged_part(UObject *component)
+		{
+			Call c(component, STR("GetOwner"));
+			c.invoke();
+			UObject *const *owner = c.param<UObject *>(STR("ReturnValue"));
+			if (!owner || !*owner)
+				return false;
+			if (class_contains(*owner, L"Door") || class_contains(component, L"MovingComponent"))
+				return true;
+			if (!interactive_actor(*owner) && !has_component(*owner, STR("/Script/HelloNeighbor.FlatComponent")))
+				return false;
+			Call root(*owner, STR("K2_GetRootComponent"));
+			root.invoke();
+			UObject *const *r = root.param<UObject *>(STR("ReturnValue"));
+			return r && *r && *r != component;
+		}
+
 		float mass_of(UObject *component)
 		{
 			Call c(component, STR("GetMass"));
@@ -1892,8 +2218,63 @@ namespace nc
 			return v ? *v : Vec3f{};
 		}
 
-		/// Every tick while Minecraft drives: the physics objects around Steve (kept out of this tick's probes), and a
-		/// nudge for the ones he walks into.
+		UObject *owner_of(UObject *component); // (see the moving parts)
+
+		/// The point of a component's collision nearest `to` (cm); its distance (0 inside), or -1.
+		float closest_point(UObject *component, const Vec3f &to, Vec3f &out)
+		{
+			Call c(component, STR("GetClosestPointOnCollision"));
+			c.set(STR("Point"), to).set(STR("BoneName"), NameParam{});
+			if (!c.invoke())
+				return -1.0f;
+			const float *d = c.param<float>(STR("ReturnValue"));
+			const Vec3f *p = c.param<Vec3f>(STR("OutPointOnBody"));
+			if (!d || !p || *d < 0.0f)
+				return -1.0f;
+			out = *p;
+			return *d;
+		}
+
+		Vec3f linear_velocity(UObject *component)
+		{
+			Call c(component, STR("GetPhysicsLinearVelocity"));
+			c.set(STR("BoneName"), NameParam{}).invoke();
+			const Vec3f *v = c.param<Vec3f>(STR("ReturnValue"));
+			return v ? *v : Vec3f{};
+		}
+
+		/// The horizontal velocity the player asks for (cm/s): Minecraft's movement keys along Steve's look, at
+		/// Minecraft's speeds (walk 4.317 m/s, sprint 5.612, sneak 1.295).
+		Vec3f intended_velocity(bool &sprinting)
+		{
+			sprinting = false;
+			const int f = (key_held('W') ? 1 : 0) - (key_held('S') ? 1 : 0), r = (key_held('D') ? 1 : 0) - (key_held('A') ? 1 : 0);
+			if ((!f && !r) || g_minecraftScreen)
+				return {};
+			const float yaw = g_mcLookYaw * 3.14159265f / 180.0f;
+			// Minecraft's forward (yaw 0 = +Z) and right, as Unreal x, y (Minecraft x -> x, z -> y)
+			const float fx = -std::sin(yaw), fy = std::cos(yaw), rx = -std::cos(yaw), ry = -std::sin(yaw);
+			float x = f * fx + r * rx, y = f * fy + r * ry;
+			const float len = std::hypot(x, y);
+			x /= len, y /= len;
+			sprinting = f > 0 && key_held(VK_CONTROL) && !key_held(VK_SHIFT);
+			const float speed = key_held(VK_SHIFT) ? 129.5f : sprinting ? 561.2f : 431.7f;
+			return {x * speed, y * speed, 0.0f};
+		}
+
+		/// Every tick while Minecraft drives: the physics objects around Steve (kept out of this tick's probes; they
+		/// are Minecraft collision from their own geometry, see the moving parts), and Steve's push on those he walks
+		/// into.
+		///
+		/// Minecraft stops Steve at such an object (it is collision there), so his own speed says nothing about a push:
+		/// it used to scale with it, and Steve blocked at a box (speed 0) moved nothing. The push follows what the
+		/// player asks for (the movement keys along the look), as a contact: at the first touch an impact (Steve's
+		/// 70 kg against the object's mass, along the push), then while he keeps walking into it a pushing force (a
+		/// person's; more sprinting, less sneaking) that brings the object up to his speed and never beyond. A light box
+		/// slides away at walking pace, a heavy cabinet barely moves (HN's friction holds it). Both act at the point of
+		/// the object nearest Steve's waist: tall things tip, low ones slide.
+		std::unordered_set<UObject *> g_touching; // what Steve pushed last tick (a new contact gets the impact)
+
 		void physics_tick(UObject *pawn)
 		{
 			static Vec3f lastEye;
@@ -1901,92 +2282,128 @@ namespace nc
 			static DWORD lastTime = 0;
 			g_nearPhysics.clear();
 			if (!g_haveEye)
+			{
+				g_touching.clear();
 				return;
-			const Vec3f body{g_eye.x, g_eye.y, g_eye.z - 80.0f};
-			g_nearPhysics = physics_near(pawn, body, 250.0f);
+			}
+			const Vec3f body{g_eye.x, g_eye.y, g_haveFeet ? g_feet.z + g_steveHeight * 0.55f : g_eye.z - 80.0f}; // waist
+			const float feetZ = g_haveFeet ? g_feet.z : g_eye.z - 162.0f, height = g_haveFeet ? g_steveHeight : 180.0f;
+			// within a Minecraft reach (punches) and well beyond a step (pushes)
+			g_nearPhysics = physics_near(pawn, body, 400.0f);
 			const DWORD now = GetTickCount();
-			const float dt = haveLast ? std::max(1.0f, float(now - lastTime)) / 1000.0f : 0.0f;
-			const Vec3f v = haveLast && dt > 0.0f ? Vec3f{(g_eye.x - lastEye.x) / dt, (g_eye.y - lastEye.y) / dt, 0.0f} : Vec3f{};
+			const float dt = haveLast ? std::clamp(float(now - lastTime) / 1000.0f, 0.001f, 0.05f) : 0.0f;
+			const Vec3f actual = haveLast && dt > 0.0f ? Vec3f{(g_eye.x - lastEye.x) / dt, (g_eye.y - lastEye.y) / dt, 0.0f} : Vec3f{};
 			lastEye = g_eye;
 			lastTime = now;
 			haveLast = true;
-			const float speed = std::hypot(v.x, v.y);
 			static DWORD nextReport = 0;
 			if (now > nextReport && !g_nearPhysics.empty())
 			{
 				nextReport = now + 5000;
-				log(L"physics: " + std::to_wstring(g_nearPhysics.size()) + L" loose objects within 2.5 m (not walls for Minecraft)");
+				log(L"physics: " + std::to_wstring(g_nearPhysics.size()) + L" loose objects within 4 m");
 			}
-			if (speed < 50.0f) // walking speed in cm/s
-				return;
-			// touching: overlapping Steve's body (his 0.6 x 1.8 box, a little wider), whatever the object's size
-			const std::vector<UObject *> touching = physics_near(pawn, {body.x + v.x / speed * 20.0f, body.y + v.y / speed * 20.0f, body.z}, 55.0f);
-			for (UObject *component : touching)
+			bool sprinting = false;
+			Vec3f v = intended_velocity(sprinting);
+			if (std::hypot(actual.x, actual.y) > std::hypot(v.x, v.y) + 50.0f)
+				v = actual; // carried faster than walking (a jump, a fall): that momentum
+			const float speed = std::hypot(v.x, v.y);
+			std::unordered_set<UObject *> touchingNow;
+			if (speed < 30.0f || dt <= 0.0f)
 			{
-				const Vec3f at = component_location(component);
-				const float dx = at.x - body.x, dy = at.y - body.y, d = std::max(1.0f, std::hypot(dx, dy));
-				// only what Steve walks towards (or is centred on), and gently: a share of his speed, less the heavier
-				const float towards = d < 20.0f ? 1.0f : (dx * v.x + dy * v.y) / (d * speed);
-				if (towards < 0.2f)
-					continue;
-				// an impulse (mass decides the response) at the contact: the object's side facing Steve, at his waist
-				// height, so tall objects tip over and low, light ones slide
-				const float mass = mass_of(component);
-				const float dv = std::min(speed * 0.7f, 350.0f) * towards / (1.0f + mass / 20.0f);
-				const Vec3f contact{at.x - dx / d * 15.0f, at.y - dy / d * 15.0f, std::max(at.z, g_eye.z - 70.0f)};
-				Call(component, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{v.x / speed * dv * mass, v.y / speed * dv * mass, 0.0f})
-					.set(STR("Location"), contact).set(STR("BoneName"), NameParam{}).invoke();
-				static int logged = 0;
-				if (logged++ < 10)
-					log(L"physics: nudged " + component->GetName() + L" (" + std::to_wstring(int(mass_of(component))) + L" kg) by " +
-						std::to_wstring(int(dv)) + L" cm/s");
+				g_touching.clear();
+				return;
 			}
+			const Vec3f dir{v.x / speed, v.y / speed, 0.0f};
+			const float reach = (height > 0 ? g_steveWidth * 0.5f : 30.0f) + 15.0f; // Steve's half width + Minecraft's margin
+			for (UObject *component : physics_near(pawn, {body.x + dir.x * 25.0f, body.y + dir.y * 25.0f, body.z}, 60.0f))
+			{
+				if (hinged_part(component))
+					continue; // HN moves its doors and drawers itself
+				// in contact: the object's nearest point (to Steve's waist) at Steve's side, between his feet and head
+				Vec3f cp;
+				if (closest_point(component, body, cp) < 0.0f)
+					continue;
+				const float dx = cp.x - body.x, dy = cp.y - body.y, dh = std::hypot(dx, dy);
+				if (dh > reach || cp.z < feetZ - 5.0f || cp.z > feetZ + height)
+					continue;
+				const float towards = dh < 1.0f ? 1.0f : (dx * dir.x + dy * dir.y) / dh;
+				if (towards < 0.25f)
+					continue;
+				const float mass = mass_of(component);
+				const Vec3f ov = linear_velocity(component);
+				const float along = ov.x * dir.x + ov.y * dir.y;
+				const float target = speed * towards;
+				float impulse = 0.0f; // kg cm/s
+				const bool first = !g_touching.count(component);
+				if (first)
+				{
+					const float reduced = 70.0f * mass / (70.0f + mass);
+					impulse += 1.2f * reduced * std::max(0.0f, target - along); // restitution 0.2
+				}
+				const float force = key_held(VK_SHIFT) ? 30000.0f : sprinting ? 150000.0f : 90000.0f; // kg cm/s2 (300-1500 N)
+				impulse += std::min(mass * std::max(0.0f, target - along - impulse / mass), force * dt);
+				touchingNow.insert(component);
+				if (impulse <= 0.0f)
+					continue;
+				Call(component, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{dir.x * impulse, dir.y * impulse, 0.0f})
+					.set(STR("Location"), cp).set(STR("BoneName"), NameParam{}).invoke();
+				static int logged = 0;
+				if (first && logged++ < 40)
+				{
+					UObject *owner = owner_of(component);
+					log(L"physics: Steve " + std::wstring(sprinting ? L"sprints" : L"walks") + L" into " + (owner ? owner->GetName() : component->GetName()) +
+						L" (" + std::to_wstring(int(mass)) + L" kg, moving " + std::to_wstring(int(along)) + L" cm/s): impact " +
+						std::to_wstring(int(impulse)) + L" kg cm/s at " + std::to_wstring(int(cp.z - feetZ)) + L" cm up");
+				}
+			}
+			g_touching = std::move(touchingNow);
 		}
 
-		/// A swing (Minecraft's attack): the physics object under the crosshair within reach gets an impulse at the hit
-		/// point along the look; at most one per 0.4 s.
-		void physics_swing(UObject *pawn)
+		/// Minecraft's attack hit HN's world at `punch.at` (its own reach and ray: nothing through walls, once per
+		/// attack): the loose object there, if any, gets an impulse at the hit point along the attack, scaled by the
+		/// attack's charge (Minecraft's attack strength) and a sprint; heavy things barely move.
+		void physics_punch(UObject *pawn, const Punch &punch)
 		{
-			static DWORD next = 0;
-			if (!g_haveMcCamera || GetTickCount() < next)
+			UObject *best = nullptr;
+			float bestDistance = 1e9f;
+			Vec3f bestPoint{};
+			for (UObject *component : physics_near(pawn, punch.at, 20.0f))
+			{
+				if (hinged_part(component))
+					continue;
+				Vec3f cp;
+				const float d = closest_point(component, punch.at, cp);
+				if (d >= 0.0f && d < bestDistance)
+					best = component, bestDistance = d, bestPoint = cp;
+			}
+			static int logged = 0;
+			if (!best)
+			{
+				if (logged++ < 40)
+					log(L"physics: punch hit HN's world, no loose object there");
 				return;
-			const float d2r = 3.14159265f / 180.0f;
-			const float yaw = g_mcYaw * d2r, pitch = g_mcPitch * d2r;
-			const Vec3f dir{-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch)};
-			Call c(kismet(), STR("LineTraceSingleForObjects"));
-			if (!c)
-				return;
-			c.set<UObject *>(STR("WorldContextObject"), pawn)
-				.set(STR("Start"), g_mcCamera)
-				.set(STR("End"), Vec3f{g_mcCamera.x + dir.x * 300.0f, g_mcCamera.y + dir.y * 300.0f, g_mcCamera.z + dir.z * 300.0f})
-				.set(STR("ObjectTypes"), ScriptArray{kPhysicsTypes, 2, 2})
-				.set(STR("ActorsToIgnore"), ScriptArray{nullptr, 0, 0})
-				.set_bool(STR("bTraceComplex"), false)
-				.set<uint8_t>(STR("DrawDebugType"), 0)
-				.set_bool(STR("bIgnoreSelf"), true);
-			c.invoke();
-			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
-			FProperty *outHit = c.property(STR("OutHit"));
-			if (!ok || !*ok || !outHit)
-				return;
-			Call brk(gameplay_statics(), STR("BreakHitResult"));
-			FProperty *hitParam = brk.property(STR("Hit"));
-			if (!brk || !hitParam)
-				return;
-			std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
-			brk.invoke();
-			UObject *const *component = brk.param<UObject *>(STR("HitComponent"));
-			const Vec3f *point = brk.param<Vec3f>(STR("ImpactPoint"));
-			if (!component || !*component || !point)
-				return;
-			Call simulating(*component, STR("IsSimulatingPhysics"));
-			simulating.set(STR("BoneName"), NameParam{}).invoke();
-			if (const uint8_t *yes = simulating.param<uint8_t>(STR("ReturnValue")); !yes || !*yes)
-				return;
-			next = GetTickCount() + 400;
-			const float impulse = 1800.0f; // kg cm/s: a 5 kg box flies off at ~3.6 m/s, a 30 kg one shifts
-			Call(*component, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{dir.x * impulse, dir.y * impulse, dir.z * impulse + impulse * 0.25f})
-				.set(STR("Location"), *point).set(STR("BoneName"), NameParam{}).invoke();
+			}
+			const float len = std::max(1e-3f, std::hypot(punch.dir.x, punch.dir.y, punch.dir.z));
+			const Vec3f dir{punch.dir.x / len, punch.dir.y / len, punch.dir.z / len};
+			// HN's objects weigh 150-400 kg (a vase 150, a chair 349, a TV 400: its physics' scale, not real weights), so
+			// a punch sized for real masses moved them 3-19 cm/s, nothing visible. The punch sets a velocity change
+			// instead, still less the heavier the object is on HN's own scale. At 350 / (1 + m / 200) a chair got under
+			// 1 m/s and "barely budged" (HN's friction stops it at once); now a full fist sends a chair ~2.7 m/s and a
+			// vase ~3.5, a sword (attack damage 7) half as much again, a sprint more. Quick repeated attacks (Minecraft's
+			// uncharged swings) still push, at about two thirds.
+			const float mass = mass_of(best);
+			const float weapon = 0.7f + 0.06f * std::clamp(punch.damage, 1.0f, 12.0f);
+			const float dv = 600.0f / (1.0f + mass / 500.0f) * weapon * (0.5f + 0.5f * std::clamp(punch.strength, 0.0f, 1.0f)) *
+							 (punch.sprint ? 1.4f : 1.0f);
+			const float impulse = mass * dv;
+			Call(best, STR("AddImpulseAtLocation")).set(STR("Impulse"), Vec3f{dir.x * impulse, dir.y * impulse, dir.z * impulse + impulse * 0.15f})
+				.set(STR("Location"), bestPoint).set(STR("BoneName"), NameParam{}).invoke();
+			if (logged++ < 40)
+			{
+				UObject *owner = owner_of(best);
+				log(L"physics: punch on " + (owner ? owner->GetName() : best->GetName()) + L" (" + std::to_wstring(int(mass)) + L" kg): " +
+					std::to_wstring(int(impulse)) + L" kg cm/s, " + std::to_wstring(int(impulse / mass)) + L" cm/s");
+			}
 		}
 
 		// ---- doors ----------------------------------------------------------------------------------------------------
@@ -2177,6 +2594,13 @@ namespace nc
 			std::unordered_set<UObject *> actors;
 			for (UObject *door : g_doors)
 				actors.insert(door);
+			for (UObject *component : find_all(L"MovingComponent"))
+			{
+				Call owner(component, STR("GetOwner"));
+				owner.invoke();
+				if (UObject *const *actor = owner.param<UObject *>(STR("ReturnValue")); actor && *actor)
+					actors.insert(*actor);
+			}
 			for (UObject *component : find_all(L"InteractiveComponent"))
 			{
 				Call owner(component, STR("GetOwner"));
@@ -2184,6 +2608,7 @@ namespace nc
 				if (UObject *const *actor = owner.param<UObject *>(STR("ReturnValue")); actor && *actor)
 					actors.insert(*actor);
 			}
+			g_interactiveActors.assign(actors.begin(), actors.end());
 			for (UObject *actor : actors)
 			{
 				Call parts(actor, STR("GetComponentsByClass"));
@@ -2253,6 +2678,33 @@ namespace nc
 			for (UObject *component : g_nearPhysics)
 				if (!held || owner_of(component) != held)
 					voxelise(component, now);
+			// Not where Steve is. A door leaf swinging into him or an object falling on his head became collision inside
+			// his hitbox: Minecraft can't push him out of it, finds no room to stand, and forces him to crawl (the
+			// recorder: boxes appearing in his head the tick before POSE_FORCED SWIMMING, at a door). HN's own physics
+			// has the part meet his capsule (his size) instead; Minecraft's collision is kept only outside him.
+			if (g_haveFeet)
+			{
+				double fx, fy, fz;
+				to_mc(g_feet, fx, fy, fz);
+				const double hw = g_steveWidth / 200.0 + 0.01, h = g_steveHeight / 100.0 + 0.01;
+				const double x0 = fx - hw, x1 = fx + hw, y0 = fy - 0.01, y1 = fy + h, z0 = fz - hw, z1 = fz + hw;
+				for (int x = int(std::floor(x0)); x <= int(std::floor(x1)); ++x)
+					for (int y = int(std::floor(y0)); y <= int(std::floor(y1)); ++y)
+						for (int z = int(std::floor(z0)); z <= int(std::floor(z1)); ++z)
+						{
+							const auto it = now.find(cell_key(x, y, z));
+							if (it == now.end())
+								continue;
+							for (int sx = 0; sx < 8; ++sx)
+								for (int sy = 0; sy < 8; ++sy)
+									for (int sz = 0; sz < 8; ++sz)
+									{
+										const double cx0 = x + sx / 8.0, cy0 = y + sy / 8.0, cz0 = z + sz / 8.0;
+										if (cx0 + 0.125 > x0 && cx0 < x1 && cy0 + 0.125 > y0 && cy0 < y1 && cz0 + 0.125 > z0 && cz0 < z1)
+											it->second[sx * 8 + sy] &= uint8_t(~(1u << sz));
+									}
+						}
+			}
 			// what changed since last tick goes to Minecraft (with the block's static shape)
 			for (auto &[key, bits] : now)
 			{
@@ -2392,9 +2844,41 @@ namespace nc
 		}
 	}
 
+	// ---- watchdog ----------------------------------------------------------------------------------------------------
+	// HN froze once right as a level started (no crash, nothing in the log); its dump at exit held only the exiting
+	// thread. If the game thread stops ticking for 5 s while Minecraft drives, a full dump of every thread is written
+	// next to the mod (NeighborCraft_freeze_*.dmp) while it is still stuck: the stuck line is in it.
+	std::atomic<unsigned long long> g_heartbeat{0};
+	std::atomic<bool> g_watchArmed{false};
+
+	void watchdog()
+	{
+		int written = 0;
+		for (;;)
+		{
+			Sleep(1000);
+			const unsigned long long last = g_heartbeat.load();
+			if (!g_watchArmed.load() || last == 0 || GetTickCount64() - last < 5000 || written >= 2)
+				continue;
+			const std::wstring file = module_dir() + L"NeighborCraft_freeze_" + std::to_wstring(GetTickCount64()) + L".dmp";
+			HANDLE h = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (h != INVALID_HANDLE_VALUE)
+			{
+				MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+					MINIDUMP_TYPE(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory), nullptr, nullptr, nullptr);
+				CloseHandle(h);
+				++written;
+			}
+			// wait for the game to tick again before another one
+			while (g_heartbeat.load() == last)
+				Sleep(500);
+		}
+	}
+
 	void start(void *module)
 	{
 		g_module = module;
+		std::thread(watchdog).detach();
 		g_ws.start("127.0.0.1", kPort);
 		g_launchAt = GetTickCount() + 3000; // Minecraft may be running already: give the link a moment first
 		compositor::set_host_planes(kHostNear, 1.0e7f);
@@ -2415,6 +2899,8 @@ namespace nc
 		compositor::try_register(g_module);
 		hook_hn_window();
 		++g_frame;
+		g_heartbeat = GetTickCount64();
+		g_watchArmed = g_driving;
 
 		// Minecraft: started from here if it isn't running, and kept out of sight
 		if (!g_launched && !g_ws.connected() && GetTickCount() > g_launchAt)
@@ -2427,8 +2913,8 @@ namespace nc
 
 		if (pressed(VK_F12))
 		{
-			static bool debug = false;
-			debug = !debug;
+			g_debugView = !g_debugView;
+			const bool debug = g_debugView;
 			sendf("{\"t\":\"debug\",\"on\":%s}", debug ? "true" : "false");
 			log(debug ? L"collision recorder + debug view on (F12)" : L"collision recorder off");
 			notify(debug ? "Collision recorder ON (F12 to stop)" : "Collision recorder off");
@@ -2640,17 +3126,38 @@ namespace nc
 		refresh_probe_ignore(pawn);
 		doors_tick(pc, pawn);
 		if (g_driving)
+		{
 			physics_tick(pawn);
+			for (const Punch &punch : g_punches)
+				physics_punch(pawn, punch);
+		}
 		else
 			g_nearPhysics.clear();
+		g_punches.clear();
 		if (g_driving && g_mcReady)
 			dynamic_tick(pc);
+		// The loose objects near Steve are moving collision (see the moving parts), so the world probe looks past them:
+		// past their actor, as traces ignore whole actors. Only when the object is its actor (its root component): a
+		// loose part of a bigger actor (a street's bins, a yard's props) used to make the probe ignore that whole actor,
+		// and on Act 1's road the floor under Steve stopped being found (the recorder: the road's blocks emptying
+		// around him, then a fall).
 		g_probeIgnoreNow = g_probeIgnore;
 		for (UObject *component : g_nearPhysics)
 		{
 			Call owner(component, STR("GetOwner"));
 			owner.invoke();
-			if (UObject *const *actor = owner.param<UObject *>(STR("ReturnValue")); actor && *actor)
+			UObject *const *actor = owner.param<UObject *>(STR("ReturnValue"));
+			if (!actor || !*actor)
+				continue;
+			Call root(*actor, STR("K2_GetRootComponent"));
+			root.invoke();
+			UObject *const *r = root.param<UObject *>(STR("ReturnValue"));
+			const bool standalone = r && *r == component;
+			static std::unordered_set<UObject *> reported;
+			if (reported.size() < 200 && reported.insert(*actor).second)
+				log(L"physics: " + component->GetName() + L" of " + (*actor)->GetName() + L" (" + (*actor)->GetClassPrivate()->GetName() + L"): " +
+					(standalone ? L"loose object, the probe looks past it" : L"part of a bigger actor, the probe keeps the actor"));
+			if (standalone)
 				g_probeIgnoreNow.push_back(*actor);
 		}
 		const bool ready = g_mcReady && sample_world(pawn, g_driving && g_haveEye ? g_eye : cam.loc);
@@ -2700,7 +3207,29 @@ namespace nc
 				else if (!ground)
 				{
 					if (!underWorld)
+					{
 						log(L"Steve is under HN's world: back to the last ground");
+						// what the probe knew where he fell: the column's rays and the floors found in it
+						const Vec3f from = haveGood ? lastGood : g_eye;
+						double fx, fy, fz;
+						to_mc(from, fx, fy, fz);
+						const int cx = int(std::floor(fx)), cz = int(std::floor(fz)), cy = int(std::floor(fy));
+						std::wstring info = L"  last ground at block " + std::to_wstring(cx) + L" " + std::to_wstring(cy) + L" " + std::to_wstring(cz);
+						if (const auto col = g_columns.find(cell_key(cx, 0, cz)); col != g_columns.end())
+							info += L", column rays for y " + std::to_wstring(col->second.lo) + L".." + std::to_wstring(col->second.hi - 1) +
+									L", " + std::to_wstring(GetTickCount() - col->second.probed) + L" ms ago";
+						else
+							info += L", column never probed";
+						for (int y = cy - 3; y <= cy + 1; ++y)
+						{
+							int floors = 0;
+							if (const auto b = g_bits.find(cell_key(cx, y, cz)); b != g_bits.end())
+								for (float f : b->second.floor)
+									floors += f > 0.0f;
+							info += L"; y " + std::to_wstring(y) + L": " + std::to_wstring(floors) + L" floors";
+						}
+						log(info);
+					}
 					underWorld = true;
 					teleport_minecraft(pawn, haveGood ? lastGood : p);
 					nextGroundCheck = GetTickCount() + 1000; // give the teleport time to land
@@ -2710,8 +3239,19 @@ namespace nc
 			if (g_haveEye && !underWorld)
 			{
 				const float *eyeHeight = pawn->GetValuePtrByPropertyNameInChain<float>(STR("BaseEyeHeight"));
-				const Vec3f target{g_eye.x, g_eye.y, g_eye.z - (eyeHeight ? *eyeHeight : 64.0f)};
+				Vec3f target{g_eye.x, g_eye.y, g_eye.z - (eyeHeight ? *eyeHeight : 64.0f)};
+				if (g_haveFeet)
+				{
+					// Steve's hitbox exactly: the capsule his size, standing on his feet
+					steve_capsule(pawn);
+					target = {g_feet.x, g_feet.y, g_feet.z + std::max(g_steveHeight, g_steveWidth) * 0.5f};
+				}
 				set_actor_location(pawn, target);
+				// HN's own camera component (where HN's action key looks from) at Steve's eyes, so HN uses the object
+				// the interaction ray picked, not a neighbour (it sat 8 cm lower, and without Minecraft's look offset)
+				if (UObject *const *camera = pawn->GetValuePtrByPropertyNameInChain<UObject *>(STR("Camera")); camera && *camera)
+					Call(*camera, STR("K2_SetWorldLocation")).set(STR("NewLocation"), g_eye).set_bool(STR("bSweep"), false)
+						.set_bool(STR("bTeleport"), true).invoke();
 				g_lastPlaced = target;
 				g_placed = true;
 			}
@@ -2731,6 +3271,20 @@ namespace nc
 		}
 
 		g_controlsPawn = pawn;
+		if (g_debugView && g_driving && !g_minecraftScreen)
+		{
+			// F12: what a right click would do, under the crosshair, twice a second
+			static DWORD nextTarget = 0;
+			if (GetTickCount() > nextTarget)
+			{
+				nextTarget = GetTickCount() + 500;
+				looking_at_interactive(pawn, true);
+				std::string text;
+				for (wchar_t ch : g_lastTarget)
+					text += ch < 128 && ch != '"' && ch != '\\' ? char(ch) : '?';
+				notify(text);
+			}
+		}
 		minecraft_controls(pc);
 		if (g_driving)
 			surface_tick(pawn);

@@ -7,6 +7,7 @@ import dev.neighborcraft.client.mixin.MouseHandlerAccessor;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.MouseHandler;
+import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
@@ -26,6 +27,24 @@ final class ClientInput {
 	private static int heldButton = -1;
 	private static double lastX, lastY;
 	private static int clicksLogged;
+	/** The last press over a screen (button, time), for Minecraft's double click (collecting a stack). */
+	private static int lastPressButton = -1;
+	private static long lastPressTime;
+
+	/**
+	 * The link's buttons (0 left, 1 right, 2 middle, as the host reads them) as Minecraft's. Minecraft 26 takes its
+	 * mouse from SDL: left is 1, middle 2, right 3 (InputConstants.MOUSE_BUTTON_*). Passing the host's numbers through
+	 * made a left click button 0, which no screen handles (it picked nothing up), and a right click button 1, which
+	 * screens take as the left button (it picked the whole stack up).
+	 */
+	private static int minecraftButton(final int linkButton) {
+		return switch (linkButton) {
+			case 0 -> InputConstants.MOUSE_BUTTON_LEFT;
+			case 1 -> InputConstants.MOUSE_BUTTON_RIGHT;
+			case 2 -> InputConstants.MOUSE_BUTTON_MIDDLE;
+			default -> linkButton + 1;
+		};
+	}
 
 	private ClientInput() {
 	}
@@ -90,11 +109,16 @@ final class ClientInput {
 						screen.mouseMoved(gx, gy);
 					}
 					case "click" -> {
-						int button = m.get("b").getAsInt();
+						int button = minecraftButton(m.get("b").getAsInt());
 						MouseButtonEvent event = new MouseButtonEvent(gx, gy, new MouseButtonInfo(button, 0));
 						if (m.get("down").getAsBoolean()) {
 							heldButton = button;
-							boolean handled = screen.mouseClicked(event, false);
+							// a double click as Minecraft's mouse handler judges it: the same button again within its threshold
+							long now = System.currentTimeMillis();
+							boolean doubleClick = button == lastPressButton && now - lastPressTime < MouseHandler.DOUBLE_CLICK_THRESHOLD_MS;
+							lastPressButton = button;
+							lastPressTime = now;
+							boolean handled = screen.mouseClicked(event, doubleClick);
 							if (clicksLogged++ < 40) {
 								Passthrough.LOG.info("screen click: button {} at gui {} {} (window {} x {}) on {}: {}, carrying {}", button, Math.round(gx),
 									Math.round(gy), window.getGuiScaledWidth(), window.getGuiScaledHeight(), screen.getClass().getSimpleName(),

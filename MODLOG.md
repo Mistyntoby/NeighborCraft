@@ -134,3 +134,45 @@ modelled on universal-modder `examples/minecraft-gta5-passthrough`.
 - Verify in game: floors/standing, pause covering, no crash (latest build untested).
 - Rendering: transparency cause, relighting/shadows, GPU texture sharing, native-geometry evaluation.
 - Neighbor combat (hooks identified), wall breaking.
+
+## Interactions, physics, terrain, stability (2026-10-10)
+
+Evidence-driven round: collision recorder sessions, HN/Minecraft logs, minidumps, and an automated drive test
+(`tools/drivetest.py`, Minecraft without HN; refuses to run while HN is open).
+
+### Fixed (verified)
+- Inventory left-click: Minecraft 26 numbers mouse buttons 1 left / 2 middle / 3 right (SDL); the link's 0/1/2 went
+  through unmapped (left did nothing, right acted as left). Mapped, with Minecraft's double-click.
+- Right click on HN furniture: cabinets, wardrobes, fridges, TV stands are FlatActors; their blueprints answer
+  `OnIsActionComponent(part)`. The right-click ray asks that, then presses HN's action key (E). Cabinets open
+  (confirmed in game). The ray is Minecraft's (eyes + look) and no longer skips loose physics objects (the TV was skipped).
+- Shutdown crash (0xc0000409 in the CRT's DLL shutdown at every HN close): the link's std::thread was still joinable
+  when the DLL's globals went; detached in WsClient's destructor (no crash dump since).
+- Freeze: the game thread waited forever inside UE4SS's `Output::send` (watchdog dump: game thread in Output.hpp
+  under our log(), ~20 engine workers parked in UE4SS). Logging now goes through our own queue and thread. A watchdog
+  writes `NeighborCraft_freeze_*.dmp` if the game thread stops for 5 s while driving.
+- Cutscenes: `Human::IsPlayCutScene` gates gameplay (Minecraft's HUD/kit/driving waited for nothing before).
+- Gentle slopes (0.8 cm per 1/8 column after a curb): Minecraft's step-up takes the lowest helping step, one column
+  per tick; a lift onto the highest <=1/16 ledge in the path, with that tick moving horizontally only. Drive test:
+  2.2-2.9 -> 5.66 m/s on the ramp. Stairs keep their speed when a step-up only grazes the next riser.
+- Falling through Act 1's road: HN had measured the road (rescue diagnostics); Minecraft's server was seconds behind
+  ("Can't keep up! ... 12590ms") and the client didn't have the ground yet. Causes and fixes:
+  - shape building (Shapes.or per box, ~14.5 ms a block) ran on the server thread: now built on its own thread, as a
+    voxel bitset + pairwise unoptimized joins (~0.3 ms a block; identical shapes, checked on 300);
+  - Steve holds still while HN's ground under him is unplaced on the server or not yet on the client (logged; 5 s
+    failsafe); view distance 16 -> 8;
+  - floor columns remember the heights they were probed for (a road falling 12 blocks left the lower part unprobed).
+
+### Changed, not yet confirmed in game
+- HN's player capsule is Steve's hitbox while Minecraft drives (51 cm radius vs 30 pushed physics doors open).
+- Moving parts never become collision inside Steve (door leaves / falling objects forced the crawl pose).
+- Pushes by walking: from the movement keys (Steve is stopped at an object, his speed was 0), impact + capped force.
+- Punches from Minecraft's own attack hit (startAttack on a host block): velocity change on HN's mass scale,
+  weapon damage, charge, sprint; hinged parts (doors, drawers) excluded.
+- Collision recorder always on (F12 adds the debug view and the interaction target readout).
+
+### Gotchas
+10. Minecraft 26 mouse buttons are SDL's (1, 2, 3), not GLFW's (0, 1, 2).
+11. HN masses are 150-400 kg for small props: impulses must be velocity changes.
+12. UE4SS logging from the game thread can deadlock: log from another thread.
+13. A test Minecraft on the link port talks to the player's game: never run tools while HN is open.

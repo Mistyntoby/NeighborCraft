@@ -1,5 +1,7 @@
 package dev.neighborcraft;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.core.BlockPos;
@@ -7,7 +9,10 @@ import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.shapes.BitSetDiscreteVoxelShape;
+import net.minecraft.world.phys.shapes.BooleanOp;
 import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.CubeVoxelShape;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
@@ -33,9 +38,9 @@ public final class HostBlock extends Block {
 	 * Heights in thousandths of a block, one per column of an n x n grid over the block (x * n + z; 0: none), as
 	 * slabs: `up` true for floors (the slab is under the surface), false for ceilings (above it).
 	 */
-	private static VoxelShape surfaces(VoxelShape shape, final String heights, final boolean up) {
+	private static void surfaces(final List<VoxelShape> parts, final String heights, final boolean up) {
 		if (heights.isEmpty()) {
-			return shape;
+			return;
 		}
 
 		String[] h = heights.split(",");
@@ -49,42 +54,63 @@ public final class HostBlock extends Block {
 			double x = (i / n) / (double) n, z = (i % n) / (double) n, w = 1.0 / n;
 			double lo = up ? Math.max(0.0, at - 0.125) : Math.min(at, 1.0), hi = up ? Math.min(1.0, at) : Math.min(1.0, at + 0.125);
 			if (hi > lo) {
-				shape = Shapes.or(shape, Shapes.box(x, lo, z, x + w, hi, z + w));
+				parts.add(Shapes.box(x, lo, z, x + w, hi, z + w));
 			}
 		}
-
-		return shape;
 	}
 
 	/**
 	 * An 8x8x8 occupancy mask (bit x * 64 + y * 8 + z, 64 bytes as hex: walls, furniture) plus the exact floor and
 	 * ceiling surfaces measured by rays (see surfaces) as a shape: floors and ceilings sit at their real heights, so
 	 * Steve stands on HN's ground, stairs are their real steps and low ceilings their real clearance.
+	 *
+	 * <p>Built fast: thousands arrive when a level starts. Joined box by box with Shapes.or (which optimizes the whole
+	 * shape after every box) they took ~6-15 ms each (8.7 s for a level start's burst in tools/drivetest.py) and kept
+	 * Steve waiting for his ground. The grid part is now filled straight into a voxel bitset, and the slabs at free
+	 * heights are joined pairwise, unoptimized, with one optimize at the end: the same shape (checked against the old
+	 * construction for 300 shapes: none differed), ~0.3 ms each.
 	 */
 	static VoxelShape fromMask(final String hex, final String floor, final String ceiling) {
-		VoxelShape shape = surfaces(surfaces(Shapes.empty(), floor, true), ceiling, false);
-
+		List<VoxelShape> parts = new ArrayList<>();
+		BitSetDiscreteVoxelShape grid = new BitSetDiscreteVoxelShape(8, 8, 8);
+		boolean any = false;
 		for (int x = 0; x < 8; x++) {
 			for (int y = 0; y < 8; y++) {
 				int row = Integer.parseInt(hex.substring((x * 8 + y) * 2, (x * 8 + y) * 2 + 2), 16);
-				int z = 0;
-				while (z < 8) {
-					if ((row >> z & 1) == 0) {
-						z++;
-						continue;
+				for (int z = 0; z < 8; z++) {
+					if ((row >> z & 1) != 0) {
+						grid.fill(x, y, z);
+						any = true;
 					}
-
-					int start = z;
-					while (z < 8 && (row >> z & 1) != 0) {
-						z++;
-					}
-
-					shape = Shapes.or(shape, Shapes.box(x / 8.0, y / 8.0, start / 8.0, (x + 1) / 8.0, (y + 1) / 8.0, z / 8.0));
 				}
 			}
 		}
 
-		return shape.optimize();
+		if (any) {
+			parts.add(new CubeVoxelShape(grid));
+		}
+
+		surfaces(parts, floor, true);
+		surfaces(parts, ceiling, false);
+		if (parts.isEmpty()) {
+			return Shapes.empty();
+		}
+
+		// pairwise, like a tournament: n log n instead of n * n
+		while (parts.size() > 1) {
+			List<VoxelShape> next = new ArrayList<>((parts.size() + 1) / 2);
+			for (int i = 0; i + 1 < parts.size(); i += 2) {
+				next.add(Shapes.joinUnoptimized(parts.get(i), parts.get(i + 1), BooleanOp.OR));
+			}
+
+			if (parts.size() % 2 == 1) {
+				next.add(parts.get(parts.size() - 1));
+			}
+
+			parts = next;
+		}
+
+		return parts.get(0).optimize();
 	}
 
 	@Override
