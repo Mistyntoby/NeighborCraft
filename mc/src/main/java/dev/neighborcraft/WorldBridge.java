@@ -88,11 +88,12 @@ public final class WorldBridge {
 	private static final Set<BlockPos> hosts = ConcurrentHashMap.newKeySet();
 
 	/**
-	 * HN's world, block by block: {"t":"shape","c":[x,y,z,kind, ...],"m":[hex, ...]}. kind 0: nothing of HN's there
-	 * (our host block goes), 1: HN fills the whole block, 2: HN fills part of it (the next mask in "m", 8x8x8 bits).
+	 * HN's world, block by block: {"t":"shape","c":[x,y,z,kind, ...],"m":[hex, ...],"f":[heights, ...]}. kind 0:
+	 * nothing of HN's there (our host block goes), 1: HN fills the whole block, 2: HN fills part of it (the next mask in
+	 * "m", 8x8x8 bits, and the next floor in "f": 16 surface heights, see HostBlock.fromMask).
 	 * Only air and our own host blocks are ever replaced; the player's blocks are never touched.
 	 */
-	public static void shapes(final int[] cells, final String[] masks) {
+	public static void shapes(final int[] cells, final String[] masks, final String[] floors) {
 		MinecraftServer s = server;
 		if (s == null) {
 			return;
@@ -127,7 +128,8 @@ public final class WorldBridge {
 				}
 
 				if (kind == 2) {
-					HostBlock.SHAPES.put(pos.asLong(), HostBlock.fromMask(masks[mask++]));
+					HostBlock.SHAPES.put(pos.asLong(), HostBlock.fromMask(masks[mask], floors[mask]));
+					mask++;
 				} else {
 					HostBlock.SHAPES.remove(pos.asLong());
 				}

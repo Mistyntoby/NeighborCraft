@@ -12,6 +12,8 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.entity.player.Inventory;
 import org.lwjgl.sdl.SDLVideo;
 
@@ -97,6 +99,12 @@ final class ClientInput {
 
 				lastX = gx;
 				lastY = gy;
+			}
+			case "swing" -> {
+				// the player used one of HN's objects (a door): the hand swings as when using a block in Minecraft
+				if (player != null) {
+					player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+				}
 			}
 			case "pause" -> {
 				// Hello Neighbor paused (or left gameplay): Minecraft's world stops too (single player pauses while the

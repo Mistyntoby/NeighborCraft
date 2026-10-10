@@ -151,8 +151,8 @@ public class PassthroughClient implements ClientModInitializer {
 		options.enableVsync().set(false);
 		// Hello Neighbor has its own soundtrack; Minecraft keeps its sounds (blocks, hits) but no music
 		options.getSoundSourceOptionInstance(SoundSource.MUSIC).set(0.0);
-		// Hello Neighbor's stairs arrive as whole blocks: step up them without jumping
-		options.autoJump().set(true);
+		// vanilla: no auto-jump (HN's stairs arrive at their real heights, Minecraft's 0.6 step-up climbs them)
+		options.autoJump().set(false);
 		// the host shows ~60-120 fps: rendering faster only competes with it for the GPU
 		options.framerateLimit().set(120);
 		options.save();

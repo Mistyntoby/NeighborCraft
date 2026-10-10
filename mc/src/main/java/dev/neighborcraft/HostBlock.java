@@ -30,10 +30,23 @@ public final class HostBlock extends Block {
 	}
 
 	/**
-	 * An 8x8x8 occupancy mask (bit x * 64 + y * 8 + z, 64 bytes as hex) as a shape: runs along z merged into boxes.
+	 * An 8x8x8 occupancy mask (bit x * 64 + y * 8 + z, 64 bytes as hex: walls, furniture) plus the floor (16 surface
+	 * heights in thousandths of a block, one per 1/4 x 1/4 column, x * 4 + z, 0: none) as a shape. Floors keep their
+	 * exact height (a 1/8 block thick slab under it), so stairs and sills are their real steps.
 	 */
-	static VoxelShape fromMask(final String hex) {
+	static VoxelShape fromMask(final String hex, final String floor) {
 		VoxelShape shape = Shapes.empty();
+		if (!floor.isEmpty()) {
+			String[] heights = floor.split(",");
+			for (int i = 0; i < heights.length && i < 16; i++) {
+				double top = Integer.parseInt(heights[i]) / 1000.0;
+				if (top > 0.0) {
+					double x = (i >> 2) / 4.0, z = (i & 3) / 4.0;
+					shape = Shapes.or(shape, Shapes.box(x, Math.max(0.0, top - 0.125), z, x + 0.25, Math.min(1.0, top), z + 0.25));
+				}
+			}
+		}
+
 		for (int x = 0; x < 8; x++) {
 			for (int y = 0; y < 8; y++) {
 				int row = Integer.parseInt(hex.substring((x * 8 + y) * 2, (x * 8 + y) * 2 + 2), 16);

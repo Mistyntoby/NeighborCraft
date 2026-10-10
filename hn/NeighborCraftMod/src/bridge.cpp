@@ -699,12 +699,12 @@ namespace nc
 
 		// Floors come from rays, not boxes: box overlaps only see the surface of a landscape heightfield (not the
 		// ground under it) and miss a surface lying exactly on a block boundary. Each 1x1 block column gets 4x4 rays
-		// straight down; every surface a ray meets (each storey: the ray goes on below what it hit) becomes a 1/8-block
-		// solid layer, its top within ~6 cm of the real surface.
+		// straight down; every surface a ray meets (each storey: the ray goes on below what it hit) is kept at its exact
+		// height (a thin slab under it in Minecraft), so stairs and door sills are their real steps.
 		struct BlockBits
 		{
-			uint8_t box[64] = {};   // from the box probe (walls, furniture)
-			uint8_t floor[64] = {}; // from the column rays
+			uint8_t box[64] = {};     // from the box probe (walls, furniture)
+			float floor[16] = {};     // from the column rays: surface height in the block (0..1], per 1/4 x 1/4 column
 			bool boxKnown = false;
 		};
 		std::unordered_map<unsigned long long, BlockBits> g_bits;
@@ -733,7 +733,7 @@ namespace nc
 			{
 				const unsigned long long key = cell_key(x, y, z);
 				BlockBits &b = g_bits[key];
-				std::fill(std::begin(b.floor), std::end(b.floor), uint8_t(0));
+				std::fill(std::begin(b.floor), std::end(b.floor), 0.0f);
 				g_dirty.insert(key);
 			}
 			int queries = 0;
@@ -751,16 +751,13 @@ namespace nc
 							break;
 						double hx, hy, hz;
 						to_mc(hit, hx, hy, hz);
-						// the 1/8 layer whose top is nearest the surface, in the block that holds it
-						const long layer = long(std::lround(hy * 8.0)) - 1;
-						const int by = int(std::floor(layer / 8.0));
-						const int ly = int(layer - by * 8L);
+						// the surface's exact height, in the block it lies in (a surface on a block boundary belongs to the
+						// block below: its top face)
+						const int by = int(std::floor(hy - 1e-4));
 						if (by >= yLo && by < yHi)
 						{
-							BlockBits &b = g_bits[cell_key(x, by, z)];
-							for (int sx = i * 2; sx < i * 2 + 2; ++sx)
-								for (int sz = k * 2; sz < k * 2 + 2; ++sz)
-									b.floor[sx * 8 + ly] |= uint8_t(1u << sz);
+							float &top = g_bits[cell_key(x, by, z)].floor[i * 4 + k];
+							top = std::max(top, float(hy - by));
 						}
 						from = {hit.x, hit.y, hit.z - 3.0f}; // on below this surface: the storey under it
 						if (from.z <= to.z)
@@ -770,17 +767,28 @@ namespace nc
 			return queries;
 		}
 
-		/// The block's shape: what the box probe and the floor rays found. 0 empty, 1 full, 2 partial (mask in `hex`).
-		int block_shape(const BlockBits &b, std::string &hex)
+		/// The block's shape: what the box probe and the floor rays found. 0 empty, 1 full, 2 partial (mask in `hex`,
+		/// floor heights in `floor`: 16 thousandths of a block, 0 for none).
+		int block_shape(const BlockBits &b, std::string &hex, std::string &floor)
 		{
-			uint8_t bits[64];
+			const uint8_t *bits = b.box;
 			int set = 0;
 			for (int i = 0; i < 64; ++i)
-				set += std::popcount(bits[i] = uint8_t(b.box[i] | b.floor[i]));
-			if (set == 0)
-				return 0;
+				set += std::popcount(bits[i]);
 			if (set == 512)
 				return 1;
+			floor.clear();
+			bool anyFloor = false;
+			for (int i = 0; i < 16; ++i)
+			{
+				const int h = int(std::lround(b.floor[i] * 1000.0f));
+				anyFloor |= h > 0;
+				floor += (i ? "," : "") + std::to_string(h);
+			}
+			if (set == 0 && !anyFloor)
+				return 0;
+			if (!anyFloor)
+				floor.clear();
 			static const char digits[] = "0123456789abcdef";
 			hex.resize(128);
 			for (int i = 0; i < 64; ++i)
@@ -790,6 +798,10 @@ namespace nc
 			}
 			return 2;
 		}
+
+		/// F11: what Minecraft gets around the player at chest height, 1/8 block per character ('#' solid, '.' air),
+		/// for checking doorways (written next to the mod's DLL).
+		void collision_map(const Vec3f &eye);
 
 		/// Probe the world around the player (column rays for floors, boxes for walls and furniture) for what is
 		/// unknown, or near and stale, nearest first, and send the blocks whose shape changed. `eye`: the player's eyes
@@ -867,15 +879,15 @@ namespace nc
 				queries += 1;
 			}
 			// send the blocks whose shape changed
-			std::string cells, masks;
+			std::string cells, masks, floors, floor;
 			for (unsigned long long key : g_dirty)
 			{
 				const auto bit = g_bits.find(key);
 				if (bit == g_bits.end())
 					continue;
-				const int kind = block_shape(bit->second, hex);
+				const int kind = block_shape(bit->second, hex, floor);
 				auto [cell, added] = g_cells.try_emplace(key, Cell{~0ull, 0});
-				const unsigned long long sig = kind == 2 ? (std::hash<std::string>()(hex) | 3) : unsigned(kind);
+				const unsigned long long sig = kind == 2 ? ((std::hash<std::string>()(hex) ^ std::hash<std::string>()(floor) * 31) | 3) : unsigned(kind);
 				if (!added && cell->second.signature == sig)
 					continue;
 				cell->second.signature = sig;
@@ -884,11 +896,14 @@ namespace nc
 				snprintf(entry, sizeof(entry), "%s%d,%d,%d,%d", cells.empty() ? "" : ",", cell_x(key), cell_y(key), cell_z(key), kind);
 				cells += entry;
 				if (kind == 2)
+				{
 					masks += (masks.empty() ? "\"" : ",\"") + hex + "\"";
+					floors += (floors.empty() && masks.size() == hex.size() + 2 ? "\"" : ",\"") + floor + "\"";
+				}
 			}
 			g_dirty.clear();
 			if (!cells.empty())
-				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "]}");
+				g_ws.send("{\"t\":\"shape\",\"c\":[" + cells + "],\"m\":[" + masks + "],\"f\":[" + floors + "]}");
 			static DWORD nextStats = 0;
 			if (now > nextStats)
 			{
@@ -1244,14 +1259,7 @@ namespace nc
 					return 0; // Minecraft's attack and pick block
 				case WM_RBUTTONDOWN:
 				case WM_RBUTTONUP:
-					if (!g_minecraftScreen)
-					{
-						// also HN's interact (its E): open doors, take objects
-						++g_injectedE;
-						PostMessageW(window, msg == WM_RBUTTONDOWN ? WM_KEYDOWN : WM_KEYUP, 'E',
-							msg == WM_RBUTTONDOWN ? 0x00120001 : 0xC0120001);
-					}
-					return 0;
+					return 0; // Minecraft's use, or HN's interact on HN's objects (decided each tick: right_click)
 				case WM_KEYDOWN:
 				case WM_KEYUP:
 					if (wparam == 'E' && g_injectedE > 0)
@@ -1311,6 +1319,70 @@ namespace nc
 			g_hnProc = nullptr;
 		}
 
+		/// What the player looks at in HN (from Minecraft's camera, within reach), if it is one of HN's interactive
+		/// objects (doors, switches, things to take: they carry HN's InteractiveComponent).
+		bool looking_at_interactive(UObject *pawn)
+		{
+			if (!g_haveMcCamera)
+				return false;
+			const float d2r = 3.14159265f / 180.0f;
+			// Minecraft's look (yaw 0 = +Z, pitch + = down) as an Unreal direction (Minecraft x -> x, z -> y, y -> z)
+			const float yaw = g_mcYaw * d2r, pitch = g_mcPitch * d2r;
+			const Vec3f dir{-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch)};
+			const float reach = 300.0f;
+			Call c(kismet(), STR("LineTraceSingle"));
+			if (!c)
+				return false;
+			c.set<UObject *>(STR("WorldContextObject"), pawn)
+				.set(STR("Start"), g_mcCamera)
+				.set(STR("End"), Vec3f{g_mcCamera.x + dir.x * reach, g_mcCamera.y + dir.y * reach, g_mcCamera.z + dir.z * reach})
+				.set<uint8_t>(STR("TraceChannel"), 0)
+				.set(STR("ActorsToIgnore"), ignore_list())
+				.set_bool(STR("bTraceComplex"), false)
+				.set<uint8_t>(STR("DrawDebugType"), 0)
+				.set_bool(STR("bIgnoreSelf"), true);
+			c.invoke();
+			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
+			FProperty *outHit = c.property(STR("OutHit"));
+			if (!ok || !*ok || !outHit)
+				return false;
+			// the hit actor, through GameplayStatics.BreakHitResult (FHitResult keeps it as a weak pointer)
+			Call brk(gameplay_statics(), STR("BreakHitResult"));
+			FProperty *hitParam = brk.property(STR("Hit"));
+			if (!brk || !hitParam)
+				return false;
+			std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
+			brk.invoke();
+			UObject *const *actor = brk.param<UObject *>(STR("HitActor"));
+			if (!actor || !*actor)
+				return false;
+			static UObject *interactive = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/HelloNeighbor.InteractiveComponent"));
+			bool yes = false;
+			if (interactive)
+			{
+				Call has(*actor, STR("GetComponentByClass"));
+				has.set<UObject *>(STR("ComponentClass"), interactive).invoke();
+				const UObject *const *component = has.param<UObject *>(STR("ReturnValue"));
+				yes = component && *component;
+			}
+			if (!yes)
+				for (UStruct *s = (*actor)->GetClassPrivate(); s && !yes; s = s->GetSuperStruct())
+					yes = s->GetName().find(L"Door") != StringType::npos;
+			static int logged = 0;
+			if (logged < 20)
+			{
+				++logged;
+				log(L"right click on " + (*actor)->GetClassPrivate()->GetName() + (yes ? L": HN interact" : L": Minecraft use") +
+					(interactive ? L"" : L" (no InteractiveComponent class)"));
+			}
+			return yes;
+		}
+
+		/// Right click: on one of HN's objects HN's interact (its E: doors open, things are taken) and Minecraft's hand
+		/// swings, as when using a block (no block is placed against it, as vanilla never places on a door); anywhere else
+		/// Minecraft's use (place a block, use the item).
+		void right_click(UObject *pawn = nullptr);
+
 		/// Minecraft's keybinds, sent every tick (held keys) or on change (presses).
 		void minecraft_controls(UObject *pc)
 		{
@@ -1341,13 +1413,44 @@ namespace nc
 				return;
 			}
 			forward_key(VK_LBUTTON, "attack");
-			forward_key(VK_RBUTTON, "use");
+			right_click();
 			forward_key(VK_MBUTTON, "pick");
 			for (int i = 0; i < 9; ++i)
 				if (pressed('1' + i))
 					sendf("{\"t\":\"slot\",\"n\":%d}", i);
 			if (wheel)
 				sendf("{\"t\":\"scroll\",\"d\":%d}", wheel);
+		}
+
+		bool g_rightClickHN = false; // the held right click went to HN (its E)
+		UObject *g_controlsPawn = nullptr;
+
+		void right_click(UObject *)
+		{
+			const int e = edge(VK_RBUTTON);
+			if (e > 0)
+			{
+				g_rightClickHN = g_controlsPawn && looking_at_interactive(g_controlsPawn);
+				if (g_rightClickHN)
+				{
+					++g_injectedE;
+					PostMessageW(g_hnWindow, WM_KEYDOWN, 'E', 0x00120001);
+					g_ws.send("{\"t\":\"swing\"}");
+				}
+				else
+					g_ws.send("{\"t\":\"key\",\"k\":\"use\",\"down\":true}");
+			}
+			else if (e < 0)
+			{
+				if (g_rightClickHN)
+				{
+					++g_injectedE;
+					PostMessageW(g_hnWindow, WM_KEYUP, 'E', 0xC0120001);
+				}
+				else
+					g_ws.send("{\"t\":\"key\",\"k\":\"use\",\"down\":false}");
+				g_rightClickHN = false;
+			}
 		}
 
 		/// While a Minecraft screen is open HN shows its cursor and stops turning the camera.
@@ -1428,6 +1531,109 @@ namespace nc
 			if (on)
 				if (UObject **pcm = pc->GetValuePtrByPropertyNameInChain<UObject *>(STR("PlayerCameraManager")); pcm && *pcm)
 					Call(*pcm, STR("StopAllCameraShakes")).set_bool(STR("bImmediately"), true).invoke();
+		}
+
+		/// HN's interaction circle (the player's cursor widget, m_pCursor) is hidden while Minecraft shows, and put back
+		/// as it was otherwise. Only the widget's visibility: HN's interaction itself is untouched.
+		void hide_hn_cursor(UObject *pawn, bool hide)
+		{
+			static UObject *cursor = nullptr;
+			static uint8_t original = 0;
+			static bool hidden = false;
+			static DWORD next = 0;
+			UObject *const *widget = pawn ? pawn->GetValuePtrByPropertyNameInChain<UObject *>(STR("m_pCursor")) : nullptr;
+			UObject *now = widget ? *widget : nullptr;
+			if (now != cursor)
+			{
+				cursor = now;
+				hidden = false;
+			}
+			if (!cursor || (hide == hidden && GetTickCount() < next))
+				return;
+			next = GetTickCount() + 1000; // HN may show it again: re-apply now and then
+			if (hide && !hidden)
+			{
+				Call get(cursor, STR("GetVisibility"));
+				if (get.invoke())
+					if (const uint8_t *v = get.param<uint8_t>(STR("ReturnValue")))
+						original = *v;
+			}
+			Call(cursor, STR("SetVisibility")).set<uint8_t>(STR("InVisibility"), hide ? 2 /* Hidden */ : original).invoke();
+			hidden = hide;
+		}
+
+		/// Measurements for the movement audit (UE4SS.log): HN's player dimensions once per level, and Steve's measured
+		/// horizontal speed every 2 s while moving, with the keys held.
+		void movement_report(UObject *pawn)
+		{
+			static UObject *reported = nullptr;
+			if (pawn != reported)
+			{
+				reported = pawn;
+				const float *eye = pawn->GetValuePtrByPropertyNameInChain<float>(STR("BaseEyeHeight"));
+				UObject *const *capsule = pawn->GetValuePtrByPropertyNameInChain<UObject *>(STR("CapsuleComponent"));
+				const float *radius = capsule && *capsule ? (*capsule)->GetValuePtrByPropertyNameInChain<float>(STR("CapsuleRadius")) : nullptr;
+				const float *half = capsule && *capsule ? (*capsule)->GetValuePtrByPropertyNameInChain<float>(STR("CapsuleHalfHeight")) : nullptr;
+				log(L"HN player: eye height " + std::to_wstring(eye ? *eye : -1) + L" cm above the capsule centre, capsule radius " +
+					std::to_wstring(radius ? *radius : -1) + L" cm, half height " + std::to_wstring(half ? *half : -1) + L" cm");
+			}
+			static DWORD start = 0;
+			static Vec3f from;
+			static double travelled = 0;
+			static Vec3f last;
+			static bool sprintSeen = false, anyKey = false;
+			if (!g_haveEye)
+				return;
+			const DWORD now = GetTickCount();
+			if (start == 0)
+			{
+				start = now;
+				from = last = g_eye;
+				travelled = 0;
+				sprintSeen = anyKey = false;
+				return;
+			}
+			travelled += std::hypot(g_eye.x - last.x, g_eye.y - last.y);
+			last = g_eye;
+			sprintSeen |= key_held(VK_CONTROL);
+			anyKey |= key_held('W') || key_held('A') || key_held('S') || key_held('D');
+			if (now - start >= 2000)
+			{
+				const double seconds = (now - start) / 1000.0;
+				if (anyKey && travelled > 10.0)
+					log(L"movement: " + std::to_wstring(travelled / 100.0 / seconds) + L" m/s over " + std::to_wstring(seconds) +
+						L" s" + (sprintSeen ? L" (Ctrl held: sprint)" : L""));
+				start = 0;
+			}
+		}
+
+		void collision_map(const Vec3f &eye)
+		{
+			double ex, ey, ez;
+			to_mc(eye, ex, ey, ez);
+			const int bx = int(std::floor(ex)), bz = int(std::floor(ez));
+			const double chest = ey - 1.62 + 1.0;
+			const int by = int(std::floor(chest)), sy = std::clamp(int((chest - by) * 8.0), 0, 7);
+			std::wofstream f(module_dir() + L"NeighborCraft_collision.txt");
+			f << L"Minecraft collision at y " << chest << L" around (" << ex << L", " << ez << L"), 1/8 block per char, x right, z down, @ = player\n";
+			for (int z = bz - 4; z <= bz + 4; ++z)
+				for (int sz = 0; sz < 8; ++sz)
+				{
+					for (int x = bx - 4; x <= bx + 4; ++x)
+					{
+						const auto it = g_bits.find(cell_key(x, by, z));
+						for (int sx = 0; sx < 8; ++sx)
+						{
+							const bool player = std::abs(x + (sx + 0.5) / 8.0 - ex) < 0.07 && std::abs(z + (sz + 0.5) / 8.0 - ez) < 0.07;
+							const bool solid = it != g_bits.end() && (it->second.box[sx * 8 + sy] >> sz & 1);
+							f << (player ? L'@' : solid ? L'#' : L'.');
+						}
+						f << L' ';
+					}
+					f << L"\n";
+				}
+			log(L"collision map written (F11)");
+			notify("NeighborCraft: collision map written");
 		}
 
 		// ---- F9 dump -----------------------------------------------------------------------------------------
@@ -1551,6 +1757,8 @@ namespace nc
 			minecraft_screen_mode(pc, live && g_minecraftScreen);
 		if (!live)
 		{
+			if (pawn)
+				hide_hn_cursor(pawn, false);
 			if (pc && pawn)
 				minecraft_view(pc, pawn, false, 1.0);
 			if (pawn)
@@ -1762,6 +1970,11 @@ namespace nc
 				g_frame, cx, cy, cz, yaw, pitch, roll, vfov, air ? "true" : "false");
 		}
 
+		g_controlsPawn = pawn;
 		minecraft_controls(pc);
+		hide_hn_cursor(pawn, true);
+		movement_report(pawn);
+		if (pressed(VK_F11) && g_haveEye)
+			collision_map(g_eye);
 	}
 }
