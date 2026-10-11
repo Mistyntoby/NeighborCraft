@@ -550,6 +550,22 @@ namespace nc
 		UObject *g_colliderLevel = nullptr;                           // the controller they were spawned under
 
 		/// FTransform in UE 4.20 (floats): rotation quaternion, translation, scale, each 16-byte aligned.
+		// Minecraft's drawn things as boxes (ShadowExport.java): per box its centre and three half-axes (blocks, world)
+		std::vector<double> g_shadowBoxes;
+		DWORD g_shadowBoxesAt = 0;
+		double g_hand3p[12] = {};      // Steve's main-hand item frame: origin, then unit x, y, z axes (Minecraft world)
+		double g_heldBoxHalf = 0.0;    // the held HN object's half size in Steve's hand (blocks), 0: none shown
+		bool g_heldCasting = false;    // the held HN object's own mesh casts (third person)
+		DWORD g_hand3pAt = 0;
+		bool shadow_boxes_fresh()
+		{
+			return GetTickCount() - g_shadowBoxesAt < 500;
+		}
+		bool hand3p_fresh()
+		{
+			return GetTickCount() - g_hand3pAt < 500;
+		}
+
 		struct alignas(16) Transform4
 		{
 			float rot[4] = {0, 0, 0, 1};
@@ -841,6 +857,28 @@ namespace nc
 			log(L"shadows: HN's lights: " + std::to_wstring(total) + L" (static " + std::to_wstring(byMobility[0]) + L", stationary " +
 				std::to_wstring(byMobility[1]) + L", movable " + std::to_wstring(byMobility[2]) + L"), " + std::to_wstring(shadowing) +
 				L" able to cast dynamic shadows (movable objects get shadows only from those)");
+			// the sun: a stationary directional light gives movable objects its sharp cascaded shadows only within its
+			// DynamicShadowDistanceStationaryLight; beyond (or with 0) each movable primitive gets a small per-object
+			// shadow, soft and blurred (the 18:12 screenshots: Steve's shadow a blob, the house's sharp). Within 40 m of
+			// the camera the cascades take them all, at least 3 cascades.
+			for (UObject *l : find_all(L"DirectionalLightComponent"))
+			{
+				const uint8_t *mobility = l->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility"));
+				float *distance = l->GetValuePtrByPropertyNameInChain<float>(STR("DynamicShadowDistanceStationaryLight"));
+				int32 *cascades = l->GetValuePtrByPropertyNameInChain<int32>(STR("DynamicShadowCascades"));
+				bool cast = false;
+				get_bool_property(l, STR("CastShadows"), cast);
+				if (!mobility || *mobility != 1 || !distance || !cascades || !cast)
+					continue;
+				const float before = *distance;
+				const int32 cascadesBefore = *cascades;
+				if (*distance < 4000.0f)
+					Call(l, STR("SetDynamicShadowDistanceStationaryLight")).set(STR("NewValue"), 4000.0f).invoke();
+				if (*cascades < 3)
+					Call(l, STR("SetDynamicShadowCascades")).set<int32>(STR("NewValue"), 3).invoke();
+				log(L"shadows: the sun " + l->GetFullName() + L": stationary, dynamic shadow distance " + std::to_wstring(int(before)) + L" cm -> " +
+					std::to_wstring(int(*distance)) + L", cascades " + std::to_wstring(cascadesBefore) + L" -> " + std::to_wstring(*cascades));
+			}
 			std::sort(nearest.begin(), nearest.end(), [](const Near &a, const Near &b) { return a.d < b.d; });
 			for (size_t i = 0; i < nearest.size() && i < 6; ++i)
 				log(L"shadows: near light: " + nearest[i].line);
@@ -930,6 +968,131 @@ namespace nc
 			}
 		}
 
+		/// Minecraft's drawn things, each a hidden shadow-casting cube of HN's (spawn_shadow_box): Steve's model as
+		/// Minecraft poses it this frame, the items in hands, dropped items, other entities, particles (ShadowExport.java
+		/// sends them every frame). A pool, grown as needed (24 a tick at most), each placed by one SetActorTransform;
+		/// the ones not needed this frame stop casting. Plus, in first person, the held HN object's own box at Steve's
+		/// hand (its mesh is on the camera there; in third person the object itself is in his hand and casts).
+		struct ShadowPool
+		{
+			UObject *level = nullptr;
+			std::vector<UObject *> boxes;
+			std::vector<bool> casting;
+			size_t used = 0;
+		} g_pool;
+		constexpr size_t kMaxPool = 420;
+
+		void pool_cast(size_t i, bool on)
+		{
+			if (g_pool.casting[i] == on)
+				return;
+			g_pool.casting[i] = on;
+			if (UObject **mesh = g_pool.boxes[i]->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); mesh && *mesh)
+				Call(*mesh, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), on).invoke();
+		}
+
+		/// A box from Minecraft's centre and half-axes (blocks) as an Unreal transform of the 1 m cube: Unreal's axes
+		/// are Minecraft's swapped (to_ue: x, z, y), which mirrors; the box is symmetric, so its third axis is taken as
+		/// Z x X (a proper rotation) with the length of the one Minecraft gave.
+		bool box_transform(const double *b, Transform4 &t)
+		{
+			const Vec3f o = to_ue(0.0, 0.0, 0.0), c = to_ue(b[0], b[1], b[2]);
+			auto dir = [&](const double *v) {
+				const Vec3f w = to_ue(v[0], v[1], v[2]);
+				return Vec3f{w.x - o.x, w.y - o.y, w.z - o.z};
+			};
+			Vec3f X = dir(b + 3), Y = dir(b + 6), Z = dir(b + 9);
+			auto len = [](const Vec3f &v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); };
+			const float lx = len(X), ly = len(Y), lz = len(Z);
+			if (lx < 0.01f || ly < 0.01f || lz < 0.01f)
+				return false;
+			X = {X.x / lx, X.y / lx, X.z / lx};
+			// Z made perpendicular to X, then Y = Z x X
+			const float d = Z.x * X.x + Z.y * X.y + Z.z * X.z;
+			Z = {Z.x - X.x * d, Z.y - X.y * d, Z.z - X.z * d};
+			const float lz2 = len(Z);
+			if (lz2 < 1e-4f)
+				return false;
+			Z = {Z.x / lz2, Z.y / lz2, Z.z / lz2};
+			const Vec3f Yn{Z.y * X.z - Z.z * X.y, Z.z * X.x - Z.x * X.z, Z.x * X.y - Z.y * X.x};
+			// rotation matrix (columns X, Yn, Z) to a quaternion
+			const float m00 = X.x, m10 = X.y, m20 = X.z, m01 = Yn.x, m11 = Yn.y, m21 = Yn.z, m02 = Z.x, m12 = Z.y, m22 = Z.z;
+			float qw, qx, qy, qz;
+			const float tr = m00 + m11 + m22;
+			if (tr > 0.0f)
+			{
+				const float s2 = std::sqrt(tr + 1.0f) * 2.0f;
+				qw = 0.25f * s2, qx = (m21 - m12) / s2, qy = (m02 - m20) / s2, qz = (m10 - m01) / s2;
+			}
+			else if (m00 > m11 && m00 > m22)
+			{
+				const float s2 = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+				qw = (m21 - m12) / s2, qx = 0.25f * s2, qy = (m01 + m10) / s2, qz = (m02 + m20) / s2;
+			}
+			else if (m11 > m22)
+			{
+				const float s2 = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+				qw = (m02 - m20) / s2, qx = (m01 + m10) / s2, qy = 0.25f * s2, qz = (m12 + m21) / s2;
+			}
+			else
+			{
+				const float s2 = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+				qw = (m10 - m01) / s2, qx = (m02 + m20) / s2, qy = (m12 + m21) / s2, qz = 0.25f * s2;
+			}
+			t.rot[0] = qx, t.rot[1] = qy, t.rot[2] = qz, t.rot[3] = qw;
+			t.pos[0] = c.x, t.pos[1] = c.y, t.pos[2] = c.z;
+			// the cube is 1 m: its scale is the box's full size in m (half-axis length in cm * 2 / 100)
+			t.scale[0] = lx / 50.0f, t.scale[1] = ly / 50.0f, t.scale[2] = lz / 50.0f;
+			return true;
+		}
+
+		void shadow_boxes_tick(UObject *pc, UObject *pawn)
+		{
+			ShadowPool &P = g_pool;
+			if (P.level != pc)
+			{
+				P = ShadowPool{}; // the old level's boxes went with it
+				P.level = pc;
+			}
+			std::vector<double> boxes = shadow_boxes_fresh() ? g_shadowBoxes : std::vector<double>{};
+			// the held HN object in first person: its box at Steve's hand (g_heldBoxHalf, set by carry_tick)
+			if (!boxes.empty() && g_mcFirstPerson && hand3p_fresh() && g_heldBoxHalf > 0.0)
+			{
+				const double h = g_heldBoxHalf, *f = g_hand3p;
+				const double box[12] = {f[0], f[1], f[2], f[3] * h, f[4] * h, f[5] * h, f[6] * h, f[7] * h, f[8] * h, f[9] * h, f[10] * h, f[11] * h};
+				boxes.insert(boxes.end(), box, box + 12);
+			}
+			const size_t want = std::min(boxes.size() / 12, kMaxPool);
+			for (int grown = 0; P.boxes.size() < want && grown < 24; ++grown)
+			{
+				UObject *a = spawn_shadow_box(pawn, Vec3f{g_eye.x, g_eye.y, g_eye.z - 5000.0f}, Vec3f{0.1f, 0.1f, 0.1f}, Rot3f{});
+				if (!a)
+					break;
+				P.boxes.push_back(a);
+				P.casting.push_back(true);
+			}
+			size_t used = 0;
+			for (size_t i = 0; i < want && i < P.boxes.size(); ++i)
+			{
+				Transform4 t;
+				if (!box_transform(&boxes[i * 12], t))
+					continue;
+				Call(P.boxes[used], STR("K2_SetActorTransform")).set(STR("NewTransform"), t).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+				pool_cast(used, true);
+				++used;
+			}
+			for (size_t i = used; i < P.boxes.size(); ++i)
+				pool_cast(i, false);
+			static size_t reported = size_t(-1);
+			if ((used == 0) != (reported == 0) || (reported != size_t(-1) && used > reported + 50))
+			{
+				reported = used;
+				log(L"shadows: " + std::to_wstring(used) + L" boxes of Minecraft's drawn things (Steve as posed, items, particles) cast HN shadows (" +
+					std::to_wstring(P.boxes.size()) + L" in the pool)");
+			}
+			P.used = used;
+		}
+
 		/// Steve's shadow: his model's boxes (Minecraft's player model: head 8 px, body 8x12x4, arms and legs 4x12x4; 32 px =
 		/// his height) as shadow-only boxes at his feet, facing his way, legs and arms swinging with his walk. HN's player
 		/// is a puppet without a shadow; Minecraft's Steve is a picture HN's lights never see.
@@ -945,6 +1108,21 @@ namespace nc
 		{
 			SteveShadow &s = g_steveShadow;
 			if (!g_haveFeet)
+				return;
+			// Minecraft's own poses arrive (shadow_boxes_tick): these approximate boxes stand aside (no shadow), and
+			// come back if they stop
+			const bool replaced = shadow_boxes_fresh();
+			static bool wasReplaced = false;
+			if (replaced != wasReplaced && s.level == pc)
+			{
+				wasReplaced = replaced;
+				for (UObject *part : s.parts)
+					if (part)
+						if (UObject **mesh = part->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); mesh && *mesh)
+							Call(*mesh, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), !replaced).invoke();
+				log(replaced ? L"shadows: Steve's shadow from Minecraft's own pose now" : L"shadows: no poses from Minecraft: Steve's approximate shadow again");
+			}
+			if (replaced && s.level == pc)
 				return;
 			// part: centre (px: right, forward, up), size (px: right, forward, up), pivot height (px) and swing sign
 			struct Part
@@ -1012,6 +1190,10 @@ namespace nc
 				if (g_lent.lent)
 					Call(g_lent.lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
 			}
+			if (alive)
+				for (UObject *box : g_pool.boxes)
+					Call(box, STR("K2_DestroyActor")).invoke();
+			g_pool = ShadowPool{};
 			g_steveShadow = SteveShadow{};
 			g_lent = LentLight{};
 		}
@@ -1859,6 +2041,25 @@ namespace nc
 			}
 		}
 
+		/// All the numbers of the array under `key` (into `out`, replacing it).
+		void json_doubles(const std::string &m, const char *key, std::vector<double> &out)
+		{
+			out.clear();
+			const size_t at = m.find(std::string("\"") + key + "\":[");
+			if (at == std::string::npos)
+				return;
+			const char *p = m.c_str() + at + std::strlen(key) + 4;
+			while (*p && *p != ']')
+			{
+				char *end = nullptr;
+				const double v = std::strtod(p, &end);
+				if (end == p)
+					break;
+				out.push_back(v);
+				p = end + (*end == ',' ? 1 : 0);
+			}
+		}
+
 		std::vector<int> g_pendingSet, g_pendingClear, g_pendingOpaque; // block changes from Minecraft, applied on the next tick
 		std::vector<std::string> g_throwRequests;      // tokens Minecraft dropped: HN throws the objects
 		std::string g_heldId, g_heldCls;               // the HN object in Minecraft's selected slot ("" none)
@@ -1928,6 +2129,13 @@ namespace nc
 				g_dirty.clear();
 				g_driving = false;
 				log(L"Minecraft's world is ready");
+			}
+			else if (m.find("\"t\":\"shadows\"") != std::string::npos)
+			{
+				json_doubles(m, "b", g_shadowBoxes);
+				g_shadowBoxesAt = GetTickCount();
+				if (json_numbers(m, "hand", g_hand3p, 12))
+					g_hand3pAt = GetTickCount();
 			}
 			else if (m.find("\"t\":\"blocks\"") != std::string::npos)
 			{
@@ -4270,8 +4478,11 @@ namespace nc
 				}
 				g_shownId.clear();
 			}
+			g_heldBoxHalf = 0.0;
 			if (g_heldId.empty())
 				return;
+			if (auto held = g_carried.find(g_heldId); held != g_carried.end() && held->second.shown)
+				g_heldBoxHalf = std::clamp(held->second.extent * std::clamp(18.0f / std::max(held->second.extent, 1.0f), 0.05f, 3.0f), 3.0f, 40.0f) / 100.0;
 			Carried *c = nullptr;
 			const auto found = g_carried.find(g_heldId);
 			if (found != g_carried.end() && found->second.confirmed)
@@ -4314,7 +4525,8 @@ namespace nc
 			// location for a split second"; the 12:43 log: every pickup's first "hand ok" line had "fist default").
 			// Without a fist for 600 ms (third person, or the arm not drawn) it is shown in front after all.
 			const DWORD waited = GetTickCount() - c->selectedAt;
-			if (!fistKnown && waited < 600)
+			const bool inHand3p = !g_mcFirstPerson && hand3p_fresh(); // third person: Steve's hand is where it goes
+			if (!fistKnown && !inHand3p && waited < 600)
 			{
 				if (c->shown)
 				{
@@ -4499,12 +4711,69 @@ namespace nc
 		/// placed in world space from the camera's pose each frame; it broke on one half of the turn (the user: turning
 		/// east it ended up far away). No world-space step is left on our side, and the world position it really has
 		/// is checked and logged (`carry: hand ...`).
+		/// Third person: the held object in Steve's hand (Minecraft's main-hand item frame, hand3p), upright, facing his
+		/// way, about the size Minecraft gives a held item, casting its own shadow. It was left on the camera, in front
+		/// of the view (the user: "in third person the hn items just show up covering the screen").
+		void carry_hand_third_person(Carried &c)
+		{
+			if (c.attachedTo)
+			{
+				carry_detach(c);
+				log(L"carry: " + c.actor->GetName() + L" in Steve's hand (third person)");
+			}
+			const float size = std::clamp(18.0f * grip_scale(c.actor) / std::max(c.extent, 1.0f), 0.05f, 3.0f);
+			set_actor_scale(c.actor, Vec3f{c.scale.x * size, c.scale.y * size, c.scale.z * size});
+			const Vec3f at = to_ue(g_hand3p[0], g_hand3p[1], g_hand3p[2]);
+			place_actor(c.actor, at, g_mcLookYaw + 90.0f);
+			// its middle on the hand (its pivot may be anywhere): by its drawn bounds. actor_bounds counts colliding
+			// components only, and a carried object has collision off: its bounds were empty, origin 0, and "at + (at -
+			// 0)" put it at twice the hand's coordinates, 60 m away (the 18:16 log: hand -5073 2299 175, object -10147
+			// 4598 350): never seen in third person
+			Call b(c.actor, STR("GetActorBounds"));
+			b.set_bool(STR("bOnlyCollidingComponents"), false);
+			const Vec3f *o = b.invoke() ? b.param<Vec3f>(STR("Origin")) : nullptr, *e = b.param<Vec3f>(STR("BoxExtent"));
+			if (o && e && e->x + e->y + e->z > 0.5f && std::hypot(o->x - at.x, o->y - at.y, o->z - at.z) < 150.0f)
+				place_actor(c.actor, Vec3f{at.x + (at.x - o->x), at.y + (at.y - o->y), at.z + (at.z - o->z)}, g_mcLookYaw + 90.0f);
+			// where it really is, once a second (the 18:0x session: placed, but not seen)
+			static DWORD nextLog = 0;
+			if (GetTickCount() > nextLog)
+			{
+				nextLog = GetTickCount() + 1000;
+				Vec3f w{};
+				actor_location(c.actor, w);
+				bool hidden = false;
+				get_bool_property(c.actor, STR("bHidden"), hidden);
+				const Vec3f sc = actor_scale(c.actor);
+				char line[360];
+				snprintf(line, sizeof(line), "carry: third person: %s at %.0f %.0f %.0f, %.0f cm from the camera (hand %.0f %.0f %.0f), hidden %d, scale %.2f, extent %.0f cm",
+					narrow(c.actor->GetName()).c_str(), w.x, w.y, w.z,
+					std::sqrt((w.x - g_mcCamera.x) * (w.x - g_mcCamera.x) + (w.y - g_mcCamera.y) * (w.y - g_mcCamera.y) + (w.z - g_mcCamera.z) * (w.z - g_mcCamera.z)),
+					at.x, at.y, at.z, int(hidden), sc.x, c.extent);
+				log(std::wstring(line, line + strlen(line)));
+			}
+			if (c.body && !g_heldCasting)
+			{
+				g_heldCasting = true;
+				Call(c.body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
+			}
+		}
+
 		void carry_hand_follow(UObject *camera, const Vec3f &loc, const Rot3f &rot)
 		{
 			const auto it = g_carried.find(g_shownId);
 			if (g_shownId.empty() || it == g_carried.end() || !it->second.actor || !camera)
 				return;
 			Carried &c = it->second;
+			if (!g_mcFirstPerson && hand3p_fresh())
+			{
+				carry_hand_third_person(c);
+				return;
+			}
+			if (c.body && g_heldCasting) // back to first person: on the camera, its own shadow off (its box casts)
+			{
+				g_heldCasting = false;
+				Call(c.body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
+			}
 			if (c.attachedTo != camera)
 			{
 				carry_detach(c);
@@ -5209,6 +5478,8 @@ namespace nc
 			for (UObject *part : g_steveShadow.parts)
 				if (part)
 					proxy_main_pass(part, g_proxiesShown), ++n;
+			for (UObject *box : g_pool.boxes)
+				proxy_main_pass(box, g_proxiesShown), ++n;
 			log(L"shadows: F6: " + std::to_wstring(n) + L" stand-ins " + (g_proxiesShown ? L"drawn in the picture too (where they are)" : L"shadow-only again"));
 			notify(g_proxiesShown ? "Shadow stand-ins visible (F6)" : "Shadow stand-ins hidden");
 		}
@@ -5418,6 +5689,7 @@ namespace nc
 			mesh_path_probe(pawn);
 			light_census(pawn);
 			steve_shadow_tick(pc, pawn);
+			shadow_boxes_tick(pc, pawn);
 			lend_shadows_tick(pc);
 			for (const std::string &id : g_throwRequests)
 				carry_throw(pc, pawn, id, g_heldId == id ? g_heldCls : std::string{});

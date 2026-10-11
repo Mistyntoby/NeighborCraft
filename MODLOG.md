@@ -528,3 +528,28 @@ Evidence kinds: [src] source/binary reading, [test] automated test, [game] seen 
 - Icons ([test] chair 23% -> 87% of the side): framed on the visible meshes and normalised in Minecraft.
 - Mining test now asks the server whether the block is there (an inventory count missed drops on reruns).
 - ReShade.ini: End toggles effects (KeyEffects=35), for tests with ReShade off.
+
+## Shadows of everything Minecraft draws, held objects in third person, sharper sun shadows, tint (2026-10-11 night)
+Tested by driving the game myself (simulated input, screenshots of the game window; ReShade off with End, stand-ins
+shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS.log.
+- Shadows from Minecraft's own geometry (ShadowExport.java, [test] shadowtest + [game] screenshots): every frame,
+  every entity within 32 blocks through its renderer's own steps: living entities (Steve too, in first person
+  where he isn't drawn) by LivingEntityRenderer.submit replayed (render offset, sleeping, scale, setupRotations,
+  flip, the renderer's scale, -1.501) and the model's setupAnim, each visible cube of the model; held items as
+  ItemInHandLayer places them; dropped items as ItemEntityRenderer does (bob, spin); other entities by their box;
+  the nearest particles. Items layer by layer in the layer's own transform; a flat (sprite) item as its opaque
+  pixels merged into rectangles (a sword: 19 boxes; one box per item made every item's shadow a square). HN gives
+  each box a hidden shadow-casting cube from a pool (shadow_boxes_tick, one SetActorTransform each); the six-box
+  approximation of Steve stands aside while poses arrive. [game]: Steve's shadow with the sword in first and third
+  person; sneaking lowers it ([test]).
+- Sun shadows were blurred blobs: the stationary sun had 1 dynamic cascade over 35 m (log: "dynamic shadow distance
+  3500 cm, cascades 1"); now 40 m and 3 cascades: Steve's shadow shows head, shoulders and body with sharp edges
+  ([game] screenshots before/after). HN's own movable props get the same.
+- Third person: the held HN object went to twice the hand's coordinates (60 m away): its bounds were read with
+  colliding components only, and a carried object has collision off (origin 0). Now by its drawn bounds: [game]
+  the trash can in Steve's hand, seen from the front.
+- Tint: the light's colour now from the whole picture's grey surfaces only (NeighborCraft.fx light_colour; a local
+  estimate fell back to grass where nothing grey was near); tools/tintcheck.py (emulation) and [game]: cobblestone
+  on a lawn stays grey.
+- Not resolved this round: in the second automated session right clicks on the lawn didn't place blocks (HN logged
+  "Minecraft use" on the landscape); blocks placed by command were fine. Not investigated.

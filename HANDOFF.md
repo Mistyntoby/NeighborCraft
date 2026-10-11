@@ -217,13 +217,12 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
-0000000. **Next (user, 2026-10-11 evening)** (P0):
-        1. Blocks get tinted by HN's whole picture (a green screen -> green blocks): NeighborCraft.fx GradeMatch.
-        2. Shadows of everything Minecraft draws, exactly in step: Steve's real model pose (animation, sneaking,
-           swinging), the held item, dropped items, particles. Steve's stand-in is six boxes with an approximate
-           walk swing now (steve_shadow_tick).
-        3. Third person: the held HN object is still on the camera (covers the screen); it belongs in Steve's hand.
-        Testing shadows: ReShade off with End, stand-ins visible with F6 (hnshot.ps1-style screenshots of the game).
+0000000. **Open (2026-10-11 night)**:
+        1. Shadows on NeighborCraft's own blocks (receiving): blocks are Minecraft's picture; HN's shadows fall on
+           HN's surfaces only. The compositor's local light strength already darkens blocks in HN's shade.
+        2. Right click didn't place blocks on the lawn in one automated session (unexplained, see MODLOG).
+        3. Particles cast as cubes of their size (billboards in Minecraft).
+        Testing shadows: ReShade off with End, stand-ins visible with F6; screenshots of the game window.
 
 000000. **Play-test 2026-10-11 afternoon** (P0), in this order, reading UE4SS.log:
         1. Interactions: right click the TV and a lamp (switches; `is electric: HN's action`), tap the radio (switches;
@@ -366,6 +365,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+2026-10-11 night: shadowtest (Steve's pose, sneak, dropped item, particles, sword silhouette), minetest, handtest, itemtest, carryuitest pass; in game (driven by me): Steve's and blocks' native shadows with ReShade off, sharper after the cascade change, held object in Steve's hand in third person, no green tint on cobblestone. HN DLL `8814de2e...` installed.
+
 2026-10-11 evening: keys unlock natively and are kept ([game] log); native block and Steve shadows seen with ReShade off ([game] screenshots); carryuitest, minetest (twice), handtest, itemtest, turntest pass; HN DLL `d16625f4...` installed.
 
 2026-10-11 afternoon: minetest (new, fails before the fix, OK after), handtest, itemtest pass; turntest STEADY; HN DLL `f3dd464e...` installed (md5 checked); interactions, hotbar rule, throw charge and shadows not run in game.
@@ -460,3 +461,13 @@ Earlier:
   (fist id), `CarryIcons.java` (framing), `ClientInput.java` (bar, barq), mixins json.
 - `tools/carryuitest.py`, `tools/iconcheck.py` (new), `tools/minetest.py` (server-side block check).
 - Reverse-engineering scripts (not in the repo, the lab's scratch): header dump in `<lab>/sdk/CXXHeaderDump`.
+
+## 19. 2026-10-11 night: files changed
+- `mc/.../ShadowExport.java` (new) + accessors `LivingEntityRendererInvoker`, `ModelPartAccessor`,
+  `ParticleEngineAccessor`, `ParticleGroupAccessor`, `ParticleAccessor`, `SingleQuadParticleAccessor`,
+  `ItemStackRenderStateAccessor`, `LayerRenderStateAccessor`, `SpriteContentsAccessor`; `GameRendererMixin`
+  (export after each frame); mixins json.
+- `hn/.../bridge.cpp`: "shadows" message, ShadowPool / box_transform / shadow_boxes_tick, Steve's approximation
+  steps aside, carry_hand_third_person (+ its diagnostics), the sun's cascades in light_census.
+- `hn/shaders/NeighborCraft.fx`: PS_Grey / light_colour (grey-surface light colour, global).
+- `tools/shadowtest.py`, `tools/tintcheck.py` (new).

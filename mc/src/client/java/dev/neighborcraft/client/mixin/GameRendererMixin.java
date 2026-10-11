@@ -86,5 +86,7 @@ abstract class GameRendererMixin {
 	@Inject(method = "render", at = @At("TAIL"))
 	private void passthrough$captureOverlay(final CallbackInfo ci) {
 		FrameExporter.captureOverlay(this.mainRenderTarget);
+		// after the frame is drawn: posing the models again for the shadow boxes can't disturb what was drawn
+		dev.neighborcraft.client.ShadowExport.frame();
 	}
 }
