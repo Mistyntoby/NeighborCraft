@@ -578,3 +578,22 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   road; with ReShade off the grey stand-ins show the same edge. Particles and item silhouettes stay shadow-only.
 - With ReShade off, blocks and Steve now show as grey boxes (HN draws the receivers).
 - Limits: a block face flush with an HN surface may read that surface's brightness; colour comes from the sun only.
+
+## Receivers: crash, flush stand-ins, first person, skin layers, flashes, stutter, freeze, Steam "Stopping" (2026-10-11 late)
+- Crash 19:11 (UE crash report: main.dll bridge.cpp:807 stand_in_receives -> SetMaterial): the receiver material and
+  its imported texture had no engine reference and were garbage-collected; the next SetMaterial used freed memory.
+  Now root-set (UE4SS SetRootSet) while the level lives, released on level change; the material's outer is the
+  material library's default object (a rooted object keeps its outer alive). Not yet run in game.
+- Freezes (the user): Minecraft's "waiting for HN's world: HN's ground at ... not on the client yet" at the plank
+  wall: the world probe found the stand-ins (drawn, flush) as ground inside Minecraft's own blocks. The probe now
+  ignores every stand-in; their collision is off three ways (profile NoCollision, all channels ignored, disabled;
+  the engine reads back 0).
+- Seams: block stand-ins exactly 1 block (0.99 left 1 cm gaps through which the compositor read the ground's light).
+- First person: the local player's model boxes only cast (kind 2): Minecraft doesn't draw him there.
+- Skin's outer layers (hat, jacket, sleeves, trousers) are in the boxes.
+- Grey flash on place: block stand-ins drawn 300 ms after they appear (they cast at once); on break: the client
+  tells HN at once (ClientBlockChangeMixin, "unreceive") before the server's change. Stand-in pixels peeking past
+  Minecraft's edges take the neighbouring Minecraft pixel (PS_Final).
+- First-time stutter: the shadow-box pool grows ahead (4 a tick to 240), the receiver material is made at level start.
+- Steam showed the game "Stopping" after the crash: the Gradle daemon started by start_minecraft.bat outlived it;
+  now --no-daemon.

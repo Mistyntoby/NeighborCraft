@@ -17,7 +17,6 @@ import org.joml.Vector3fc;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.ArmedModel;
 import net.minecraft.client.model.EntityModel;
@@ -53,8 +52,8 @@ import org.joml.Vector3f;
  * <ul>
  * <li>living entities (Steve too, also in first person where he isn't drawn): LivingEntityRenderer.submit replayed
  * (render offset, sleeping, scale, setupRotations, the flip, the renderer's scale, -1.501), the model's setupAnim
- * with the frame's render state, and every cube of the model's visible parts (skin overlays aside: they are inflated
- * copies); the items in their hands as ItemInHandLayer places them (the hand, -90 X, 180 Y, (±1, 2, -10)/16), sized
+ * with the frame's render state, and every cube of the model's visible parts (the skin's outer layers too: hat,
+ * jacket, sleeves and trousers stand out a little, and a receiver must be where the drawn surface is); the items in their hands as ItemInHandLayer places them (the hand, -90 X, 180 Y, (±1, 2, -10)/16), sized
  * by the item model's extents;</li>
  * <li>dropped items as ItemEntityRenderer places them (lifted off their model's bottom, the bob, the spin), sized by
  * their model's extents;</li>
@@ -70,15 +69,18 @@ public final class ShadowExport {
 
 	static final int MAX_BOXES = 400, MAX_PARTICLES = 120;
 	static final double RANGE = 32.0;
-	private static final Set<String> OVERLAYS = Set.of("hat", "jacket", "left_sleeve", "right_sleeve", "left_pants", "right_pants");
 	private static boolean failedOnce;
 
 	private static final class Out {
 		final StringBuilder b = new StringBuilder(16384);
 		final StringBuilder kinds = new StringBuilder(512);
 		int boxes;
-		/** The next boxes are a model's real surfaces (HN may draw them to light them: NeighborCraft.fx receivers). */
-		boolean surface;
+		/**
+		 * What the next boxes are: 0 shadow only (items, particles, other entities' boxes), 1 a model's real surface
+		 * (HN draws it to light it: NeighborCraft.fx receivers), 2 the local player's model (drawn only in third
+		 * person: in first person Minecraft doesn't draw him, and HN's grey boxes would show).
+		 */
+		int surface;
 		final Vec3 origin;
 
 		Out(final Vec3 origin) {
@@ -111,7 +113,7 @@ public final class ShadowExport {
 			num(w.x).append(',');
 			num(w.y).append(',');
 			num(w.z);
-			kinds.append(boxes > 0 ? "," : "").append(surface ? '1' : '0');
+			kinds.append(boxes > 0 ? "," : "").append(surface);
 			boxes++;
 		}
 
@@ -207,9 +209,9 @@ public final class ShadowExport {
 			pose.translate(0.0F, -1.501F, 0.0F);
 			EntityModel model = living.getModel();
 			model.setupAnim(s);
-			out.surface = true;
+			out.surface = e == minecraft.player ? 2 : 1;
 			part(model.root(), "", pose, out);
-			out.surface = false;
+			out.surface = 0;
 			float[] hand = null;
 			if (model instanceof ArmedModel armed && s instanceof ArmedEntityRenderState armedState) {
 				for (HumanoidArm arm : HumanoidArm.values()) {
@@ -261,9 +263,9 @@ public final class ShadowExport {
 		return null;
 	}
 
-	/** A model part's cubes and its children's, as drawn (visible ones only; skin overlays skipped). */
+	/** A model part's cubes and its children's, as drawn (visible ones only: the skin's outer layers as the skin has them). */
 	private static void part(final ModelPart p, final String name, final PoseStack pose, final Out out) {
-		if (!p.visible || OVERLAYS.contains(name)) {
+		if (!p.visible) {
 			return;
 		}
 

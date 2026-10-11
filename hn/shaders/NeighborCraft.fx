@@ -367,7 +367,27 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 
 	const float2 px = BUFFER_PIXEL_SIZE;
 	float3 color = tex2D(sComposite, wuv).rgb;
-	const float4 info = tex2D(sMcInfo, wuv);
+	float4 info = tex2D(sMcInfo, wuv);
+	// the stand-ins HN draws under Minecraft's blocks and models (receivers) only show as light: where one peeks past
+	// Minecraft's picture (an edge's anti-aliasing, a frame of lag in a turn), this pixel is HN's surface at the depth
+	// of a Minecraft surface right next to it: it takes that Minecraft pixel's colour (within 3 px)
+	if (info.x < 0.5 && info.z < 200.0)
+	{
+		[unroll] for (int r = 1; r <= 3; ++r)
+		{
+			[unroll] for (int k = 0; k < 8; ++k)
+			{
+				const float a = k * 0.785398;
+				const float2 o = float2(cos(a), sin(a)) * r * px;
+				const float4 n = tex2Dlod(sMcInfo, float4(wuv + o, 0, 0));
+				if (info.x < 0.5 && n.x > 0.5 && abs(n.y - info.z) < 0.05 + 0.01 * info.z)
+				{
+					color = tex2Dlod(sComposite, float4(wuv + o, 0, 0)).rgb;
+					info.x = 1.0;
+				}
+			}
+		}
+	}
 	// soften where Minecraft meets Hello Neighbor (Hello Neighbor's anti-aliasing never saw Minecraft)
 	if (EdgeSoftness > 0.0)
 	{

@@ -756,6 +756,7 @@ namespace nc
 		/// the ground (the user). Once per level; nullptr if any step fails (the stand-ins stay shadow-only).
 		std::wstring module_dir();
 		UObject *g_receiverMaterial = nullptr; // this level's (shadow_extras_reset forgets it)
+		UObject *g_receiverTexture = nullptr;
 		bool g_receiverTried = false;
 		UObject *receiver_material(UObject *context)
 		{
@@ -784,7 +785,9 @@ namespace nc
 			import.set<UObject *>(STR("WorldContextObject"), context).set(STR("Filename"), FString(file.c_str()));
 			UObject *const *texture = import.invoke() ? import.param<UObject *>(STR("ReturnValue")) : nullptr;
 			Call make(matLib, STR("CreateDynamicMaterialInstance"));
-			make.set<UObject *>(STR("WorldContextObject"), context).set<UObject *>(STR("Parent"), parent).set(STR("OptionalName"), NameParam{});
+			// its outer: the material library's default object (permanent), not a level's actor: kept alive (below), it
+			// would keep its outer, and with it an old level, alive
+			make.set<UObject *>(STR("WorldContextObject"), matLib).set<UObject *>(STR("Parent"), parent).set(STR("OptionalName"), NameParam{});
 			UObject *const *mid = make.invoke() ? make.param<UObject *>(STR("ReturnValue")) : nullptr;
 			if (!texture || !*texture || !mid || !*mid)
 			{
@@ -792,6 +795,12 @@ namespace nc
 				return nullptr;
 			}
 			Call(*mid, STR("SetTextureParameterValue")).set(STR("ParameterName"), name_param(STR("Diffuse"))).set<UObject *>(STR("Value"), *texture).invoke();
+			// kept alive: nothing of the engine's holds them (no UPROPERTY points at them while no stand-in uses the
+			// material), and the garbage collector freed them: the next SetMaterial used a freed material and the game
+			// crashed (19:11, in SetMaterial from stand_in_receives). Let go on the level change (shadow_extras_reset)
+			(*mid)->SetRootSet();
+			(*texture)->SetRootSet();
+			g_receiverTexture = *texture;
 			material = *mid;
 			log(L"receivers: HN's base_m with a flat grey texture: stand-ins of blocks and models are drawn by HN to light them");
 			return material;
@@ -835,6 +844,11 @@ namespace nc
 					*mobility = 2;
 				Call(*mesh, STR("SetMobility")).set<uint8_t>(STR("NewMobility"), 2).invoke();
 				Call(*mesh, STR("SetStaticMesh")).set<UObject *>(STR("NewMesh"), cube).invoke();
+				// no collision, three ways (a call that doesn't take is silent: SetMobility didn't): the profile, every channel
+				// ignored, collision off. With collision the world probe found them as ground: HN's "ground" inside
+				// Minecraft's own blocks, which Minecraft waited for and held Steve 5 s (the user: "freezing randomly")
+				Call(*mesh, STR("SetCollisionProfileName")).set(STR("InCollisionProfileName"), name_param(STR("NoCollision"))).invoke();
+				Call(*mesh, STR("SetCollisionResponseToAllChannels")).set<uint8_t>(STR("NewResponse"), 0).invoke(); // ECR_Ignore
 				Call(*mesh, STR("SetCollisionEnabled")).set<uint8_t>(STR("NewType"), 0).invoke(); // no collision
 				Call(*mesh, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
 				set_bool_property(*mesh, STR("bCastDynamicShadow"), true);
@@ -862,6 +876,9 @@ namespace nc
 				get_bool_property(*mesh, STR("bCastDynamicShadow"), dynamic);
 				get_bool_property(*mesh, STR("bRenderInMainPass"), mainPass);
 				get_bool_property(*mesh, STR("bHiddenInGame"), hidden);
+				Call ce(*mesh, STR("GetCollisionEnabled"));
+				const uint8_t *collision = ce.invoke() ? ce.param<uint8_t>(STR("ReturnValue")) : nullptr;
+				log(L"shadows: a stand-in's collision as the engine has it: " + (collision ? std::to_wstring(*collision) : std::wstring(L"?")) + L" (0: none)");
 				const uint8_t *mobility = (*mesh)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility"));
 				log(L"shadows: a stand-in as the engine has it: CastShadow " + std::to_wstring(cast) + L", bCastDynamicShadow " +
 					std::to_wstring(dynamic) + L", bRenderInMainPass " + std::to_wstring(mainPass) + L", hidden " + std::to_wstring(hidden) +
@@ -870,11 +887,43 @@ namespace nc
 			return *actor;
 		}
 
+		struct PendingReceiver
+		{
+			UObject *actor;
+			DWORD at;
+		};
+		std::vector<PendingReceiver> g_pendingReceivers;
+
+		/// New block stand-ins become receivers when their time comes (still there: not removed meanwhile).
+		void pending_receivers_tick()
+		{
+			const DWORD now = GetTickCount();
+			for (auto it = g_pendingReceivers.begin(); it != g_pendingReceivers.end();)
+			{
+				if (now < it->at)
+				{
+					++it;
+					continue;
+				}
+				for (auto &[key, actor] : g_shadows)
+					if (actor == it->actor)
+					{
+						stand_in_receives(actor, true);
+						break;
+					}
+				it = g_pendingReceivers.erase(it);
+			}
+		}
+
 		UObject *spawn_shadow(UObject *context, const Vec3f &centre)
 		{
-			UObject *a = spawn_shadow_box(context, centre, Vec3f{0.99f, 0.99f, 0.99f}, Rot3f{});
+			// exactly a block: flush with its neighbours (a 0.99 stand-in left 1 cm gaps, through which the compositor read
+			// the ground's light: seams across walls, the user)
+			UObject *a = spawn_shadow_box(context, centre, Vec3f{1.0f, 1.0f, 1.0f}, Rot3f{});
+			// drawn (a receiver) only once Minecraft's picture has the block: a new block reaches Minecraft's picture a few
+			// frames after HN hears of it, and the grey stand-in showed in between (the user)
 			if (a && receiver_material(context))
-				stand_in_receives(a, true);
+				g_pendingReceivers.push_back({a, GetTickCount() + 300});
 			return a;
 		}
 
@@ -1117,6 +1166,7 @@ namespace nc
 			{
 				P = ShadowPool{}; // the old level's boxes went with it
 				P.level = pc;
+				receiver_material(pawn); // made now, not at the first block placed (an import and a material: a hitch)
 			}
 			std::vector<double> boxes = shadow_boxes_fresh() ? g_shadowBoxes : std::vector<double>{};
 			// the held HN object in first person: its box at Steve's hand (g_heldBoxHalf, set by carry_tick)
@@ -1127,7 +1177,11 @@ namespace nc
 				boxes.insert(boxes.end(), box, box + 12);
 			}
 			const size_t want = std::min(boxes.size() / 12, kMaxPool);
-			for (int grown = 0; P.boxes.size() < want && grown < 24; ++grown)
+			// grown ahead of need, 4 a tick up to 240 boxes, so that the first burst of particles (breaking a block)
+			// doesn't spawn dozens of actors in one frame (the user: a stutter the first time); beyond, as needed
+			const size_t ahead = std::min<size_t>(240, kMaxPool);
+			const int perTick = P.boxes.size() < want ? 24 : 4;
+			for (int grown = 0; P.boxes.size() < std::max(want, ahead) && grown < perTick; ++grown)
 			{
 				UObject *a = spawn_shadow_box(pawn, Vec3f{g_eye.x, g_eye.y, g_eye.z - 5000.0f}, Vec3f{0.1f, 0.1f, 0.1f}, Rot3f{});
 				if (!a)
@@ -1135,6 +1189,7 @@ namespace nc
 				P.boxes.push_back(a);
 				P.casting.push_back(true);
 				P.receiving.push_back(-1);
+				pool_cast(P.boxes.size() - 1, false); // not used yet
 			}
 			size_t used = 0;
 			for (size_t i = 0; i < want && i < P.boxes.size(); ++i)
@@ -1144,7 +1199,10 @@ namespace nc
 					continue;
 				Call(P.boxes[used], STR("K2_SetActorTransform")).set(STR("NewTransform"), t).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
 				pool_cast(used, true);
-				const int receive = i < g_shadowKinds.size() && g_shadowKinds[i] == 1 && receiver_material(pawn) ? 1 : 0;
+				// a model's surface is drawn (lit by HN for the compositor); the local player's only in third person: in first
+				// person Minecraft doesn't draw him, and HN's grey boxes would be what one sees looking down
+				const int kind = i < g_shadowKinds.size() ? g_shadowKinds[i] : 0;
+				const int receive = (kind == 1 || (kind == 2 && !g_mcFirstPerson)) && receiver_material(pawn) ? 1 : 0;
 				if (P.receiving[used] != receive)
 				{
 					P.receiving[used] = receive;
@@ -1337,8 +1395,13 @@ namespace nc
 			g_pool = ShadowPool{};
 			g_steveShadow = SteveShadow{};
 			g_lent = LentLight{};
-			g_receiverMaterial = nullptr;
+			if (g_receiverMaterial)
+				g_receiverMaterial->ClearRootSet();
+			if (g_receiverTexture)
+				g_receiverTexture->ClearRootSet();
+			g_receiverMaterial = g_receiverTexture = nullptr;
 			g_receiverTried = false;
+			g_pendingReceivers.clear();
 		}
 
 		void destroy_colliders(bool alive)
@@ -2272,6 +2335,14 @@ namespace nc
 				g_dirty.clear();
 				g_driving = false;
 				log(L"Minecraft's world is ready");
+			}
+			else if (m.find("\"t\":\"unreceive\"") != std::string::npos)
+			{
+				// broken on the client (the server's change comes a tick later): its stand-in stops being drawn now
+				double p3[3];
+				if (json_vec3(m, "p", p3))
+					if (auto it = g_shadows.find(cell_key(int(p3[0]), int(p3[1]), int(p3[2]))); it != g_shadows.end())
+						stand_in_receives(it->second, false);
 			}
 			else if (m.find("\"t\":\"shadows\"") != std::string::npos)
 			{
@@ -5835,6 +5906,7 @@ namespace nc
 			light_census(pawn);
 			steve_shadow_tick(pc, pawn);
 			shadow_boxes_tick(pc, pawn);
+			pending_receivers_tick();
 			lend_shadows_tick(pc);
 			light_colour_tick(pc);
 			for (const std::string &id : g_throwRequests)
@@ -5852,6 +5924,14 @@ namespace nc
 		// and on Act 1's road the floor under Steve stopped being found (the recorder: the road's blocks emptying
 		// around him, then a fall).
 		g_probeIgnoreNow = g_probeIgnore;
+		// the shadow stand-ins and receivers are ours, not HN's world (whatever their collision says)
+		for (auto &[key, actor] : g_shadows)
+			g_probeIgnoreNow.push_back(actor);
+		for (size_t i = 0; i < g_pool.used && i < g_pool.boxes.size(); ++i)
+			g_probeIgnoreNow.push_back(g_pool.boxes[i]);
+		for (UObject *part : g_steveShadow.parts)
+			if (part)
+				g_probeIgnoreNow.push_back(part);
 		for (UObject *component : g_nearPhysics)
 		{
 			Call owner(component, STR("GetOwner"));
