@@ -180,8 +180,8 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Door remnants (static probe baked mid-swing leaf/handle) | BUILT, 2nd cause fixed | user still saw a remnant at 20:31: the closed leaf was in the static world until re-probed; now cleared on the first move (MODLOG night section); **not yet run** |
 | Collision leeway | BUILT | moving parts their own size, static sub-cells need geometry in their middle; **not yet run** |
 | Doors stuck open | BUILT, likely fixed | cause: HN capsule (51 cm) inside the leaf + our nudges on the 747 kg physics leaf; both fixed; no recent report of stuck doors |
-| Forced crawl at doors / objects on head | BUILT (3 causes) | shape race; furniture clearance; 3rd (20:44 session, 4 crawls at Door_inward_2092): the static probe re-baked the swinging leaf in the cells cleared around Steve, now masked with `g_dynMask`; **not yet run in game** |
-| Stops running/jumping downhill | BUILT, VERIFIED in the drive test | cause: the ground-wait hold zeroed speed (13 holds of ~50 ms in `mc-client.log` 20:03); drive test `--downhill --stream 1.6 --jump` 4.0 -> 6.7 m/s, 0 dips; **not yet run in game** |
+| Forced crawl at doors / objects on head | BUILT (invariant) | 4 causes so far (MODLOG); now nothing is sent inside Steve's current hitbox above 0.15 m; 21:30 session still crawled 9 times before it; **not yet run in game** |
+| Stops running/jumping downhill | VERIFIED in drive test (13 -> 0 mid-air stops), cause proven from the 21:30 recorder | the short-wait clamp held him in the air; **not yet run in game**; recorder event MIDAIR_STOP will catch any left |
 | Slope smoothness (micro-steps) | BUILT, VERIFIED in the drive test | step-down + camera height filter; downhill 4.87 -> 5.6 m/s, worst camera jolt 19.8 -> 7.2 cm; **feel not yet judged by the user** |
 | Cabinets / wardrobes / TV-stand drawers open | VERIFIED | log `OnIsActionComponent(Door1) yes`, user |
 | Right-click targeting (nearest hit) | VERIFIED partly | ray now Minecraft's; **bug seen**: carpet in a doorway activated the door via the bounds fallback (log 02:01) |
@@ -196,7 +196,7 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Shutdown crash | VERIFIED fixed | no CrashDumps since |
 | Cutscene glitch (MC kit/HUD/drive during cutscene) | VERIFIED gate fires (`cutscene: Minecraft waits` / `cutscene over`) | the user hasn't re-judged the item glitch |
 | Inventory left-click | VERIFIED (log 02:01: MC button 1 = left picks the full stack) | |
-| Carry: pickup/hold/place/throw | pickup, place, throw VERIFIED in game (20:45 log); empty-hand rule, sound, swing VERIFIED in `tools/handtest.py` (no HN); carrying arm drawn and fist position VERIFIED by hand-layer screenshot + numbers; **object on the fist in HN: not yet seen in game** | §9, MODLOG late section |
+| Carry: pickup/hold/place/throw | REGRESSED 21:30 (my exclusion handed props to HN's grab), fixed: BUILT; empty-hand rule/sound/swing/arm VERIFIED in `tools/handtest.py`; **HN-side dispatch and object on the fist not yet run in game** | §9, MODLOG night 2 |
 | Per-item inventory icons | OPEN | one generic icon (ours) |
 | Lighting/shadows, transparency, GPU sharing, macOS, block mining in HN geometry, Neighbor combat | OPEN | not started |
 
@@ -214,6 +214,12 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 - Door capsule.
 
 ## 6. Outstanding issues (priority order)
+
+0. **Play-test night 2** (P0): hold right click on the video recorder / a chair with an empty hand (our pickup,
+   never HN's grab; log `carry: pickup started`), with a sword (refused, no grab), TV/switch (HN's action), place,
+   Q-throw; sprint-jump down the road (recorder: no MIDAIR_STOP); doors and pushing chairs while standing in them
+   (no POSE_FORCED; log `collision: ... kept out`). Open question: a level start's teleport before HN's floor arrives
+   can drop Steve into a block-to-be (seen only in the test tools so far).
 
 1. **Run the newest build once** (P1). Check: sprint and sprint-jump down Act 1's road (no stops; `waiting for HN's
    world` lines may still appear, they must no longer stop Steve), how the slope feels, opening kitchen stands and
@@ -312,6 +318,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+Night 2: drive tests and handtest pass on the final code; HN DLL md5 `20224a47…` installed; nothing of night 2 run in game.
+
 Late update: `tools/handtest.py` passes (4 pickup cases, fist on screen where drawn); drive tests unchanged; HN DLL md5 `9e7ff2de…` installed, not run in game.
 
 Night update: drive tests of the landing fix (MODLOG); HN DLL md5 `b3ffa30e…` installed, not run in game.

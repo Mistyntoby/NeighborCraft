@@ -266,3 +266,32 @@ Evidence: the 20:44 session (`UE4SS.log`, recorder `session-20261010-204419`), `
 17. FrameExporter clears the hand from Minecraft's frame after copying it: screenshots need the hand layer.
 18. Minecraft 26.3 names: `GameRenderer.mainCamera()`, `GameRenderer.mainRenderTarget()`,
     `FirstPersonHandsAndItemsRenderer` (was ItemInHandRenderer).
+
+## Pickup regression, mid-air stops jumping downhill, crawl invariant (2026-10-10, night 2)
+Evidence: the 21:30 session (`UE4SS.log`, `mc-client.log`, recorder `session-20261010-213013`), drive tests.
+- Pickup regression (mine, previous round): pickup refused anything HN's OnIsActionComponent says yes to, to keep
+  TVs and switches out; HN says yes for its loose props too (BP_Video_Recorder, BP_Dining_chair: there "HN's action"
+  is HN's own grab), so every right click on them went on to the injected E = HN's native grab (log: "HN's action on
+  BP_Video_Recorder_apartments_55 (its OnIsActionComponent)"). HN's own bindings: E for pickup/action, right mouse
+  only for put-down/throw: nothing native intercepts the right click. Fix: only TV/Switch/Tumbler/Lamp classes are
+  excluded; a carryable object under the crosshair is always ours (with something in the hand: "Empty your hand
+  first", never HN's grab). Starts and cancels (release, target lost/out of reach, another object) are logged.
+- Mid-air stops jumping down the road: recorder ticks 1846, 1862, 1895, 1942: in the air, falling 0.15-0.45 a tick,
+  then 0 with the fall speed zeroed, each at a "waiting for HN's world" (21:31:55-21:32:00, ~50 ms). The short-wait
+  rule (first round) forbade every move down; the missing block was a block below him, out of that tick's reach.
+  Now only a move into a missing block is cut (to its top; from inside its level, not down), the speed is kept, and
+  the check reaches down as far as the tick's fall. New recorder event MIDAIR_STOP (falling in the air, the fall cut
+  to under half without a vertical collision). Drive test `--downhill --stream D --jump` (3 runs each): 13 mid-air
+  stops before, 0 on the slope after (the only ones left: right after the test's teleports onto ground still
+  missing, where holding him is the point); 6.8-7.0 m/s, 0 speed dips, no falls; walking 5.61; ramp/stairs course
+  5.92/5.48.
+- Forced crawl, 9 episodes in the 21:30 session (door leaf 0.17-0.4 m above his feet at tick 2441, cells at his
+  waist pushing chairs at 1337; 3 one-tick ones the recorder couldn't show: it collected boxes only up to 0.4 above
+  his crawling box). Invariant when blocks are sent: no collision cell, floor or ceiling inside Steve's current
+  hitbox from 0.15 above his feet (3 cm around). Fixed geometry can't be there, so whatever is moved into him; his
+  current size keeps a legit low ceiling (it is above his crouched box). Logged as "collision: N pieces inside
+  Steve kept out of block ...". The recorder now collects boxes up to standing height in any pose.
+
+### Gotchas
+19. HN's OnIsActionComponent says yes for loose props: it is not a "fixed interactable" test.
+20. Drive/hand tests teleport, then send the floor: a tick in between can drop Steve into a block-to-be (stuck).

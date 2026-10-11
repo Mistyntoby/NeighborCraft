@@ -35,7 +35,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * (HEADROOM: something above stopped the lift);
  * VELOCITY_RESET: horizontal speed fell under 30% in one tick;
  * SPRINT_LOST: sprinting ended; POSE_FORCED: crouching or crawling without the sneak key;
- * GROUND_CHECK_MISMATCH: on the ground with no collision surface under the feet, or the reverse.
+ * GROUND_CHECK_MISMATCH: on the ground with no collision surface under the feet, or the reverse;
+ * MIDAIR_STOP: falling in the air, the fall cut to under half with no vertical collision (something held him).
  */
 public final class CollisionRecorder {
 	private static final int KEEP = 200;   // ticks in memory (10 s)
@@ -94,7 +95,9 @@ public final class CollisionRecorder {
 		Vec3 resolved = player.position().subtract(posBefore);
 		AABB bb = player.getBoundingBox();
 		List<AABB> boxes = new ArrayList<>();
-		for (VoxelShape shape : player.level().getBlockCollisions(player, bb.inflate(0.8, 0.4, 0.8).expandTowards(attempted))) {
+		// around him up to standing height whatever his pose (crawling, his box is 0.6: what forced it was out of sight)
+		AABB around = new AABB(bb.minX, bb.minY, bb.minZ, bb.maxX, Math.max(bb.maxY, bb.minY + 1.8), bb.maxZ);
+		for (VoxelShape shape : player.level().getBlockCollisions(player, around.inflate(0.8, 0.4, 0.8).expandTowards(attempted))) {
 			boxes.addAll(shape.toAabbs());
 		}
 
@@ -129,6 +132,11 @@ public final class CollisionRecorder {
 				boolean headroom = boxes.stream().anyMatch(box -> box.intersects(lifted));
 				labels.add(String.format(Locale.ROOT, "STEP_UP_FAILED %.3f%s", height, headroom ? " HEADROOM" : ""));
 			}
+		}
+
+		// in the air, falling, and the fall cut short with nothing under him (no vertical collision): a hang in mid-air
+		if (!groundBefore && attempted.y < -0.01 && resolved.y > attempted.y * 0.5 + 1.0E-4 && !player.verticalCollision) {
+			labels.add(String.format(Locale.ROOT, "MIDAIR_STOP %.3f of %.3f", resolved.y, attempted.y));
 		}
 
 		double speed = Math.hypot(player.getDeltaMovement().x, player.getDeltaMovement().z);

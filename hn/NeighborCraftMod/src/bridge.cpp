@@ -1038,6 +1038,60 @@ namespace nc
 			if (const auto dyn = g_dynBits.find(key); dyn != g_dynBits.end())
 				for (int i = 0; i < 64; ++i)
 					bits[i] |= dyn->second[i];
+			float ceil[16];
+			std::memcpy(ceil, b.ceiling, sizeof(ceil));
+			// Never collision inside Steve's current hitbox: HN's fixed geometry can't be there (Minecraft keeps him out
+			// of it), so whatever is found there moved into him, and Minecraft, finding no room to stand, forces the
+			// crawl. The 21:30 session still had 9 forced crawls (the door leaf 0.17-0.4 m above his feet at tick
+			// 2441, a chair's cells at his waist at 1337) after the moving parts' own clearance: whatever the source,
+			// it is kept out when sent. His current size, not his standing one: crouched under something low, that
+			// stays (it is above him). From 0.15 above his feet (HN knows his feet a frame late: the ground under him
+			// on a slope is never touched), 3 cm to spare around.
+			if (g_haveFeet)
+			{
+				double fx, fy, fz;
+				to_mc(g_feet, fx, fy, fz);
+				const double hw = g_steveWidth / 200.0 + 0.03;
+				const double x0 = fx - hw, x1 = fx + hw, z0 = fz - hw, z1 = fz + hw, y0 = fy + 0.15, y1 = fy + g_steveHeight / 100.0;
+				if (bx < x1 && bx + 1 > x0 && bz < z1 && bz + 1 > z0 && by < y1 && by + 1 > y0)
+				{
+					int removed = 0;
+					for (int sx = 0; sx < 8; ++sx)
+					{
+						const double cx0 = bx + sx / 8.0;
+						if (cx0 + 0.125 <= x0 || cx0 >= x1)
+							continue;
+						for (int sz = 0; sz < 8; ++sz)
+						{
+							const double cz0 = bz + sz / 8.0;
+							if (cz0 + 0.125 <= z0 || cz0 >= z1)
+								continue;
+							for (int sy = 0; sy < 8; ++sy)
+							{
+								const double cy0 = by + sy / 8.0;
+								if (cy0 >= y0 && cy0 < y1 && (bits[sx * 8 + sy] >> sz & 1u))
+									bits[sx * 8 + sy] &= uint8_t(~(1u << sz)), ++removed;
+							}
+							const double top = by + level[sx * 8 + sz];
+							if (level[sx * 8 + sz] > 0.0f && top > y0 && top < y1)
+								level[sx * 8 + sz] = 0.0f, ++removed;
+						}
+					}
+					for (int c = 0; c < 16; ++c)
+					{
+						const double cx0 = bx + (c >> 2) * 0.25, cz0 = bz + (c & 3) * 0.25, under = by + ceil[c];
+						if (ceil[c] > 0.0f && cx0 + 0.25 > x0 && cx0 < x1 && cz0 + 0.25 > z0 && cz0 < z1 && under > y0 && under < y1)
+							ceil[c] = 0.0f, ++removed;
+					}
+					static DWORD nextLog = 0;
+					if (removed && GetTickCount() > nextLog)
+					{
+						nextLog = GetTickCount() + 2000;
+						log(L"collision: " + std::to_wstring(removed) + L" pieces inside Steve kept out of block " + std::to_wstring(bx) + L" " +
+							std::to_wstring(by) + L" " + std::to_wstring(bz) + (g_dynBits.count(key) ? L" (a moving part is there)" : L" (static)"));
+					}
+				}
+			}
 			int set = 0;
 			for (int i = 0; i < 64; ++i)
 				set += std::popcount(bits[i]);
@@ -1056,7 +1110,7 @@ namespace nc
 					out.clear();
 				return any;
 			};
-			const bool anyFloor = heights(level, 64, floor), anyCeiling = heights(b.ceiling, 16, ceiling);
+			const bool anyFloor = heights(level, 64, floor), anyCeiling = heights(ceil, 16, ceiling);
 			if (set == 0 && !anyFloor && !anyCeiling)
 				return 0;
 			static const char digits[] = "0123456789abcdef";
@@ -1410,7 +1464,8 @@ namespace nc
 		void carry_answer(const std::string &id, bool ok, const std::string &why);
 		bool carry_place(UObject *pc, UObject *pawn);
 		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls);
-		bool carry_start_pickup(UObject *pawn);
+		void carry_start_pickup(UObject *actor, UObject *body);
+		UObject *pickup_target(UObject *pawn, UObject **bodyOut);
 		void carry_cancel_pickup();
 		bool actor_bounds(UObject *actor, Vec3f &origin, Vec3f &extent);
 		UObject *g_controlsPc = nullptr;
@@ -1990,13 +2045,30 @@ namespace nc
 		void right_click(UObject *)
 		{
 			const int e = edge(VK_RBUTTON);
-			// carrying: a held HN object is put down; a loose object under the crosshair starts a pickup (hold)
-			// (a hand holding a Minecraft item uses it instead: one thing in the hand at a time)
-			if (e > 0 && g_controlsPawn &&
-				(!g_heldId.empty() ? (carry_place(g_controlsPc, g_controlsPawn), true) : g_handEmpty && carry_start_pickup(g_controlsPawn)))
+			// carrying: a held HN object is put down; a loose object under the crosshair starts a pickup (hold). A
+			// carryable object never goes on to HN's action key, which is HN's own grab for its loose props: with
+			// something in the hand it is refused (one thing in the hand at a time), not grabbed the HN way.
+			if (e > 0 && g_controlsPawn)
 			{
-				g_rightClickCarry = true;
-				return;
+				if (!g_heldId.empty())
+				{
+					carry_place(g_controlsPc, g_controlsPawn);
+					g_rightClickCarry = true;
+					return;
+				}
+				UObject *body = nullptr;
+				if (UObject *target = pickup_target(g_controlsPawn, &body))
+				{
+					if (g_handEmpty)
+						carry_start_pickup(target, body);
+					else
+					{
+						notify("Empty your hand first");
+						log(L"carry: " + target->GetName() + L" not picked up: the hand isn't empty");
+					}
+					g_rightClickCarry = true;
+					return;
+				}
 			}
 			if (e < 0 && g_rightClickCarry)
 			{
@@ -2647,10 +2719,11 @@ namespace nc
 				return nullptr;
 			if (interactive_actor(*actor)) // a door, or one of HN's story items (keys...): HN's own pickup
 				return nullptr;
-			// what HN itself uses (its OnIsActionComponent says yes: cabinets, switches...) is used, not carried; nor TVs, switches, lamps (Act
-			// 1's TV is a loose physics object)
-			if (flat_actionable(*actor, *component) == 1 || class_contains(*actor, L"TV") || class_contains(*actor, L"Switch") ||
-				class_contains(*actor, L"Tumbler") || class_contains(*actor, L"Lamp"))
+			// TVs, switches and lamps are used, not carried (Act 1's TV is a loose physics object). Not decided by HN's
+			// OnIsActionComponent: it says yes for its loose props too (BP_Video_Recorder, BP_Dining_chair: there its
+			// "action" is its own grab), and excluding those handed every pickup to HN's grab (the 21:31 session).
+			if (class_contains(*actor, L"TV") || class_contains(*actor, L"Switch") || class_contains(*actor, L"Tumbler") ||
+				class_contains(*actor, L"Lamp"))
 				return nullptr;
 			if (bodyOut)
 				*bodyOut = *component;
@@ -2904,20 +2977,19 @@ namespace nc
 			return true;
 		}
 
-		bool carry_start_pickup(UObject *pawn)
+		void carry_start_pickup(UObject *actor, UObject *body)
 		{
-			UObject *body = nullptr;
-			UObject *actor = pickup_target(pawn, &body);
-			if (!actor)
-				return false;
 			g_pickup = {actor, body, GetTickCount(), true};
-			return true;
+			log(L"carry: pickup started on " + actor->GetName() + L" (hold " + std::to_wstring(kPickupHold) + L" ms)");
 		}
 
 		void carry_cancel_pickup()
 		{
 			if (g_pickup.active)
+			{
 				notify("");
+				log(L"carry: pickup cancelled (released after " + std::to_wstring(GetTickCount() - g_pickup.start) + L" ms)");
+			}
 			g_pickup.active = false;
 		}
 
@@ -2936,6 +3008,7 @@ namespace nc
 				{
 					g_pickup.active = false;
 					notify("");
+					log(L"carry: pickup cancelled (" + std::wstring(now ? L"looking at another object" : L"target lost or out of reach") + L")");
 				}
 				else if (held >= kPickupHold)
 				{

@@ -82,27 +82,42 @@ abstract class EntityMoveMixin {
 	 * way (the blocks at and below his feet: walls arriving late don't drop him, and moving parts beside him update
 	 * all the time).
 	 */
+	/** The blocks of HN's ground found missing by the last check (and whether a whole chunk was). */
 	@Unique
-	private static boolean passthrough$worldAround(final LocalPlayer player) {
+	private static final java.util.List<BlockPos> passthrough$missing = new java.util.ArrayList<>();
+
+	@Unique
+	private static boolean passthrough$chunkMissing;
+
+	@Unique
+	private static boolean passthrough$worldAround(final LocalPlayer player, final double down) {
 		AABB box = player.getBoundingBox().inflate(1.0, 0.0, 1.0);
 		String missing = null;
+		passthrough$missing.clear();
+		passthrough$chunkMissing = false;
 		int x0 = ((int) Math.floor(box.minX)) >> 4, x1 = ((int) Math.floor(box.maxX)) >> 4;
 		int z0 = ((int) Math.floor(box.minZ)) >> 4, z1 = ((int) Math.floor(box.maxZ)) >> 4;
 		for (int cx = x0; cx <= x1 && missing == null; cx++) {
 			for (int cz = z0; cz <= z1 && missing == null; cz++) {
 				if (!player.level().getChunkSource().hasChunk(cx, cz)) {
 					missing = "chunk " + cx + " " + cz;
+					passthrough$chunkMissing = true;
 				}
 			}
 		}
 
+		// every missing block at and below the feet, down to where this tick's fall can reach
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 		int feet = (int) Math.floor(box.minY + 1.0E-3);
-		for (int x = (int) Math.floor(box.minX); x <= (int) Math.floor(box.maxX) && missing == null; x++) {
-			for (int z = (int) Math.floor(box.minZ); z <= (int) Math.floor(box.maxZ) && missing == null; z++) {
-				for (int y = feet - 1; y <= feet && missing == null; y++) {
+		int lowest = Math.min(feet - 1, (int) Math.floor(box.minY + Math.min(0.0, down)) - 1);
+		for (int x = (int) Math.floor(box.minX); x <= (int) Math.floor(box.maxX) && !passthrough$chunkMissing; x++) {
+			for (int z = (int) Math.floor(box.minZ); z <= (int) Math.floor(box.maxZ); z++) {
+				for (int y = lowest; y <= feet; y++) {
 					if (!WorldBridge.arrived(player.level(), pos.set(x, y, z))) {
-						missing = "HN's ground at " + x + " " + y + " " + z;
+						passthrough$missing.add(pos.immutable());
+						if (missing == null) {
+							missing = "HN's ground at " + x + " " + y + " " + z;
+						}
 					}
 				}
 			}
@@ -136,6 +151,39 @@ abstract class EntityMoveMixin {
 		return true;
 	}
 
+	/**
+	 * A move while some of HN's ground around Steve is on its way: whole, unless it would take him into one of the
+	 * missing blocks; then it goes down no further than that block's top (the block's own floor inside it is unknown:
+	 * from inside it, not down at all). The speed is kept. The first version forbade every move down and zeroed the
+	 * fall: jumping down Act 1's road, Steve hung in mid-air for a tick at every wait (the 21:30 recorder session,
+	 * ticks 1846, 1862, 1895, 1942: falling 0.15-0.45 a tick, then 0, the fall starting over), though the missing block
+	 * lay a block below him, out of that tick's reach. A whole chunk missing: no move down at all, as before.
+	 */
+	@Unique
+	private static Vec3 passthrough$aboveMissing(final LocalPlayer player, final Vec3 movement) {
+		if (movement.y >= 0.0) {
+			return movement;
+		}
+
+		AABB box = player.getBoundingBox();
+		if (passthrough$chunkMissing) {
+			return new Vec3(movement.x, 0.0, movement.z);
+		}
+
+		AABB path = box.expandTowards(movement.x, 0.0, movement.z);
+		double dy = movement.y;
+		for (BlockPos p : passthrough$missing) {
+			if (p.getX() + 1 <= path.minX || p.getX() >= path.maxX || p.getZ() + 1 <= path.minZ || p.getZ() >= path.maxZ) {
+				continue;
+			}
+
+			double top = p.getY() + 1.0;
+			dy = Math.max(dy, top <= box.minY + 1.0E-7 ? top - box.minY : 0.0);
+		}
+
+		return dy == movement.y ? movement : new Vec3(movement.x, dy, movement.z);
+	}
+
 	/** After the recorder saw the attempt: the lift over micro-ledges (the tick then moves horizontally only). */
 	@ModifyVariable(method = "move", at = @At("HEAD"), argsOnly = true)
 	private Vec3 passthrough$overMicroLedges(final Vec3 movement, final MoverType type, final Vec3 original) {
@@ -147,16 +195,15 @@ abstract class EntityMoveMixin {
 		this.passthrough$velocityBefore = player.getDeltaMovement();
 		this.passthrough$groundBefore = player.onGround();
 		this.passthrough$holding = false;
-		if (Passthrough.driving && !passthrough$worldAround(player)) {
+		if (Passthrough.driving && !passthrough$worldAround(player, movement.y)) {
 			this.passthrough$positionBefore = player.position();
 			if (System.nanoTime() - passthrough$waitingSince < BRIEF_WAIT_NANOS) {
 				// HN's ground a tick late (running downhill, every wait in the 20:03 session was 47-61 ms): freezing
-				// Steve and zeroing his speed stopped every sprint and sprint-jump there. He keeps going, just never
-				// down, so he can't fall through ground that isn't here yet.
-				Vec3 v = player.getDeltaMovement();
-				player.setDeltaMovement(v.x, Math.max(v.y, 0.0), v.z);
-				this.passthrough$holding = true;
-				return new Vec3(movement.x, Math.max(movement.y, 0.0), movement.z);
+				// Steve and zeroing his speed stopped every sprint and sprint-jump there. He keeps going; only a move
+				// into ground that isn't here yet is cut (see passthrough$aboveMissing).
+				Vec3 kept = passthrough$aboveMissing(player, movement);
+				this.passthrough$holding = kept != movement;
+				return kept;
 			}
 
 			// HN's world isn't here yet (a level's start: seconds): hold still (no fall) until it is
