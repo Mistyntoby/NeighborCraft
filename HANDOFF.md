@@ -196,9 +196,9 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Shutdown crash | VERIFIED fixed | no CrashDumps since |
 | Cutscene glitch (MC kit/HUD/drive during cutscene) | VERIFIED gate fires (`cutscene: Minecraft waits` / `cutscene over`) | the user hasn't re-judged the item glitch |
 | Inventory left-click | VERIFIED (log 02:01: MC button 1 = left picks the full stack) | |
-| Carry: pickup/hold/place/throw | VERIFIED in game 22:20 (vase, ottoman, video recorder); radio rule changed (BUILT); held object now attached to the view camera with an in-engine 360 check on every pickup (BUILT, **read `carry: 360 check` next session**) | MODLOG night 4 |
+| Carry: pickup/hold/place/throw | in game: pickups VERIFIED, attachment continuous (360 check, 22:41); fist frame bug found and fixed (turntest STEADY, 3.9 deg max); TVs get no HN action (BUILT); **object on the fist in game not yet seen after the fix** | MODLOG night 5 |
 | Per-item inventory icons | HN capture VERIFIED in game (3 exports); path and alpha fixed; the real exports VERIFIED in the hotbar (test Minecraft screenshot) | MODLOG night 4 |
-| See-through cutout blocks | cause measured (16.2% of cutout pixels under alpha 250 in the frame HN gets), fixed by `ShaderSourceMixin` (3.2%, all genuinely translucent glass); **not yet seen in game** | MODLOG night 4, `tools/rendertest.py` |
+| See-through cutout blocks / background-tinted light | cutout alpha fixed (night 4, measured); light from the picture behind replaced by light from near surfaces (emulated 58% -> 0%); **neither seen in game; check ReShade.log compiles NeighborCraft.fx** | MODLOG nights 4-5 |
 | Ctrl+Q stack drop | VERIFIED in itemtest (counts, empty slot, pickup again); not yet in game | MODLOG night 3 |
 | Lighting/shadows, transparency, GPU sharing, macOS, block mining in HN geometry, Neighbor combat | OPEN | not started |
 
@@ -216,6 +216,12 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 - Door capsule.
 
 ## 6. Outstanding issues (priority order)
+
+0000. **Play-test night 5** (P0): ReShade.log must say NeighborCraft.fx compiled; hold objects and turn full circles,
+      look up/down (`carry: hand ok ... fist Minecraft's (~115 ~66 ~-28 cm)`, never "default" for long, never FAR);
+      right click the TV (nothing happens: no grab), doors/cabinets/switches (HN's action), props (ours); blocks in
+      front of bright and dark backgrounds should no longer change brightness with what is behind them;
+      `mesh path:` lines name the materials usable for drawing Minecraft blocks as HN meshes (next stage).
 
 000. **Play-test night 4** (P0): pick up the radio and others; read `carry: class chain of ...` (is the Item/Key rule
      right?), `carry: 360 check of ...` (continuous?) and any `carry: hand FAR`; turn a full circle holding things;
@@ -333,6 +339,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+Night 5: turntest STEADY, relight_check, handtest/itemtest unchanged; HN DLL + shader installed (md5 checked); nothing of night 5 run in game.
+
 Night 4: rendertest before/after, itemtest, handtest, real-icon hotbar screenshot, drive tests pass; HN DLL md5 `baaea859...` installed; held-object attachment, 360 check and radio rule not run in game.
 
 Night 3: itemtest, handtest and drive tests pass on the final code; HN DLL md5 `1c8984e8...` installed; nothing of night 3 run in game.
@@ -375,3 +383,17 @@ Earlier:
 - The visible block fix is `ShaderSourceMixin` alone (rendertest: cutout 16.2% -> 3.2% low-alpha pixels).
 - SkyCraft read: README.md, docs/DESIGN.md, protocol/skycraft_protocol.h, fabric/src/client/java/dev/skycraft/client/
   render/WorldExporter.java (and the file list of skse/src/WorldRender.cpp, FrameExporter.java). MIT; nothing copied.
+
+## 15. Night 5: files changed and sources read
+- Changed: `mc/src/client/java/dev/neighborcraft/client/CarryHand.java` (the fist projected on the camera's axes: the
+  held-object fix), `hn/NeighborCraftMod/src/bridge.cpp` (kNotCarriedNotGrabbed: loose TVs/lamps get no HN action;
+  mesh_path_probe), `hn/shaders/NeighborCraft.fx` (host_light_near; relight uses it; the hand takes the overall light),
+  `tools/turntest.py`, `tools/relight_check.py` (new), MODLOG, this file.
+- SkyCraft read: README.md, docs/DESIGN.md, protocol/skycraft_protocol.h, fabric/src/client/java/dev/skycraft/client/
+  render/WorldExporter.java, skse/src/WorldRender.cpp (PSMain, DrawMesh, RenderPasses, DrawInFrame, RenderWorldHook,
+  render-ring cases). MIT; nothing copied.
+- Next for rendering: from the `mesh path:` log, pick a masked, lit HN material with a texture parameter; then stage 2:
+  Minecraft exports player-placed block sections (as SkyCraft's WorldExporter: Minecraft's own block renderer, per
+  vertex cutout/translucent) and its block atlas (PNG); HN loads the atlas (ImportFileAsTexture2D), makes a dynamic
+  instance with it, and builds ProceduralMeshComponent sections at the blocks' places (HN's depth, lighting, shadows
+  and TAA then apply natively; the picture path stays for the hand, GUI and entities).

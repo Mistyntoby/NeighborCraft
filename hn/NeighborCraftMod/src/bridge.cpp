@@ -1471,6 +1471,9 @@ namespace nc
 		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls);
 		void carry_start_pickup(UObject *actor, UObject *body);
 		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut = nullptr);
+		/// The refusal of a loose physics object that is neither ours nor HN's to pick up (a TV, a lamp): its HN action is
+		/// HN's grab, so it gets none.
+		const wchar_t *const kNotCarriedNotGrabbed = L"a TV, switch or lamp: neither carried nor grabbed";
 		void carry_cancel_pickup();
 		bool actor_bounds(UObject *actor, Vec3f &origin, Vec3f &extent);
 		UObject *g_controlsPc = nullptr;
@@ -2070,6 +2073,13 @@ namespace nc
 				UObject *target = pickup_target(g_controlsPawn, &body, &why);
 				if (!target && why && std::wcscmp(why, L"not a physics object") != 0 && std::wcscmp(why, L"no root component") != 0)
 					log(std::wstring(L"carry: what the look meets isn't carried: ") + why);
+				// A loose TV or lamp: HN's action on a loose prop is HN's own grab (the 22:41 session: "HN's action on
+				// BP_TV_apartments3", and the TV was grabbed). Nothing for it: no carry, no HN action, no Minecraft use.
+				if (!target && why == kNotCarriedNotGrabbed)
+				{
+					g_rightClickCarry = true;
+					return;
+				}
 				if (target)
 				{
 					if (g_handEmpty)
@@ -2775,7 +2785,7 @@ namespace nc
 			// "action" is its own grab), and excluding those handed every pickup to HN's grab (the 21:31 session).
 			if (class_contains(*actor, L"TV") || class_contains(*actor, L"Switch") || class_contains(*actor, L"Tumbler") ||
 				class_contains(*actor, L"Lamp"))
-				return refuse(L"a TV, switch or lamp: used, not carried");
+				return refuse(kNotCarriedNotGrabbed);
 			if (bodyOut)
 				*bodyOut = *r;
 			return *actor;
@@ -2895,6 +2905,59 @@ namespace nc
 			const std::string path = narrow(forward);
 			sendf("{\"t\":\"icon\",\"key\":\"%s\",\"file\":\"%s\"}", narrow(cls).c_str(), path.c_str());
 			log(L"carry: icon for " + cls + L" in " + file);
+		}
+
+		/// The first stage of drawing Minecraft's blocks as HN geometry (as SkyCraft draws Minecraft's block meshes in
+		/// Skyrim's frame, chasmlol/SkyCraft, MIT: protocol/skycraft_protocol.h's render ring, WorldExporter.java): what
+		/// this build of HN offers for it, once per level, logged (`mesh path: ...`). Found in the shipping binary:
+		/// ProceduralMeshComponent (CreateMeshSection_LinearColor, UpdateMeshSection), ImportFileAsTexture2D,
+		/// CreateDynamicMaterialInstance, SetTextureParameterValue. Unknown until now, and needed: a material whose
+		/// texture can be set (a shipped game can't make new ones), ideally masked (cutout) and lit. The probe makes a
+		/// dynamic instance of loaded materials and asks it for a texture under the usual parameter names; it draws
+		/// nothing and changes nothing.
+		void mesh_path_probe(UObject *pawn)
+		{
+			static UObject *probedFor = nullptr;
+			if (probedFor == pawn)
+				return;
+			probedFor = pawn;
+			UObject *procMesh = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/ProceduralMeshComponent.ProceduralMeshComponent"));
+			static UObject *matLib = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetMaterialLibrary"));
+			log(std::wstring(L"mesh path: ProceduralMeshComponent class ") + (procMesh ? L"present" : L"MISSING") + L", material library " +
+				(matLib ? L"present" : L"MISSING"));
+			if (!matLib)
+				return;
+			static const wchar_t *names[] = {L"BaseColor", L"Texture", L"Diffuse", L"Albedo", L"BaseTexture", L"MainTexture", L"Tex", L"T_Diffuse",
+				L"DiffuseTexture", L"Color", L"BaseColorTexture", L"Base Color"};
+			int tried = 0, found = 0;
+			for (UObject *m : find_all(L"Material"))
+			{
+				if (tried >= 400 || found >= 15)
+					break;
+				++tried;
+				Call make(matLib, STR("CreateDynamicMaterialInstance"));
+				make.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("Parent"), m).set(STR("OptionalName"), NameParam{});
+				UObject *const *mid = make.invoke() ? make.param<UObject *>(STR("ReturnValue")) : nullptr;
+				if (!mid || !*mid)
+					continue;
+				std::wstring params;
+				for (const wchar_t *n : names)
+				{
+					Call get(*mid, STR("K2_GetTextureParameterValue"));
+					get.set(STR("ParameterName"), name_param(n));
+					if (UObject *const *t = get.invoke() ? get.param<UObject *>(STR("ReturnValue")) : nullptr; t && *t)
+						params += (params.empty() ? L"" : L", ") + std::wstring(n);
+				}
+				if (params.empty())
+					continue;
+				++found;
+				const uint8_t *blend = m->GetValuePtrByPropertyNameInChain<uint8_t>(STR("BlendMode"));
+				const uint8_t *shading = m->GetValuePtrByPropertyNameInChain<uint8_t>(STR("ShadingModel"));
+				static const wchar_t *blends[] = {L"opaque", L"masked", L"translucent", L"additive", L"modulate", L"alpha composite"};
+				log(L"mesh path: material " + m->GetFullName() + L": texture parameters " + params + L"; blend " +
+					(blend && *blend < 6 ? blends[*blend] : L"?") + L", shading model " + (shading ? std::to_wstring(*shading) : L"?"));
+			}
+			log(L"mesh path: " + std::to_wstring(found) + L" materials with a settable texture among " + std::to_wstring(tried) + L" tried");
 		}
 
 		void complete_pickup(UObject *pc, UObject *actor, UObject *body)
@@ -4279,6 +4342,7 @@ namespace nc
 				physics_punch(pawn, punch);
 			g_controlsPc = pc;
 			carry_tick(pc, pawn);
+			mesh_path_probe(pawn);
 			for (const std::string &id : g_throwRequests)
 				carry_throw(pc, pawn, id, g_heldId == id ? g_heldCls : std::string{});
 		}

@@ -93,25 +93,6 @@ float4 PS_Light(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	return float4(tex2D(ReShade::BackBuffer, uv).rgb, 1.0);
 }
 
-/// Minecraft renders at full daylight, so treat its colour as albedo and light it with Hello Neighbor's local light; then give it
-/// Hello Neighbor's colour grade (the whole picture's colour) and, far away, Hello Neighbor's haze (fade into the picture around it).
-float3 relight(float3 c, float2 uv, float zm)
-{
-	const float3 L = tex2Dlod(sHostLight, float4(uv, 0, LightBlur)).rgb;
-	const float lum = luma(L);
-	const float gain = clamp(lum / LightReference, 0.42, 1.3);
-	const float3 tint = clamp(lerp(1.0, L / max(lum, 1e-3), LightTint), 0.55, 1.5);
-	c = lerp(c, c * gain * tint, LightMatch);
-	// the picture's grade, gentled (Hello Neighbor's own grade keeps some colour in everything) and kept off lights (bright
-	// things keep their colour: fire, lava, the portal)
-	const float3 M = tex2Dlod(sHostLight, float4(0.5, 0.5, 0, 6.0)).rgb;
-	const float3 grade = clamp(lerp(1.0, M / max(luma(M), 1e-3), 0.6), 0.6, 1.6);
-	c = lerp(c, c * grade, GradeMatch * (1.0 - saturate((max(c.r, max(c.g, c.b)) - 0.45) * 2.5)));
-	const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
-	const float3 H = tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb;
-	return lerp(c, H, h);
-}
-
 float mc_linear(float d)
 {
 	const float n = McPlanes.x, f = McPlanes.y;
@@ -130,6 +111,57 @@ float host_linear(float d)
 		z = d < 1.0 ? n * f / (f - d * (f - n)) : 1e9;
 	return z * HostDepthScale;
 }
+
+/// Hello Neighbor's light where a Minecraft surface is: from Hello Neighbor's surfaces near it in depth (the floor a block
+/// stands on, the wall beside it), never from the picture behind it. It used to be the blurred picture at the Minecraft
+/// pixel itself, which is what lies behind the block or hand: a block in front of a bright window came out bright, in
+/// front of a dark doorway dark, the hand took the colour of whatever was behind it, and colour that follows the
+/// background reads as see-through or reflective. Twelve taps on a disc ~0.6 m wide around it (golden-angle spiral),
+/// each weighted by how close its Hello Neighbor depth is to the Minecraft surface's; with too few near surfaces (the
+/// hand, a block against the sky) the picture's overall light instead.
+float3 host_light_near(float2 uv, float zm)
+{
+	float3 global = 0.0;
+	[unroll] for (int g = 0; g < 5; ++g)
+		global += tex2Dlod(sHostLight, float4(0.2 + 0.15 * g, 0.35 + 0.075 * g, 0, 6.0)).rgb;
+	global *= 0.2;
+	if (zm < 0.0)
+		return global; // the first-person hand: nothing of HN's is beside it (HN's held object, 25 cm off, is not its light)
+	const float r = clamp(0.6 / (max(zm, 0.3) * 2.0 * WarpTan.x), 0.01, 0.25); // 0.6 m as a fraction of the screen height
+	float3 sum = 0.0;
+	float weight = 0.0;
+	[unroll] for (int i = 0; i < 12; ++i)
+	{
+		const float a = i * 2.39996 + 0.3;
+		const float rr = r * sqrt((i + 0.5) / 12.0);
+		const float2 t = uv + float2(cos(a) * BUFFER_HEIGHT * BUFFER_RCP_WIDTH, sin(a)) * rr;
+		const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 0)).x);
+		const float w = exp(-abs(zt - zm) / (0.25 + 0.1 * zm));
+		sum += tex2Dlod(sHostLight, float4(t, 0, 1.5)).rgb * w;
+		weight += w;
+	}
+	return lerp(global, sum / max(weight, 1e-4), saturate(weight / 3.0));
+}
+
+/// Minecraft renders at full daylight, so treat its colour as albedo and light it with Hello Neighbor's light near it; then give it
+/// Hello Neighbor's colour grade (the whole picture's colour) and, far away, Hello Neighbor's haze (fade into the picture around it).
+float3 relight(float3 c, float2 uv, float zm)
+{
+	const float3 L = host_light_near(uv, zm);
+	const float lum = luma(L);
+	const float gain = clamp(lum / LightReference, 0.42, 1.3);
+	const float3 tint = clamp(lerp(1.0, L / max(lum, 1e-3), LightTint), 0.55, 1.5);
+	c = lerp(c, c * gain * tint, LightMatch);
+	// the picture's grade, gentled (Hello Neighbor's own grade keeps some colour in everything) and kept off lights (bright
+	// things keep their colour: fire, lava, the portal)
+	const float3 M = tex2Dlod(sHostLight, float4(0.5, 0.5, 0, 6.0)).rgb;
+	const float3 grade = clamp(lerp(1.0, M / max(luma(M), 1e-3), 0.6), 0.6, 1.6);
+	c = lerp(c, c * grade, GradeMatch * (1.0 - saturate((max(c.r, max(c.g, c.b)) - 0.45) * 2.5)));
+	const float h = zm < 0.0 ? 0.0 : saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
+	const float3 H = tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb;
+	return lerp(c, H, h);
+}
+
 
 float3 bands(float z)
 {
@@ -317,7 +349,7 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	// so it darkens indoors and takes the room's colour; its own layer, so the GUI above stays as it is
 	const float4 hand = tex2D(sHand, float2(uv.x, 1.0 - uv.y));
 	if (hand.a > 0.0)
-		color = relight(hand.rgb, uv, 0.5) + saturate(color) * (1.0 - hand.a);
+		color = relight(hand.rgb, uv, -1.0) + saturate(color) * (1.0 - hand.a);
 	const float4 overlay = tex2D(sOverlay, float2(uv.x, 1.0 - uv.y)); // HUD and screens are screen-space: never shaken
 	return overlay.rgb + saturate(color) * (1.0 - overlay.a);
 }

@@ -60,21 +60,26 @@ public final class CarryHand {
 		float side = arm == HumanoidArm.RIGHT ? 1.0F : -1.0F;
 		Matrix4f part = new Matrix4f(armPose).translate(side * -5.0F / 16.0F, 2.0F / 16.0F, 0.0F).rotateZ(side * 0.1F);
 		Vector3f v = part.transformPosition(new Vector3f(side * -1.0F / 16.0F, 10.0F / 16.0F, 0.0F));
-		// The hand's space looks along +z with +x to the left (its pose is turned half round): measured, the fist
-		// (-0.66, -0.28, 1.15) and the shoulder (-0.38, -0.68, 0.58) put on screen where the hand layer shows them.
-		if (v.z < 1.0E-3F) {
+		// The arm's pose is the camera's place with the world's axes: the camera's rotation comes later, in the view
+		// matrix. So the fist in the camera's frame is its part along the camera's right, up and forward. (The first
+		// version read the pose as camera space; tested facing yaw 0, where the two agree, it held, and in the game the
+		// fist went round the camera with the yaw and vanished "behind" it for half the turn: tools/turntest.py, the
+		// fist's angle = yaw + 24 degrees, none between yaw 54 and 258; the user: far away when turning east.)
+		Camera camera = minecraft.gameRenderer.mainCamera();
+		Vector3fc f = camera.forwardVector(), u = camera.upVector(), l = camera.leftVector();
+		double right = -(v.x * l.x() + v.y * l.y() + v.z * l.z()), up = v.x * u.x() + v.y * u.y() + v.z * u.z();
+		double forward = v.x * f.x() + v.y * f.y() + v.z * f.z();
+		if (forward < 1.0E-3) {
 			return;
 		}
 
 		var window = minecraft.getWindow();
 		float aspect = (float) window.getWidth() / Math.max(1, window.getHeight());
 		double hudTan = Math.tan(Math.toRadians(hudFov) / 2.0);
-		double ndcX = -v.x / v.z / (hudTan * aspect), ndcY = v.y / v.z / hudTan;
+		double ndcX = right / forward / (hudTan * aspect), ndcY = up / forward / hudTan;
 
 		// the world camera's FOV as HN renders it: the rendered one has the overscan (CameraMixin) taken out
 		double worldTan = Math.tan(Math.toRadians(HostState.renderedFov()) / 2.0) / 1.15;
-		Camera camera = minecraft.gameRenderer.mainCamera();
-		Vector3fc f = camera.forwardVector(), u = camera.upVector(), l = camera.leftVector();
 		double rx = ndcX * worldTan * aspect, uy = ndcY * worldTan;
 		Vec3 dir = new Vec3(f.x() + u.x() * uy - l.x() * rx, f.y() + u.y() * uy - l.y() * rx, f.z() + u.z() * uy - l.z() * rx).normalize();
 		// as far as the fist, with the hand's and the world's FOV told apart (the same size on screen)

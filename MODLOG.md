@@ -372,3 +372,42 @@ Evidence: the 22:20 session (`UE4SS.log`, `mc-client.log`), the HN icon exports 
   Difference that matters: SkyCraft's final design draws Minecraft's blocks as meshes in Skyrim's own frame (occlusion
   and material class native to the host); NeighborCraft composites Minecraft's rendered picture by depth, so material
   class has to be carried by the picture's alpha, which is what the shader patch does. No SkyCraft code was copied.
+
+## The fist's frame, TVs, the light behind blocks, the mesh path's first stage (2026-10-10, night 5)
+Evidence: the 22:41 session (`UE4SS.log`: `carry: 360 check` x4 "continuous", 12 `carry: hand ok` lines),
+`tools/turntest.py` (new), `tools/relight_check.py` (new), the SkyCraft source.
+- Held object: the 360 check proved the attachment continuous (0.00 cm, 0.0000 turn over 72 poses), but the hand lines
+  showed Minecraft's fist in the camera's frame anywhere around it at 1.35 m: (35, 81, -101), (20, -116, -66) ...
+  instead of (115, 66, -28), and "default" whenever none came. Cause (mine, night 2): the pose Minecraft 26.3 gives
+  the first-person arm is the camera's place with the **world's axes** (the camera's rotation is in the view matrix);
+  CarryHand read it as camera space, which agrees only facing yaw 0, where it had been tested. turntest (three turns,
+  pitch +-35, a teleport): before, the fist's angle = yaw + 24 degrees, none at all between yaw 54 and 258, 112.5
+  degrees of swing; after (the fist projected on the camera's right/up/forward): 210 positions, at most 3.9 degrees
+  from the middle direction (Minecraft's own hand sway at the start of a fast turn): STEADY. A first guess (the hand
+  sway's yBob chasing a yaw jump) was tested, made no difference, and was reverted.
+- TVs: `right click: BP_TV_apartments3 ... HN's action` (22:41:53): Act 1's TV is a loose physics prop, and HN's
+  action on a loose prop is HN's grab. Rule now: a loose physics body is carried by NeighborCraft, or picked up by HN
+  only if it is one of HN's inventory items (class chain names Item/Pickup/Key); anything else loose (TVs, lamps:
+  `kNotCarriedNotGrabbed`) gets no HN action at all. Fixed interactables (doors, cabinets, switches) are not loose
+  physics and keep HN's action.
+- "Transparent or reflective" blocks and held items: the compositor lit every Minecraft pixel, the hand included, with
+  Hello Neighbor's picture *at that pixel*, blurred (`PS_Light` copies the back buffer; `relight` sampled it at the
+  pixel): that is what lies behind the block or hand, so their colour followed the background. `host_light_near`: the
+  light from Hello Neighbor's surfaces near the Minecraft surface in depth (12 taps on a ~0.6 m disc, weighted by depth
+  difference), else the picture's overall light; the hand takes the overall light only. relight_check (the shader's
+  math in Python, synthetic scene: the same stone block on the same floor, before a bright window and before a dark
+  wall): old 0.70 vs 0.30 (58% apart), new 0.57 vs 0.57 (0%). The shader compiles only inside the game (ReShade.log).
+- Mesh path, first stage (`mesh_path_probe`, once per level, logs only): the shipping binary has
+  ProceduralMeshComponent (CreateMeshSection_LinearColor, UpdateMeshSection), ImportFileAsTexture2D,
+  CreateDynamicMaterialInstance, SetTextureParameterValue. The probe logs whether the class is loaded and which loaded
+  materials take a texture under the usual parameter names, with their blend mode (masked = cutout) and shading
+  model: the one thing a shipped game can't make and the mesh path needs.
+- SkyCraft (chasmlol/SkyCraft bfcaf17, MIT) read this round: `skse/src/WorldRender.cpp` (PSMain; DrawMesh;
+  RenderPasses; DrawInFrame; RenderWorldHook after Main::RenderWorld; the render ring's kRenAtlas / kRenSection /
+  kRenAtlasRegion cases), on top of last round's README.md, docs/DESIGN.md, protocol/skycraft_protocol.h,
+  fabric/.../render/WorldExporter.java. What carries over: (1) non-translucent texels written with alpha 1 and cutout
+  discarded under 0.5 (PSMain: `if (!(i.flags & 2)) po.color.a = 1.0`) - done for our picture by ShaderSourceMixin;
+  (2) lighting not taken from the screen behind the block (its comment: "Not Skyrim's screen-space shadow mask: that
+  holds whatever Skyrim surface is behind the block") - done now in host_light_near; (3) blocks drawn in the host's
+  own frame with its depth, normals and motion vectors (Skyrim's TAA and post see them as its own) - for HN the native
+  route is ProceduralMeshComponent with an HN material, which the probe prepares. Nothing copied.
