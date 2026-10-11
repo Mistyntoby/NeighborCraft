@@ -1,6 +1,6 @@
 # NeighborCraft – Handoff
 
-State at commit `1a830a4` (2026-10-10). Read this first, then `MODLOG.md` (chronological log, gotchas). Repository
+State after the downhill/slope/crawl commit on top of `f79f348` (2026-10-10, evening). Read this first, then `MODLOG.md` (chronological log, gotchas). Repository
 evidence beats anything said in old conversations: every status below says how it is known.
 
 Status legend: **VERIFIED** (seen in game, a log, a recording or an automated test, as cited) · **REPORTED**
@@ -179,7 +179,9 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Door collision follows the leaf (moving collision) | VERIFIED by the user | user confirmed; preserve it |
 | Door remnants (static probe baked mid-swing leaf/handle) | BUILT (ran in the 01:47 session, not evaluated) | recorder showed the cause (`session-20261010-013351`) |
 | Doors stuck open | BUILT, likely fixed | cause: HN capsule (51 cm) inside the leaf + our nudges on the 747 kg physics leaf; both fixed; no recent report of stuck doors |
-| Forced crawl at doors / objects on head | BUILT | cause proven (recorder, 31 forced-crawl ticks in `session-20261010-014705`): a full cube for one tick from the shared `SHAPES` race; fixed in `HostBlock.shape()`; **not yet run** |
+| Forced crawl at doors / objects on head | BUILT (2 causes) | 1) shape race (`session-20261010-014705`), fixed in `HostBlock.shape()`, ran 20:03 with no door crawl seen; 2) furniture parts opening into Steve (`session-20261010-200332`, ticks 1839-1857, `BP_Kitchen_stand5`): HN's clearance now his standing body + a sub-cell; **not yet run in game** |
+| Stops running/jumping downhill | BUILT, VERIFIED in the drive test | cause: the ground-wait hold zeroed speed (13 holds of ~50 ms in `mc-client.log` 20:03); drive test `--downhill --stream 1.6 --jump` 4.0 -> 6.7 m/s, 0 dips; **not yet run in game** |
+| Slope smoothness (micro-steps) | BUILT, VERIFIED in the drive test | step-down + camera height filter; downhill 4.87 -> 5.6 m/s, worst camera jolt 19.8 -> 7.2 cm; **feel not yet judged by the user** |
 | Cabinets / wardrobes / TV-stand drawers open | VERIFIED | log `OnIsActionComponent(Door1) yes`, user |
 | Right-click targeting (nearest hit) | VERIFIED partly | ray now Minecraft's; **bug seen**: carpet in a doorway activated the door via the bounds fallback (log 02:01) |
 | TV / light switches | OPEN, unverified | the TV in Act 1 (`BP_TV_apartments`) is a loose physics object: now a carry target, not an "on" toggle; switches (`BP_Switcher`, Tumbler) untested |
@@ -193,7 +195,7 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Shutdown crash | VERIFIED fixed | no CrashDumps since |
 | Cutscene glitch (MC kit/HUD/drive during cutscene) | VERIFIED gate fires (`cutscene: Minecraft waits` / `cutscene over`) | the user hasn't re-judged the item glitch |
 | Inventory left-click | VERIFIED (log 02:01: MC button 1 = left picks the full stack) | |
-| Carry: pickup/hold/place/throw | **BUILT only** (installed 2026-10-10 19:59, never run) | §9 |
+| Carry: pickup/hold/place/throw | **BUILT only** (ran 20:03 but not exercised: no `carry:` lines, the user punched objects) | §9 |
 | Per-item inventory icons | OPEN | one generic icon (ours) |
 | Lighting/shadows, transparency, GPU sharing, macOS, block mining in HN geometry, Neighbor combat | OPEN | not started |
 
@@ -212,7 +214,9 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
-1. **Run the newest build once** (P1). The crawl fix and carry have never run. Steps: Act 1 → open and close doors
+1. **Run the newest build once** (P1). Check: sprint and sprint-jump down Act 1's road (no stops; `waiting for HN's
+   world` lines may still appear, they must no longer stop Steve), how the slope feels, opening kitchen stands and
+   drawers while standing close (no crawl). Carry has never been exercised. Steps: Act 1 → open and close doors
    while standing in the doorway (watch for crawling) → hold right click on a mug or chair → hotbar → right click to
    place → pick it up again → Q to throw.
 2. **Targeting: door bounds fallback fires through floors** (P1). Repro: aim at the carpet or floor in a doorway and
@@ -307,6 +311,12 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+Evening update:
+- Drive tests on the new Minecraft code (`tools/drivetest.py --downhill`, with and without `--stream`/`--jump`, and
+  the original ramp/stairs course: ramp 5.35, stairs 5.41 m/s) as in MODLOG; MC compiles.
+- HN DLL built and installed, md5 `6b85de43…` matches. Not run in game.
+
+Earlier:
 - Ran: MC compile of HEAD (0 errors). The HN build of HEAD succeeded earlier (2026-10-10 01:59).
 - Installed and checked: installed `main.dll` md5 = built DLL md5 (`bd2d0f90…`), 2026-10-10.
 - Not run: any in-game test of `1a830a4` (crawl fix, door-remnant fix, carry).

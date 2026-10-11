@@ -58,7 +58,18 @@ abstract class EntityMoveMixin {
 	}
 
 	@Unique
+	private boolean passthrough$holding;
+
+	@Unique
 	private static long passthrough$waitingSince;
+
+	/** How long Steve keeps moving (never down) while his ground is on its way, before he is held still. */
+	@Unique
+	private static final long BRIEF_WAIT_NANOS = 250_000_000L;
+
+	/** How far down Steve follows the ground he walks on (Minecraft's step-up height, the other way). */
+	@Unique
+	private static final double STEP_DOWN = 0.6;
 
 	/**
 	 * Whether HN's ground under the player is in the client's world. HN's world reaches Minecraft as blocks the
@@ -135,10 +146,21 @@ abstract class EntityMoveMixin {
 
 		this.passthrough$velocityBefore = player.getDeltaMovement();
 		this.passthrough$groundBefore = player.onGround();
+		this.passthrough$holding = false;
 		if (Passthrough.driving && !passthrough$worldAround(player)) {
-			// HN's world isn't here yet: hold still (no fall) until it is
-			player.setDeltaMovement(Vec3.ZERO);
 			this.passthrough$positionBefore = player.position();
+			if (System.nanoTime() - passthrough$waitingSince < BRIEF_WAIT_NANOS) {
+				// HN's ground a tick late (running downhill, every wait in the 20:03 session was 47-61 ms): freezing
+				// Steve and zeroing his speed stopped every sprint and sprint-jump there. He keeps going, just never
+				// down, so he can't fall through ground that isn't here yet.
+				Vec3 v = player.getDeltaMovement();
+				player.setDeltaMovement(v.x, Math.max(v.y, 0.0), v.z);
+				this.passthrough$holding = true;
+				return new Vec3(movement.x, Math.max(movement.y, 0.0), movement.z);
+			}
+
+			// HN's world isn't here yet (a level's start: seconds): hold still (no fall) until it is
+			player.setDeltaMovement(Vec3.ZERO);
 			return Vec3.ZERO;
 		}
 
@@ -178,6 +200,12 @@ abstract class EntityMoveMixin {
 				player.setDeltaMovement(v.x, 0.0, v.z);
 			}
 
+			if (this.passthrough$holding && this.passthrough$groundBefore) {
+				// moving on while his ground is on its way: still standing (he can jump, no fall builds up)
+				player.setOnGround(true);
+				player.resetFallDistance();
+			}
+
 			if (Passthrough.driving && player.horizontalCollision && this.passthrough$groundBefore && this.passthrough$positionBefore != null) {
 				Vec3 moved = player.position().subtract(this.passthrough$positionBefore);
 				double attempted = Math.hypot(movement.x, movement.z), through = Math.hypot(moved.x, moved.z);
@@ -189,7 +217,47 @@ abstract class EntityMoveMixin {
 				}
 			}
 
+			if (Passthrough.driving && this.passthrough$groundBefore && !player.onGround() && !this.passthrough$holding && movement.y <= 0.0) {
+				this.passthrough$stepDown(player, movement);
+			}
+
 			CollisionRecorder.afterMove(player);
 		}
+	}
+
+	/**
+	 * Down a slope. HN's slopes are 1/8-block staircases; walking down one, Steve left the ground at every micro-step
+	 * and fell onto the next (the 20:03 recorder session: on ground, then airborne with falls of up to 0.5 a tick
+	 * the whole way down Act 1's road), a jolt each time, and a jump pressed in those ticks did nothing. Walking (not
+	 * jumping) off ground he stood on, onto ground at most STEP_DOWN below, he is put on it as Minecraft's step-up
+	 * does going up; a real drop is still a fall.
+	 */
+	@Unique
+	private void passthrough$stepDown(final LocalPlayer player, final Vec3 movement) {
+		if (Math.hypot(movement.x, movement.z) < 1.0E-4 || player.getAbilities().flying || player.isInWater() || player.isInLava()
+			|| player.onClimbable() || player.isPassenger() || player.getDeltaMovement().y > 0.0) {
+			return;
+		}
+
+		AABB box = player.getBoundingBox();
+		AABB below = new AABB(box.minX, box.minY - STEP_DOWN, box.minZ, box.maxX, box.minY, box.maxZ);
+		double top = Double.NEGATIVE_INFINITY;
+		for (VoxelShape shape : player.level().getBlockCollisions(player, below)) {
+			for (AABB b : shape.toAabbs()) {
+				if (b.intersects(below) && b.maxY <= box.minY + 1.0E-7 && b.maxY > top) {
+					top = b.maxY;
+				}
+			}
+		}
+
+		if (top == Double.NEGATIVE_INFINITY || !player.level().noCollision(player, box.move(0.0, top - box.minY, 0.0))) {
+			return;
+		}
+
+		player.setPos(player.getX(), player.getY() + (top - box.minY), player.getZ());
+		player.setOnGround(true);
+		player.resetFallDistance();
+		Vec3 v = player.getDeltaMovement();
+		player.setDeltaMovement(v.x, 0.0, v.z);
 	}
 }

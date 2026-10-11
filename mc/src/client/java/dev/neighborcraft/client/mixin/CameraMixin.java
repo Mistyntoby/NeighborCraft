@@ -10,6 +10,7 @@ import net.minecraft.client.player.AbstractClientPlayer;
 import dev.neighborcraft.Passthrough;
 import java.util.Locale;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -108,6 +109,7 @@ abstract class CameraMixin {
 		Camera self = (Camera) (Object) this;
 		float partial = deltaTracker.getGameTimeDeltaPartialTick(true);
 		if (p != null && p.drive() && player != null) {
+			this.passthrough$smoothSteps(player);
 			// vanilla's view bob, as a camera transform: the world is never bobbed separately (GameRendererMixin), so
 			// Minecraft's frame and the host's camera (which takes this pose) bob together, exactly once
 			if (Minecraft.getInstance().options.bobView().get() && player instanceof AbstractClientPlayer avatar) {
@@ -129,6 +131,44 @@ abstract class CameraMixin {
 		} else {
 			HostState.setRenderedCamera(self.yRot(), self.xRot(), p != null ? p.roll() : 0.0F);
 		}
+	}
+
+	/** Step smoothing: the camera's height and vertical speed, and when they were last updated. */
+	private static double smoothY = Double.NaN, smoothV;
+	private static long smoothAt;
+
+	/** How quickly the camera's height settles on the eyes' (rad/s): on the ground (~70 ms), and in the air. */
+	private static final double SMOOTH_RATE = 15.0, AIR_RATE = 60.0;
+
+	/**
+	 * Steps without a jolt. HN's slopes reach Minecraft as 1/8-block staircases: on them the eyes stand still for a
+	 * few frames, then drop or rise a whole micro-step within one tick (tools/drivetest.py --downhill, frame by frame).
+	 * On the ground the camera's height tracks the eyes with a critically damped second-order filter instead: it keeps
+	 * their average vertical speed (no lag on a steady slope, where a plain exponential follow floated 10-25 cm
+	 * above them) and spreads each step over ~70 ms (Source smooths stairs the same way). Off the ground (jumps,
+	 * falls) it follows four times as fast: practically exact, without a snap at the take-off. A big jump of position
+	 * (teleport, respawn) is never smoothed.
+	 */
+	private void passthrough$smoothSteps(final Entity player) {
+		Vec3 at = ((Camera) (Object) this).position();
+		long now = System.nanoTime();
+		double dt = Math.min(0.1, (now - smoothAt) / 1.0E9);
+		smoothAt = now;
+		boolean flying = player instanceof Player pl && pl.getAbilities().flying;
+		if (flying || player.isPassenger() || Double.isNaN(smoothY) || Math.abs(at.y - smoothY) > 0.75) {
+			smoothY = at.y;
+			smoothV = 0.0;
+		} else {
+			// y' = v + 2w e, v' = w^2 e (e: the eyes' height minus the camera's), in steps of at most 2 ms
+			double w = player.onGround() ? SMOOTH_RATE : AIR_RATE;
+			for (double left = dt; left > 1.0E-6; left -= 0.002) {
+				double h = Math.min(0.002, left), e = at.y - smoothY;
+				smoothV += w * w * e * h;
+				smoothY += (smoothV + 2.0 * w * e) * h;
+			}
+		}
+
+		this.setPosition(at.x, smoothY, at.z);
 	}
 
 	/**

@@ -3194,11 +3194,14 @@ namespace nc
 			// his hitbox: Minecraft can't push him out of it, finds no room to stand, and forces him to crawl (the
 			// recorder: boxes appearing in his head the tick before POSE_FORCED SWIMMING, at a door). HN's own physics
 			// has the part meet his capsule (his size) instead; Minecraft's collision is kept only outside him.
+			// His standing body, whatever his pose, with a sub-cell to spare: the 20:03 session had a kitchen stand's
+			// part opening 2.6 cm into him (he had moved on since the feet HN knew), Minecraft forced him to crawl, and
+			// the clearance then shrank to the crawling hitbox (0.6) and let the part come down to his waist.
 			if (g_haveFeet)
 			{
 				double fx, fy, fz;
 				to_mc(g_feet, fx, fy, fz);
-				const double hw = g_steveWidth / 200.0 + 0.01, h = g_steveHeight / 100.0 + 0.01;
+				const double hw = g_steveWidth / 200.0 + 0.125, h = std::max(g_steveHeight / 100.0, 1.8) + 0.05;
 				const double x0 = fx - hw, x1 = fx + hw, y0 = fy - 0.01, y1 = fy + h, z0 = fz - hw, z1 = fz + hw;
 				for (int x = int(std::floor(x0)); x <= int(std::floor(x1)); ++x)
 					for (int y = int(std::floor(y0)); y <= int(std::floor(y1)); ++y)

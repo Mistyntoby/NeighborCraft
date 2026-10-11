@@ -189,3 +189,30 @@ Evidence-driven round: collision recorder sessions, HN/Minecraft logs, minidumps
   object at the hand position; right click places it where Steve looks (overlap-checked), Q throws it; a token
   dropped from the inventory screen is thrown instead. Generic token icon (ours); per-item icons not done.
 - Stop point: weekly usage limit reached. Next: test the carry lifecycle and crawl fix in game.
+
+## Downhill stops, slope smoothing, crawl under opening furniture (2026-10-10, evening)
+Evidence: the 20:03 play session (first run of `1a830a4`): `mc-client.log`, recorder `session-20261010-200332`.
+- Stops running/jumping down Act 1's road: each one (13 on the way down) was the "waiting for HN's world" hold, the
+  ground ahead arriving one tick late (47-61 ms). The hold zeroed Steve's velocity, so a sprint or sprint-jump died
+  every time. Now a wait under 250 ms keeps his horizontal speed and ground state and only forbids moving down (no
+  fall-through); longer waits (level start) still hold him still. Drive test (`--downhill --stream 1.6 --jump`,
+  ground streamed just in time as HN does): old 4.0 m/s, 27 speed dips, 3 velocity resets -> new 6.6-6.8 m/s, 0 dips,
+  0 resets, with 9 waits logged.
+- Slope micro-steps: walking down, Steve left the ground at every 1/8 step and fell onto the next (recorder: airborne
+  ticks with falls up to 0.5 the whole way down). Step-down: walking (not jumping) off ground onto ground at most 0.6
+  below puts him on it (Minecraft's step-up the other way). Downhill sprint 4.87 -> 5.6 m/s (= flat).
+- Camera: the eyes still move in 1/8 stairs (still for frames, then a step in one tick). The camera's height tracks
+  them with a critically damped second-order filter (15 rad/s on the ground, 60 in the air; no lag on a steady slope;
+  an exponential follow first tried floated 10-25 cm above the eyes). Downhill, worst height jolt per 1/60 s
+  19.8 cm (eyes) -> 7.2 cm (camera, view bob included), mean 2.3 -> 1.4 cm.
+- Forced crawl, again (ticks 1839-1857): not the shape race fixed before. Right after a right click on
+  `BP_Kitchen_stand5`, its opening part was voxelised 2.6 cm into Steve's standing box (he had moved since the feet HN
+  knew); Minecraft forced the crawl, and HN's clearance then used the crawling hitbox (0.6), letting the part come down
+  to his waist. The clearance is now his standing body (>= 1.8) + 5 cm up and one sub-cell (12.5 cm) around.
+- Drive test: `--downhill [--stream D] [--jump]`, a 28-block 1-in-4 slope of 1/8 steps with a flat runout; Minecraft's
+  frame times (`tn`); `DRIVETEST_DUMP=file` writes every position.
+
+### Gotchas
+14. A drive-test run that ends in the void leaves the next run's Steve falling: keep courses closed (runout).
+15. PassthroughClient forces view bob on; the `cam` height in `mcpos` includes it.
+16. The HN-launched Minecraft stays up after HN quits to the menu; it exits when HN's process is gone.
