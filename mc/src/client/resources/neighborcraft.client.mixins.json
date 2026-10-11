@@ -2,6 +2,6 @@
 	"required": true,
 	"package": "dev.neighborcraft.client.mixin",
 	"compatibilityLevel": "JAVA_25",
-	"client": ["AbstractClientPlayerMixin", "CameraMixin", "ClientLevelMixin", "EntityMoveMixin", "EntityPickMixin", "LivingEntityMixin", "FirstPersonCarryMixin", "GuiItemIconMixin", "FogRendererMixin", "GameRendererMixin", "GlCommandEncoderMixin", "KeyMappingAccessor", "LevelRendererMixin", "LocalPlayerMixin", "MinecraftAttackMixin", "MouseHandlerAccessor", "ToastManagerMixin"],
+	"client": ["AbstractClientPlayerMixin", "CameraMixin", "ClientLevelMixin", "EntityMoveMixin", "EntityPickMixin", "LivingEntityMixin", "FirstPersonCarryMixin", "GuiItemIconMixin", "ShaderSourceMixin", "FogRendererMixin", "GameRendererMixin", "GlCommandEncoderMixin", "KeyMappingAccessor", "LevelRendererMixin", "LocalPlayerMixin", "MinecraftAttackMixin", "MouseHandlerAccessor", "ToastManagerMixin"],
 	"injectors": { "defaultRequire": 1 }
 }

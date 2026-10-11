@@ -330,3 +330,45 @@ recorder `session-20261010-215810`: one MIDAIR_STOP), `tools/itemtest.py`, `tool
   stops on slopes (the only ones: test teleports onto ground not yet there).
 - SkyCraft: the only reference in the repo is MODLOG's "Same split as the SkyCraft (Skyrim) mashup"; no URL in the
   repo, the lab or memory. Not consulted; nothing adapted from it.
+
+## Held object on the camera, the radio, icons for real, see-through cutout blocks (2026-10-10, night 4)
+Evidence: the 22:20 session (`UE4SS.log`, `mc-client.log`), the HN icon exports in `dlls/icons/`, `tools/rendertest.py`
+(new), `tools/itemtest.py`, `tools/handtest.py`, drive tests, the SkyCraft source (below).
+- Held object, broken on one half of the turn (the user: turning east it ended up far away). The world-space chain
+  (camera pose -> fist in the camera's frame -> grip -> rotator) was checked numerically over every yaw (-360..720 in 5
+  degree steps), pitch -60..60 and three grips: the rotation used for the grip and the one given to Unreal agree to
+  1e-15, and nothing in it depends on the yaw; the cause was not found in our math. Instead of patching numbers, the
+  world-space step is gone: the object is attached to HN's view camera (`K2_AttachToActor`, KeepRelative) and placed
+  by a relative transform only (`K2_SetRelativeLocationAndRotation` on its root: fist + grip, the grip's own turn),
+  so the engine's hierarchy composes it with the camera in the same update. Detached (KeepWorld) when put down,
+  thrown or swapped out. On every pickup, `carry_sweep` turns the view camera through 360 degrees of yaw (every 15,
+  at pitch -60/0/60) within one tick, reads the object back in the camera's frame at each pose and logs the largest
+  change (`carry: 360 check of ...: continuous|DISCONTINUOUS`); while held, `carry: hand ok|FAR ...` once a second
+  (at once if it is ever more than 1 m from the camera). **Not run in game yet: the 360 check is the evidence to read.**
+- Radio: refused as "one of HN's own items (InteractiveComponent)" (22:22:21), so HN's grab took it. HN puts the
+  InteractiveComponent on its grabbable props too. Now a loose prop with it is ours unless its class chain names an
+  Item, Pickup or Key (HN's inventory items); every such class's chain is logged once (`carry: class chain of ...`)
+  to check the rule against the real classes.
+- Icons: HN's capture worked in game (vase, ottoman, video recorder: `dlls/icons/*.hdr`), but (1) `narrow()` turned
+  every backslash of the path into `_` before my slash swap, so Minecraft found no file; (2) this UE build's
+  `ExportRenderTarget` writes PNG (in a .hdr name) with alpha = 1 - coverage. Path: slashes swapped on the wide string
+  before `narrow()`. Minecraft: loader detects PNG/Radiance by content and turns alpha round when the border is opaque.
+  The three real exports now show in the hotbar (screenshot `items-hotbar-hn.png`).
+- See-through blocks. `tools/rendertest.py` reads the world layer from the shared memory (the compositor's own input)
+  and measures alpha where Minecraft has geometry. Composite: world.rgb + host * (1 - world.a). Before (same camera,
+  no block targeted): solid 0.0% under alpha 250, **cutout 16.2%** (leaves, iron bars, trapdoors, cobwebs: Minecraft's
+  cutout pass alpha-tests and does not blend, but writes the texture's mip-filtered alpha; never visible in Minecraft,
+  see-through and over-bright in the composite), translucent 98.8% (right). Fix (`ShaderSourceMixin`): Minecraft's own
+  `core/terrain.fsh` and `core/block.fsh` are patched as they are read (no Mojang file shipped): alpha 1 after the
+  final colour for the solid passes (no ALPHA_CUTOUT) and for what the cutout passes keep (ALPHA_CUTOUT 0.5);
+  translucent (ALPHA_CUTOUT 0.1, blended) and OIT paths untouched. After: cutout 3.2%, all of it the glass block,
+  which 26.3 draws in the translucent pass (genuinely translucent). The 90 low pixels of the first solid run were the
+  targeted block's outline (translucent lines); the test now looks over the wall.
+- SkyCraft (https://github.com/chasmlol/SkyCraft, MIT, commit bfcaf17), files read: `README.md` (overview),
+  `docs/DESIGN.md` (sec. 9 Rendering: world/hand/GUI layers, depth-tested world, GPU sharing plan),
+  `protocol/skycraft_protocol.h` (render ring: RenSection/RenVertex with per-vertex flags `bit0 cutout (alpha test),
+  bit1 translucent`, RenAtlas, RenAvatar, RenScene), `fabric/.../render/WorldExporter.java` (block meshes from
+  Minecraft's block renderer, `quad.materialInfo().layer().translucent()` to the flag), `FrameExporter.java` (listed).
+  Difference that matters: SkyCraft's final design draws Minecraft's blocks as meshes in Skyrim's own frame (occlusion
+  and material class native to the host); NeighborCraft composites Minecraft's rendered picture by depth, so material
+  class has to be carried by the picture's alpha, which is what the shader patch does. No SkyCraft code was copied.

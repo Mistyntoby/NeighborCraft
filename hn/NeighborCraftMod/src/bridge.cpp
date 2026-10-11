@@ -1463,7 +1463,7 @@ namespace nc
 		float g_handDist = 1.35f;                      // how far that is from the camera (blocks)
 		DWORD g_handAt = 0;                            // when that came (it comes every frame while an object is held)
 		Vec3f g_handLocal{0.66f, -0.28f, 1.15f};       // the fist in the camera's frame (blocks: right, up, forward)
-		void carry_hand_follow(const Vec3f &cameraLoc, const Rot3f &cameraRot);
+		void carry_hand_follow(UObject *camera, const Vec3f &cameraLoc, const Rot3f &cameraRot);
 		Vec3f rotate(const float q[4], const Vec3f &v);
 		bool local_bounds(UObject *component, Vec3f &lo, Vec3f &hi);
 		void carry_answer(const std::string &id, bool ok, const std::string &why);
@@ -2218,7 +2218,7 @@ namespace nc
 				if (UObject **component = camera->GetValuePtrByPropertyNameInChain<UObject *>(STR("CameraComponent")); component && *component)
 					Call(*component, STR("SetFieldOfView")).set(STR("InFieldOfView"), hfov).invoke();
 				// the held object in the hand, from this very camera pose (placed before it, it was a frame behind)
-				carry_hand_follow(pose.loc, pose.rot);
+				carry_hand_follow(camera, pose.loc, pose.rot);
 			}
 			// the view target: ours while Minecraft drives (re-applied if HN takes it), the player's otherwise
 			Call current(pc, STR("GetViewTarget"));
@@ -2636,6 +2636,8 @@ namespace nc
 			Vec3f scale{1, 1, 1};
 			float extent = 20.0f;      // half size (cm, largest axis) at its own scale
 			float fit = 1.0f;          // its size in the hand (times its own scale), before the near placement
+			UObject *attachedTo = nullptr; // the view camera it is attached to while shown in the hand
+			bool swept = false;        // the 360-degree check ran for it
 			float mass = 10.0f;
 			bool confirmed = false;    // Minecraft has its token
 			UObject *level = nullptr;  // the player controller of its level (gone with it)
@@ -2643,6 +2645,8 @@ namespace nc
 		std::unordered_map<std::string, Carried> g_carried;
 		std::string g_shownId;           // what is shown in the hand now
 		int g_carryCounter = 0;
+		void carry_detach(Carried &c);
+		void carry_sweep(Carried &c, UObject *camera, const Vec3f &loc, const Rot3f &rot);
 
 		struct PickupTry
 		{
@@ -2749,8 +2753,23 @@ namespace nc
 			}
 			if (hinged_part(*r) || hinged_part(*component))
 				return refuse(L"a door or drawer");
-			if (interactive_actor(*actor)) // a door, or one of HN's story items (keys...): HN's own pickup
-				return refuse(L"one of HN's own items (InteractiveComponent): HN's pickup");
+			// HN's InteractiveComponent is on its story items (keys...: HN's inventory, the story needs them) and on the
+			// props HN's own grab picks up (BP_Radio_apartments: refused for it on 22:22:21, and HN's grab took the
+			// radio). A loose prop with it is ours; one whose class chain names an item is HN's.
+			if (interactive_actor(*actor))
+			{
+				static std::unordered_set<UObject *> logged;
+				if (logged.insert((*actor)->GetClassPrivate()).second)
+				{
+					std::wstring chain;
+					for (UStruct *k = (*actor)->GetClassPrivate(); k; k = k->GetSuperStruct())
+						chain += (chain.empty() ? L"" : L" < ") + k->GetName();
+					log(L"carry: class chain of " + (*actor)->GetName() + L": " + chain);
+				}
+				if (class_contains(*actor, L"Item") || class_contains(*actor, L"Pickup") || class_contains(*actor, L"PickUp") ||
+					class_contains(*actor, L"Key"))
+					return refuse(L"one of HN's inventory items (its class chain names an item or key): HN's pickup");
+			}
 			// TVs, switches and lamps are used, not carried (Act 1's TV is a loose physics object). Not decided by HN's
 			// OnIsActionComponent: it says yes for its loose props too (BP_Video_Recorder, BP_Dining_chair: there its
 			// "action" is its own grab), and excluding those handed every pickup to HN's grab (the 21:31 session).
@@ -2869,8 +2888,11 @@ namespace nc
 			const std::wstring file = dirPath + name;
 			if (!exported || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
 				return fail(component && *component ? L"the export wrote nothing" : L"no capture component");
-			std::string path = narrow(file);
-			std::replace(path.begin(), path.end(), '\\', '/');
+			// slashes before narrow(), which makes every backslash '_' (the 22:20 session: Minecraft got
+			// "C:_Program Files (x86)_Steam_..." and found nothing)
+			std::wstring forward = file;
+			std::replace(forward.begin(), forward.end(), L'\\', L'/');
+			const std::string path = narrow(forward);
 			sendf("{\"t\":\"icon\",\"key\":\"%s\",\"file\":\"%s\"}", narrow(cls).c_str(), path.c_str());
 			log(L"carry: icon for " + cls + L" in " + file);
 		}
@@ -3008,6 +3030,7 @@ namespace nc
 		/// token goes after.
 		void release(const std::string &id, Carried &c, const Vec3f &at, const Vec3f &velocity)
 		{
+			carry_detach(c);
 			set_actor_scale(c.actor, c.scale);
 			place_actor(c.actor, at, g_mcLookYaw + 90.0f);
 			if (c.body)
@@ -3153,6 +3176,7 @@ namespace nc
 			{
 				if (auto it = g_carried.find(g_shownId); it != g_carried.end())
 				{
+					carry_detach(it->second);
 					set_actor_scale(it->second.actor, it->second.scale);
 					set_carried_state(it->second.actor, nullptr, false);
 					Call(it->second.actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
@@ -3279,43 +3303,153 @@ namespace nc
 		/// roll plus the object's grip, its grip point (its mesh's bottom middle) on the fist. It used to be placed in
 		/// world space with the look's yaw only and before HN's camera moved: looking up or down it stayed upright and
 		/// slid up and down against the hand, a frame behind (the user: "moves vertically with the camera").
-		void carry_hand_follow(const Vec3f &loc, const Rot3f &rot)
+		/// The held object in the camera's frame as the engine has it: (its location - the camera's) turned back by the
+		/// camera's rotation, and its rotation relative to the camera's (forward and up axes).
+		void held_in_camera(Carried &c, const Vec3f &loc, const Rot3f &camRot, Vec3f &pos, Vec3f &fwd, Vec3f &up)
+		{
+			Call w(c.actor, STR("K2_GetActorLocation"));
+			w.invoke();
+			Call r(c.actor, STR("K2_GetActorRotation"));
+			r.invoke();
+			const Vec3f *wl = w.param<Vec3f>(STR("ReturnValue"));
+			const Rot3f *wr = r.param<Rot3f>(STR("ReturnValue"));
+			float qc[4], qcInv[4], qo[4];
+			quat_of(camRot, qc);
+			qcInv[0] = -qc[0], qcInv[1] = -qc[1], qcInv[2] = -qc[2], qcInv[3] = qc[3];
+			pos = wl ? rotate(qcInv, Vec3f{wl->x - loc.x, wl->y - loc.y, wl->z - loc.z}) : Vec3f{};
+			quat_of(wr ? *wr : Rot3f{}, qo);
+			fwd = rotate(qcInv, rotate(qo, Vec3f{1, 0, 0}));
+			up = rotate(qcInv, rotate(qo, Vec3f{0, 0, 1}));
+		}
+
+		/// The full turn, in the engine, once per pickup: the view camera turned through 360 degrees of yaw (every 15,
+		/// at pitch -60, 0 and 60) within this tick, and the held object read back at each pose in the camera's frame:
+		/// it must not move there. The camera is put back before the frame is drawn. Logged: the largest change of the
+		/// object's place (cm) and turn (its axes) relative to the camera, and the pose where it happened.
+		void carry_sweep(Carried &c, UObject *camera, const Vec3f &loc, const Rot3f &rot)
+		{
+			auto pose = [&](const Rot3f &r) {
+				Call(camera, STR("K2_SetActorLocationAndRotation")).set(STR("NewLocation"), loc).set(STR("NewRotation"), r)
+					.set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+			};
+			Vec3f p0, f0, u0;
+			held_in_camera(c, loc, rot, p0, f0, u0);
+			float worstPos = 0.0f, worstTurn = 0.0f;
+			Rot3f worstAt = rot;
+			int poses = 0;
+			for (float pitch : {-60.0f, 0.0f, 60.0f})
+				for (int step = 0; step < 24; ++step)
+				{
+					const Rot3f r{pitch, rot.yaw + step * 15.0f, rot.roll};
+					pose(r);
+					Vec3f p, f, u;
+					held_in_camera(c, loc, r, p, f, u);
+					++poses;
+					const float dp = std::sqrt((p.x - p0.x) * (p.x - p0.x) + (p.y - p0.y) * (p.y - p0.y) + (p.z - p0.z) * (p.z - p0.z));
+					const float dt = std::max(std::sqrt((f.x - f0.x) * (f.x - f0.x) + (f.y - f0.y) * (f.y - f0.y) + (f.z - f0.z) * (f.z - f0.z)),
+						std::sqrt((u.x - u0.x) * (u.x - u0.x) + (u.y - u0.y) * (u.y - u0.y) + (u.z - u0.z) * (u.z - u0.z)));
+					if (dp > worstPos || dt > worstTurn)
+						worstAt = r;
+					worstPos = std::max(worstPos, dp), worstTurn = std::max(worstTurn, dt);
+				}
+			pose(rot);
+			char line[320];
+			snprintf(line, sizeof(line), "carry: 360 check of %s: %d camera poses, the object in the camera's frame at %.1f %.1f %.1f cm moved at most %.2f cm and turned at most %.4f (axis change) - worst at yaw %.0f pitch %.0f: %s",
+				narrow(c.actor->GetName()).c_str(), poses, p0.x, p0.y, p0.z, worstPos, worstTurn, worstAt.yaw, worstAt.pitch,
+				worstPos < 0.5f && worstTurn < 0.01f ? "continuous" : "DISCONTINUOUS");
+			log(std::wstring(line, line + strlen(line)));
+		}
+
+		/// Off the camera (put down, thrown, another slot): back to world space where it is.
+		void carry_detach(Carried &c)
+		{
+			if (!c.attachedTo || !c.actor)
+				return;
+			Call(c.actor, STR("K2_DetachFromActor")).set<uint8_t>(STR("LocationRule"), 1).set<uint8_t>(STR("RotationRule"), 1)
+				.set<uint8_t>(STR("ScaleRule"), 1).invoke(); // KeepWorld
+			c.attachedTo = nullptr;
+		}
+
+		/// The held object in the first-person hand: attached to HN's view camera and placed by a transform relative to
+		/// it only (the fist in the camera's frame from Minecraft, the grip's offset and turn, its grip point), so the
+		/// engine's hierarchy makes it follow the camera, in the same update, whatever way Steve faces. It used to be
+		/// placed in world space from the camera's pose each frame; it broke on one half of the turn (the user: turning
+		/// east it ended up far away). No world-space step is left on our side, and the world position it really has
+		/// is checked and logged (`carry: hand ...`).
+		void carry_hand_follow(UObject *camera, const Vec3f &loc, const Rot3f &rot)
 		{
 			const auto it = g_carried.find(g_shownId);
-			if (g_shownId.empty() || it == g_carried.end() || !it->second.actor)
+			if (g_shownId.empty() || it == g_carried.end() || !it->second.actor || !camera)
 				return;
 			Carried &c = it->second;
-			float qc[4];
-			quat_of(rot, qc);
-			const Vec3f X = rotate(qc, {1, 0, 0}), Y = rotate(qc, {0, 1, 0}), Z = rotate(qc, {0, 0, 1});
+			if (c.attachedTo != camera)
+			{
+				carry_detach(c);
+				Call attach(c.actor, STR("K2_AttachToActor"));
+				attach.set<UObject *>(STR("ParentActor"), camera).set(STR("SocketName"), NameParam{})
+					.set<uint8_t>(STR("LocationRule"), 0).set<uint8_t>(STR("RotationRule"), 0).set<uint8_t>(STR("ScaleRule"), 0) // KeepRelative
+					.set_bool(STR("bWeldSimulatedBodies"), false);
+				attach.invoke();
+				c.attachedTo = camera;
+				log(L"carry: " + c.actor->GetName() + L" attached to the view camera");
+			}
 			const Grip &g = grip_for(c.actor);
-			// the fist (Minecraft's, while it draws the carrying arm; else low right in front), plus the grip's offset
+			// the fist (Minecraft's, while it draws the carrying arm; else low right in front), plus the grip's offset,
+			// in the camera's frame (Unreal: x forward, y right, z up; cm)
 			const bool onFist = GetTickCount() - g_handAt < 250;
 			const Vec3f fist = onFist ? Vec3f{g_handLocal.z * 100.0f, g_handLocal.x * 100.0f, g_handLocal.y * 100.0f} : Vec3f{60.0f, 25.0f, -25.0f};
-			// Near the eye, the same picture: everything (the fist's place, the grip, the object's size) scaled towards the
-			// camera to kNear. At the fist's own distance (~1.35 m) the object went into walls and furniture in front of
-			// Steve and vanished in them (Minecraft draws held items in a pass of their own; HN can't per object); at
-			// 25 cm it is inside Steve's own collision radius (30 cm), where nothing of the world can be, and it looks
-			// exactly as it did from the eye. HN's near plane is ~10 cm.
+			// Near the eye, the same picture: everything scaled towards the camera to kNear. At the fist's own distance
+			// (~1.35 m) the object went into walls in front of Steve and vanished; at 25 cm it is inside Steve's own
+			// collision radius (30 cm), where nothing of the world can be. HN's near plane is ~10 cm.
 			constexpr float kNear = 25.0f;
 			const float reach = std::sqrt(fist.x * fist.x + fist.y * fist.y + fist.z * fist.z);
 			const float k = reach > kNear ? kNear / reach : 1.0f;
-			const float f = (fist.x + g.fwd) * k, r = (fist.y + g.right) * k, u = (fist.z + g.up) * k;
-			const Vec3f at{loc.x + X.x * f + Y.x * r + Z.x * u, loc.y + X.y * f + Y.y * r + Z.y * u, loc.z + X.z * f + Y.z * r + Z.z * u};
+			const Vec3f at{(fist.x + g.fwd) * k, (fist.y + g.right) * k, (fist.z + g.up) * k};
 			const float size = c.fit * k;
 			set_actor_scale(c.actor, Vec3f{c.scale.x * size, c.scale.y * size, c.scale.z * size});
-			float qg[4], qo[4];
+			float qg[4];
 			quat_of(Rot3f{g.pitch, g.yaw, g.roll}, qg);
-			quat_mul(qc, qg, qo);
-			// its grip point, at its scale now: the bottom middle of its root's local bounds
-			Vec3f lo{}, hi{};
-			Vec3f grip{};
+			// its grip point (its mesh's bottom middle) at its size now, turned by the grip only: the camera turns the rest
+			Vec3f lo{}, hi{}, grip{};
 			if (c.body && local_bounds(c.body, lo, hi))
+				grip = rotate(qg, Vec3f{(lo.x + hi.x) * 0.5f * c.scale.x * size, (lo.y + hi.y) * 0.5f * c.scale.y * size, lo.z * c.scale.z * size});
+			const Vec3f rel{at.x - grip.x, at.y - grip.y, at.z - grip.z};
+			UObject *root = c.body;
+			if (!root)
 			{
-				const Vec3f sc = actor_scale(c.actor);
-				grip = rotate(qo, Vec3f{(lo.x + hi.x) * 0.5f * sc.x, (lo.y + hi.y) * 0.5f * sc.y, lo.z * sc.z});
+				Call r(c.actor, STR("K2_GetRootComponent"));
+				r.invoke();
+				if (UObject *const *rr = r.param<UObject *>(STR("ReturnValue")))
+					root = *rr;
 			}
-			place_actor_rot(c.actor, Vec3f{at.x - grip.x, at.y - grip.y, at.z - grip.z}, rot_of(qo));
+			if (root)
+				Call(root, STR("K2_SetRelativeLocationAndRotation")).set(STR("NewLocation"), rel).set(STR("NewRotation"), Rot3f{g.pitch, g.yaw, g.roll})
+					.set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+			if (!c.swept && root)
+			{
+				c.swept = true;
+				carry_sweep(c, camera, loc, rot);
+			}
+			// where it really is: logged every second while held, and at once if it is ever far from the camera
+			static DWORD nextLog = 0, nextWarn = 0;
+			Call where(c.actor, STR("K2_GetActorLocation"));
+			where.invoke();
+			if (const Vec3f *w = where.param<Vec3f>(STR("ReturnValue")))
+			{
+				const float dist = std::sqrt((w->x - loc.x) * (w->x - loc.x) + (w->y - loc.y) * (w->y - loc.y) + (w->z - loc.z) * (w->z - loc.z));
+				const DWORD now = GetTickCount();
+				if (now > nextLog || (dist > 100.0f && now > nextWarn))
+				{
+					nextLog = now + 1000;
+					if (dist > 100.0f)
+						nextWarn = now + 250;
+					char line[400];
+					snprintf(line, sizeof(line), "carry: hand %s: camera yaw %.1f pitch %.1f roll %.1f at %.0f %.0f %.0f; fist %s (%.0f %.0f %.0f cm); relative %.1f %.1f %.1f; object at %.0f %.0f %.0f = %.0f cm from the camera",
+						dist > 100.0f ? "FAR" : "ok", rot.yaw, rot.pitch, rot.roll, loc.x, loc.y, loc.z, onFist ? "Minecraft's" : "default", fist.x, fist.y, fist.z,
+						rel.x, rel.y, rel.z, w->x, w->y, w->z, dist);
+					log(std::wstring(line, line + strlen(line)));
+				}
+			}
 		}
 
 		// ---- doors ----------------------------------------------------------------------------------------------------

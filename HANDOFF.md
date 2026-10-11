@@ -196,8 +196,9 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Shutdown crash | VERIFIED fixed | no CrashDumps since |
 | Cutscene glitch (MC kit/HUD/drive during cutscene) | VERIFIED gate fires (`cutscene: Minecraft waits` / `cutscene over`) | the user hasn't re-judged the item glitch |
 | Inventory left-click | VERIFIED (log 02:01: MC button 1 = left picks the full stack) | |
-| Carry: pickup/hold/place/throw | pickup through our path VERIFIED in game (21:58: 7 pickups, place, throw); multi-part props, camera-frame attachment, near-eye placement, grips: BUILT; rules VERIFIED in handtest | §9, MODLOG night 3 |
-| Per-item inventory icons | fallbacks + loading HN pictures VERIFIED in itemtest (screenshot); **HN scene-capture export not yet run** | MODLOG night 3 |
+| Carry: pickup/hold/place/throw | VERIFIED in game 22:20 (vase, ottoman, video recorder); radio rule changed (BUILT); held object now attached to the view camera with an in-engine 360 check on every pickup (BUILT, **read `carry: 360 check` next session**) | MODLOG night 4 |
+| Per-item inventory icons | HN capture VERIFIED in game (3 exports); path and alpha fixed; the real exports VERIFIED in the hotbar (test Minecraft screenshot) | MODLOG night 4 |
+| See-through cutout blocks | cause measured (16.2% of cutout pixels under alpha 250 in the frame HN gets), fixed by `ShaderSourceMixin` (3.2%, all genuinely translucent glass); **not yet seen in game** | MODLOG night 4, `tools/rendertest.py` |
 | Ctrl+Q stack drop | VERIFIED in itemtest (counts, empty slot, pickup again); not yet in game | MODLOG night 3 |
 | Lighting/shadows, transparency, GPU sharing, macOS, block mining in HN geometry, Neighbor combat | OPEN | not started |
 
@@ -215,6 +216,12 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 - Door capsule.
 
 ## 6. Outstanding issues (priority order)
+
+000. **Play-test night 4** (P0): pick up the radio and others; read `carry: class chain of ...` (is the Item/Key rule
+     right?), `carry: 360 check of ...` (continuous?) and any `carry: hand FAR`; turn a full circle holding things;
+     look at leaves/glass/iron bars/trapdoors placed in HN (no longer see-through; glass stays translucent); hotbar
+     icons should be the objects' pictures. If the 360 check says continuous but the object still drifts in game,
+     something outside the transform moves it: the FAR lines name where it was.
 
 00. **Play-test night 3** (P0): pick up several props (video recorder, vase, chairs, mugs, anything multi-part): log
     `carry: pickup started` / `carry: what the look meets isn't carried: <reason>` names any that still go to HN; look
@@ -326,6 +333,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+Night 4: rendertest before/after, itemtest, handtest, real-icon hotbar screenshot, drive tests pass; HN DLL md5 `baaea859...` installed; held-object attachment, 360 check and radio rule not run in game.
+
 Night 3: itemtest, handtest and drive tests pass on the final code; HN DLL md5 `1c8984e8...` installed; nothing of night 3 run in game.
 
 Night 2: drive tests and handtest pass on the final code; HN DLL md5 `20224a47…` installed; nothing of night 2 run in game.
@@ -356,3 +365,13 @@ Earlier:
 - Next candidates, by evidence needed: (1) see the held object and icons in game and tune grips; (2) the four
   per-frame GPU->CPU readbacks are the main cost: the hand and overlay layers could be skipped when unchanged or
   empty (needs frame timing from `frames:` lines first); (3) GPU sharing (D3D11/GL interop) instead of readbacks.
+
+## 14. Night 4: files changed and sources read
+- Changed: `hn/NeighborCraftMod/src/bridge.cpp` (pickup_target: InteractiveComponent props + class-chain log;
+  carry_hand_follow on the view camera, carry_detach, carry_sweep, held_in_camera; icon path before narrow()),
+  `mc/src/client/java/dev/neighborcraft/client/CarryIcons.java` (coverage-alpha inversion),
+  `mc/src/client/java/dev/neighborcraft/client/mixin/ShaderSourceMixin.java` (new: opaque alpha for solid/cutout),
+  `mc/src/client/resources/neighborcraft.client.mixins.json`, `tools/rendertest.py` (new), MODLOG, this file.
+- The visible block fix is `ShaderSourceMixin` alone (rendertest: cutout 16.2% -> 3.2% low-alpha pixels).
+- SkyCraft read: README.md, docs/DESIGN.md, protocol/skycraft_protocol.h, fabric/src/client/java/dev/skycraft/client/
+  render/WorldExporter.java (and the file list of skse/src/WorldRender.cpp, FrameExporter.java). MIT; nothing copied.

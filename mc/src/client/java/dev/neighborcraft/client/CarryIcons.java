@@ -52,6 +52,7 @@ public final class CarryIcons {
 		try {
 			byte[] bytes = Files.readAllBytes(Path.of(file));
 			NativeImage image = isRadiance(bytes) ? radiance(bytes) : NativeImage.read(bytes);
+			invertIfCoverage(image);
 			Identifier id = Identifier.fromNamespaceAndPath("neighborcraft", "hn_icon/" + Integer.toHexString(key.hashCode()));
 			Minecraft.getInstance().getTextureManager().register(id, new DynamicTexture(() -> "neighborcraft icon " + key, image));
 			PICTURES.put(key, id);
@@ -59,6 +60,31 @@ public final class CarryIcons {
 			Passthrough.LOG.info("carry: icon for {} ({}x{}) from {}", key, image.getWidth(), image.getHeight(), file);
 		} catch (IOException | RuntimeException e) {
 			Passthrough.LOG.warn("carry: no icon for {} from {} ({}): the fallback stays", key, file, e.toString());
+		}
+	}
+
+	/**
+	 * Unreal's scene capture writes alpha as 1 - coverage (the 22:20 session's pictures: the object at alpha 0, the
+	 * empty background at 255): a picture whose border is mostly opaque is that, and its alpha is turned round.
+	 */
+	private static void invertIfCoverage(final NativeImage image) {
+		int w = image.getWidth(), h = image.getHeight(), opaque = 0, border = 0;
+		for (int x = 0; x < w; x++) {
+			for (int y : new int[] {0, h - 1}) {
+				border++;
+				opaque += (image.getPixel(x, y) >>> 24) > 127 ? 1 : 0;
+			}
+		}
+
+		if (opaque * 2 <= border) {
+			return;
+		}
+
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				int c = image.getPixel(x, y);
+				image.setPixel(x, y, (255 - (c >>> 24)) << 24 | (c & 0xFFFFFF));
+			}
 		}
 	}
 
