@@ -13,6 +13,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
@@ -24,6 +25,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(Minecraft.class)
 abstract class MinecraftAttackMixin {
+	/**
+	 * Holding the attack button mines on. Minecraft keeps attacking (continueAttack: block-breaking progress, the
+	 * repeating swing) only while its own window has the mouse grabbed, and its window is hidden behind the host's,
+	 * which has the mouse: the attack key was held (the host sends down and up) but every tick said "not grabbed", so a
+	 * click made one hit and holding did nothing more. While the host drives, the host's mouse is Minecraft's mouse.
+	 * Only this check: menus, the cursor and Minecraft's own mouse handling are unchanged.
+	 */
+	@Redirect(method = "handleKeybinds", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/MouseHandler;isMouseGrabbed()Z"))
+	private boolean passthrough$hostHasTheMouse(final net.minecraft.client.MouseHandler mouse) {
+		return Passthrough.driving || mouse.isMouseGrabbed();
+	}
+
 	@Shadow
 	public LocalPlayer player;
 

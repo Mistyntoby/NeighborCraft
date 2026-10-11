@@ -646,6 +646,10 @@ namespace nc
 			return *actor;
 		}
 
+		void quat_of(const Rot3f &r, float q[4]);
+		void place_actor_rot(UObject *actor, const Vec3f &at, const Rot3f &rot);
+		void set_actor_scale(UObject *actor, const Vec3f &scale);
+
 		// ---- shadows of Minecraft's blocks in HN's own lighting -----------------------------------------------------
 		// Minecraft's blocks are a composited picture: HN's lights never saw them, so a placed block cast no shadow on HN's
 		// floor and walls. Each full opaque block gets an invisible stand-in in HN's world: Unreal's own 1 m cube
@@ -695,7 +699,20 @@ namespace nc
 			return *cube;
 		}
 
-		UObject *spawn_shadow(UObject *context, const Vec3f &centre)
+		bool get_bool_property(UObject *o, const TCHAR *name, bool &value)
+		{
+			auto *p = static_cast<FBoolProperty *>(o ? o->GetPropertyByNameInChain(name) : nullptr);
+			if (!p)
+				return false;
+			value = p->GetPropertyValue(p->ContainerPtrToValuePtr<void>(o));
+			return true;
+		}
+
+		/// A box that only casts shadows: Unreal's 1 m cube at `centre`, `size` (m per axis) and `rot`, movable (dynamic
+		/// shadows), no collision, not drawn into the picture (SetRenderInMainPass false: the engine's own way to have a
+		/// primitive in the shadow passes only). The first version hid the actor and relied on bCastHiddenShadow; the
+		/// 12:00 session made one and no shadow was seen.
+		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot)
 		{
 			static UObject *meshActor = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshActor"));
 			UObject *statics = gameplay_statics(), *cube = shadow_cube();
@@ -703,25 +720,162 @@ namespace nc
 				return nullptr;
 			Transform4 t;
 			t.pos[0] = centre.x, t.pos[1] = centre.y, t.pos[2] = centre.z;
-			t.scale[0] = t.scale[1] = t.scale[2] = 0.98f; // a hair inside the block: no acne where it meets HN's surfaces
+			quat_of(rot, t.rot);
+			t.scale[0] = size.x, t.scale[1] = size.y, t.scale[2] = size.z;
 			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
 			begin.set<UObject *>(STR("WorldContextObject"), context).set<UObject *>(STR("ActorClass"), meshActor).set(STR("SpawnTransform"), t)
 				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
 			UObject *const *actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
 			if (!actor || !*actor)
 				return nullptr;
-			if (UObject **mesh = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); mesh && *mesh)
+			UObject **mesh = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent"));
+			if (mesh && *mesh)
 			{
 				Call(*mesh, STR("SetMobility")).set<uint8_t>(STR("NewMobility"), 2).invoke(); // movable: dynamic shadows
 				Call(*mesh, STR("SetStaticMesh")).set<UObject *>(STR("NewMesh"), cube).invoke();
 				Call(*mesh, STR("SetCollisionEnabled")).set<uint8_t>(STR("NewType"), 0).invoke(); // no collision
-				set_bool_property(*mesh, STR("bCastHiddenShadow"), true);
 				Call(*mesh, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
+				set_bool_property(*mesh, STR("bCastDynamicShadow"), true);
+				set_bool_property(*mesh, STR("bCastHiddenShadow"), true);
+				set_bool_property(*mesh, STR("bAffectDynamicIndirectLighting"), false);
+				Call(*mesh, STR("SetRenderInMainPass")).set_bool(STR("bValue"), false).invoke();
 			}
 			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
-			Call(*actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
 			Call(*actor, STR("SetActorEnableCollision")).set_bool(STR("bNewActorEnableCollision"), false).invoke();
+			static bool reported = false;
+			if (!reported && mesh && *mesh)
+			{
+				reported = true;
+				bool cast = false, dynamic = false, mainPass = true, hidden = false;
+				get_bool_property(*mesh, STR("CastShadow"), cast);
+				get_bool_property(*mesh, STR("bCastDynamicShadow"), dynamic);
+				get_bool_property(*mesh, STR("bRenderInMainPass"), mainPass);
+				get_bool_property(*mesh, STR("bHiddenInGame"), hidden);
+				const uint8_t *mobility = (*mesh)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility"));
+				log(L"shadows: a stand-in as the engine has it: CastShadow " + std::to_wstring(cast) + L", bCastDynamicShadow " +
+					std::to_wstring(dynamic) + L", bRenderInMainPass " + std::to_wstring(mainPass) + L", hidden " + std::to_wstring(hidden) +
+					L", mobility " + (mobility ? std::to_wstring(*mobility) : L"?"));
+			}
 			return *actor;
+		}
+
+		UObject *spawn_shadow(UObject *context, const Vec3f &centre)
+		{
+			return spawn_shadow_box(context, centre, Vec3f{0.98f, 0.98f, 0.98f}, Rot3f{});
+		}
+
+		/// HN's lights as the engine has them, once per level: which can cast a dynamic shadow at all (a static light's
+		/// shadows are baked: nothing movable, HN's own props included, gets one from it).
+		void light_census(UObject *pawn)
+		{
+			static UObject *censusFor = nullptr;
+			if (censusFor == pawn)
+				return;
+			censusFor = pawn;
+			static const wchar_t *kinds[] = {L"PointLightComponent", L"SpotLightComponent", L"DirectionalLightComponent", L"RectLightComponent"};
+			int byMobility[3] = {}, shadowing = 0, total = 0;
+			struct Near
+			{
+				float d;
+				std::wstring line;
+			};
+			std::vector<Near> nearest;
+			for (const wchar_t *kind : kinds)
+				for (UObject *l : find_all(kind))
+				{
+					++total;
+					const uint8_t *mobility = l->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility"));
+					bool cast = false, dynamic = false, visible = true;
+					get_bool_property(l, STR("CastShadows"), cast);
+					get_bool_property(l, STR("CastDynamicShadows"), dynamic);
+					get_bool_property(l, STR("bVisible"), visible);
+					if (mobility && *mobility < 3)
+						++byMobility[*mobility];
+					const bool dynamicShadow = cast && dynamic && mobility && *mobility >= 1 && visible;
+					shadowing += dynamicShadow;
+					Call w(l, STR("K2_GetComponentLocation"));
+					const Vec3f *at = w.invoke() ? w.param<Vec3f>(STR("ReturnValue")) : nullptr;
+					const float d = at ? std::sqrt((at->x - g_eye.x) * (at->x - g_eye.x) + (at->y - g_eye.y) * (at->y - g_eye.y) + (at->z - g_eye.z) * (at->z - g_eye.z)) : 1e9f;
+					nearest.push_back({d, std::wstring(kind) + L" " + l->GetName() + L" at " + std::to_wstring(int(d / 100.0f)) + L" m: mobility " +
+						(mobility ? std::to_wstring(*mobility) : L"?") + L", CastShadows " + std::to_wstring(cast) + L", CastDynamicShadows " +
+						std::to_wstring(dynamic) + L", visible " + std::to_wstring(visible)});
+				}
+			log(L"shadows: HN's lights: " + std::to_wstring(total) + L" (static " + std::to_wstring(byMobility[0]) + L", stationary " +
+				std::to_wstring(byMobility[1]) + L", movable " + std::to_wstring(byMobility[2]) + L"), " + std::to_wstring(shadowing) +
+				L" able to cast dynamic shadows (movable objects get shadows only from those)");
+			std::sort(nearest.begin(), nearest.end(), [](const Near &a, const Near &b) { return a.d < b.d; });
+			for (size_t i = 0; i < nearest.size() && i < 6; ++i)
+				log(L"shadows: near light: " + nearest[i].line);
+		}
+
+		/// Steve's shadow: his model's boxes (Minecraft's player model: head 8 px, body 8x12x4, arms and legs 4x12x4; 32 px =
+		/// his height) as shadow-only boxes at his feet, facing his way, legs and arms swinging with his walk. HN's player
+		/// is a puppet without a shadow; Minecraft's Steve is a picture HN's lights never see.
+		struct SteveShadow
+		{
+			UObject *level = nullptr;
+			UObject *parts[6] = {};
+			Vec3f lastFeet{};
+			float phase = 0.0f, swing = 0.0f;
+		} g_steveShadow;
+
+		void steve_shadow_tick(UObject *pc, UObject *pawn)
+		{
+			SteveShadow &s = g_steveShadow;
+			if (!g_haveFeet)
+				return;
+			// part: centre (px: right, forward, up), size (px: right, forward, up), pivot height (px) and swing sign
+			struct Part
+			{
+				float cx, cy, cz, sx, sy, sz, pivot, swing;
+			};
+			static const Part parts[6] = {
+				{-2, 0, 6, 4, 4, 12, 12, 1},   // left leg
+				{2, 0, 6, 4, 4, 12, 12, -1},   // right leg
+				{0, 0, 18, 8, 4, 12, 0, 0},    // body
+				{-6, 0, 18, 4, 4, 12, 22, -1}, // left arm
+				{6, 0, 18, 4, 4, 12, 22, 1},   // right arm
+				{0, 0, 28, 8, 8, 8, 0, 0},     // head
+			};
+			if (s.level != pc)
+			{
+				s = SteveShadow{};
+				s.level = pc;
+				for (int i = 0; i < 6; ++i)
+					s.parts[i] = spawn_shadow_box(pawn, g_feet, Vec3f{0.04f, 0.04f, 0.04f}, Rot3f{});
+				log(L"shadows: Steve's shadow made of " + std::to_wstring(std::count_if(std::begin(s.parts), std::end(s.parts), [](UObject *a) { return a != nullptr; })) + L" boxes");
+			}
+			// the walk: the swing grows with his speed and its phase with the distance walked (as Minecraft's limb swing)
+			const float dx = g_feet.x - s.lastFeet.x, dy = g_feet.y - s.lastFeet.y;
+			const float step = std::sqrt(dx * dx + dy * dy);
+			s.lastFeet = g_feet;
+			if (step < 200.0f) // not a teleport
+			{
+				s.phase += step * 0.045f;
+				s.swing += ((step > 0.5f ? 32.0f : 0.0f) - s.swing) * 0.2f;
+			}
+			const bool crawling = g_steveHeight < 120.0f;
+			const float px = std::max(g_steveHeight, 120.0f) / 32.0f; // cm per model pixel (5.6 standing)
+			const float yaw = g_mcLookYaw + 90.0f, d2r = 3.14159265f / 180.0f;
+			const Vec3f fwd{std::cos(yaw * d2r), std::sin(yaw * d2r), 0.0f}, right{-std::sin(yaw * d2r), std::cos(yaw * d2r), 0.0f};
+			for (int i = 0; i < 6; ++i)
+			{
+				if (!s.parts[i])
+					continue;
+				const Part &p = parts[i];
+				const float a = p.swing * s.swing * std::sin(s.phase) * d2r;
+				// a limb turns about its top (hip or shoulder): its middle moves forward/back and up
+				float cy = p.cy, cz = p.cz;
+				if (p.swing != 0.0f)
+				{
+					const float half = p.sz * 0.5f;
+					cy = std::sin(a) * half;
+					cz = p.pivot - std::cos(a) * half;
+				}
+				const Vec3f at{g_feet.x + (right.x * p.cx + fwd.x * cy) * px, g_feet.y + (right.y * p.cx + fwd.y * cy) * px, g_feet.z + cz * px};
+				place_actor_rot(s.parts[i], at, Rot3f{a / d2r, yaw, 0.0f});
+				set_actor_scale(s.parts[i], Vec3f{p.sy * px / 100.0f, p.sx * px / 100.0f, crawling ? 0.0001f : p.sz * px / 100.0f});
+			}
 		}
 
 		void destroy_colliders(bool alive)
@@ -1579,9 +1733,19 @@ namespace nc
 		bool local_bounds(UObject *component, Vec3f &lo, Vec3f &hi);
 		void carry_answer(const std::string &id, bool ok, const std::string &why);
 		bool carry_place(UObject *pc, UObject *pawn);
-		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls);
+		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls, float charge = 0.5f);
+		struct ThrowCharge
+		{
+			std::string id;
+			DWORD start = 0;
+			bool active = false;
+		} g_throwCharge; // Q held with an HN object in the hand
 		void carry_start_pickup(UObject *actor, UObject *body);
-		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut = nullptr);
+		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut = nullptr, UObject **hitOut = nullptr);
+		bool electric(UObject *actor);
+		void hn_action_tap();
+		void release_hn_action();
+		void release_hn_action();
 		/// The refusal of a loose physics object that is neither ours nor HN's to pick up (a TV, a lamp): its HN action is
 		/// HN's grab, so it gets none.
 		const wchar_t *const kNotCarriedNotGrabbed = L"a TV, switch or lamp: neither carried nor grabbed";
@@ -2099,12 +2263,44 @@ namespace nc
 							 (key_held(VK_SPACE) ? 16 : 0) | (key_held(VK_SHIFT) ? 32 : 0) | (key_held(VK_CONTROL) ? 64 : 0);
 			sendf("{\"t\":\"move\",\"m\":%d}", g_minecraftScreen ? 0 : bits);
 			forward_key('E', "inventory");
-			// Q throws a held HN object (one per slot: Ctrl+Q too); otherwise Minecraft's drop, with Ctrl the whole stack
-			// (Minecraft can't see Ctrl itself: its window never has the keys). One press, one of the two.
+			// Q throws a held HN object, charged like HN's own throw: held, the throw gathers strength for 1.2 s, and letting
+			// go throws it (a tap: a short throw); Ctrl+Q the same (one object per slot). Otherwise Minecraft's drop, with
+			// Ctrl the whole stack (Minecraft can't see Ctrl itself: its window never has the keys).
 			if (!g_heldId.empty() && g_controlsPawn)
 			{
-				if (edge('Q') > 0)
-					carry_throw(g_controlsPc, g_controlsPawn, g_heldId, g_heldCls);
+				const int q = edge('Q');
+				if (q > 0)
+					g_throwCharge = {g_heldId, GetTickCount(), true};
+				if (g_throwCharge.active)
+				{
+					const float charge = std::clamp((GetTickCount() - g_throwCharge.start) / 1200.0f, 0.0f, 1.0f);
+					if (g_throwCharge.id != g_heldId || g_minecraftScreen)
+					{
+						g_throwCharge.active = false; // the object left the hand, or a screen opened: no throw
+						notify("");
+					}
+					else if (q < 0)
+					{
+						g_throwCharge.active = false;
+						notify("");
+						carry_throw(g_controlsPc, g_controlsPawn, g_heldId, g_heldCls, charge);
+					}
+					else
+					{
+						static DWORD nextNote = 0;
+						if (GetTickCount() > nextNote)
+						{
+							nextNote = GetTickCount() + 80;
+							const int filled = int(charge * 10.0f + 0.5f);
+							notify("Throw [" + std::string(filled, '#') + std::string(10 - filled, '.') + "]");
+						}
+					}
+				}
+			}
+			else if (g_throwCharge.active)
+			{
+				g_throwCharge.active = false; // nothing in the hand any more
+				notify("");
 			}
 			else if (const int q = edge('Q'))
 				sendf("{\"t\":\"key\",\"k\":\"drop\",\"down\":%s,\"stack\":%s}", q > 0 ? "true" : "false", key_held(VK_CONTROL) ? "true" : "false");
@@ -2171,6 +2367,7 @@ namespace nc
 
 		void right_click(UObject *)
 		{
+			release_hn_action();
 			const int e = edge(VK_RBUTTON);
 			// carrying: a held HN object is put down; a loose object under the crosshair starts a pickup (hold). A
 			// carryable object never goes on to HN's action key, which is HN's own grab for its loose props: with
@@ -2183,13 +2380,20 @@ namespace nc
 					g_rightClickCarry = true;
 					return;
 				}
-				UObject *body = nullptr;
+				UObject *body = nullptr, *hit = nullptr;
 				const wchar_t *why = nullptr;
-				UObject *target = pickup_target(g_controlsPawn, &body, &why);
+				UObject *target = pickup_target(g_controlsPawn, &body, &why, &hit);
 				if (!target && why && std::wcscmp(why, L"not a physics object") != 0 && std::wcscmp(why, L"no root component") != 0)
 					log(std::wstring(L"carry: what the look meets isn't carried: ") + why);
-				// A loose TV or lamp: HN's action on a loose prop is HN's own grab (the 22:41 session: "HN's action on
-				// BP_TV_apartments3", and the TV was grabbed). Nothing for it: no carry, no HN action, no Minecraft use.
+				// HN's electric devices (TV, radio, lamp, switch) are switched with HN's action, as a tap: a TV (never
+				// carried) at once; a radio (carryable) on letting go before the pickup completes, held it is carried
+				if (!target && electric(hit))
+				{
+					log(L"right click: " + hit->GetName() + L" is one of HN's electric devices: HN's action as a tap (switch it)");
+					hn_action_tap();
+					g_rightClickCarry = true;
+					return;
+				}
 				if (!target && why == kNotCarriedNotGrabbed)
 				{
 					g_rightClickCarry = true;
@@ -2218,23 +2422,13 @@ namespace nc
 			{
 				g_rightClickHN = g_controlsPawn && looking_at_interactive(g_controlsPawn);
 				if (g_rightClickHN)
-				{
-					g_hnActionAt = GetTickCount(); // what HN ends up holding is checked (carry_tick)
-					++g_injectedE;
-					PostMessageW(g_hnWindow, WM_KEYDOWN, 'E', 0x00120001);
-					g_ws.send("{\"t\":\"swing\"}");
-				}
+					hn_action_tap();
 				else
 					g_ws.send("{\"t\":\"key\",\"k\":\"use\",\"down\":true}");
 			}
 			else if (e < 0)
 			{
-				if (g_rightClickHN)
-				{
-					++g_injectedE;
-					PostMessageW(g_hnWindow, WM_KEYUP, 'E', 0xC0120001);
-				}
-				else
+				if (!g_rightClickHN)
 					g_ws.send("{\"t\":\"key\",\"k\":\"use\",\"down\":false}");
 				g_rightClickHN = false;
 			}
@@ -2780,7 +2974,39 @@ namespace nc
 			UObject *body = nullptr;
 			DWORD start = 0;
 			bool active = false;
+			bool tapActivates = false; // an electric device (the radio): let go early = HN's action (switch it), held = carry
 		} g_pickup;
+
+		/// HN's action key E as a tap: pressed now, released ~60 ms later (release_hn_action, every tick). It used to be held
+		/// for as long as the right button was, and holding the right button is what our hold-to-pick-up asks for: a held E
+		/// on HN's props is HN's own take; a tap is its action (switch the TV or the radio on, open a door).
+		DWORD g_hnActionUpAt = 0;
+		void hn_action_tap()
+		{
+			if (g_hnActionUpAt)
+				return; // one at a time: never two activations from one click
+			g_hnActionAt = GetTickCount(); // what HN ends up holding is checked (carry_tick)
+			++g_injectedE;
+			PostMessageW(g_hnWindow, WM_KEYDOWN, 'E', 0x00120001);
+			g_hnActionUpAt = GetTickCount() + 60;
+			g_ws.send("{\"t\":\"swing\"}");
+		}
+
+		void release_hn_action()
+		{
+			if (g_hnActionUpAt && GetTickCount() >= g_hnActionUpAt)
+			{
+				g_hnActionUpAt = 0;
+				++g_injectedE;
+				PostMessageW(g_hnWindow, WM_KEYUP, 'E', 0xC0120001);
+			}
+		}
+
+		/// One of HN's electric devices (TVs, radios, lamps, switches: class chain ... < Tumbler < Electric < FlatActor).
+		bool electric(UObject *actor)
+		{
+			return actor && (class_contains(actor, L"Electric") || class_contains(actor, L"Tumbler"));
+		}
 
 		std::string narrow(const std::wstring &w)
 		{
@@ -2852,7 +3078,7 @@ namespace nc
 		}
 
 		/// The loose object under the crosshair, if it can be carried (else nullptr).
-		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut)
+		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut, UObject **hitOut)
 		{
 			if (!g_haveEye)
 				return nullptr;
@@ -2883,6 +3109,8 @@ namespace nc
 			UObject *const *component = brk.param<UObject *>(STR("HitComponent"));
 			if (!actor || !*actor || !component || !*component)
 				return nullptr;
+			if (hitOut)
+				*hitOut = *actor;
 			// The object is the actor; its body is its root, which simulates physics. Any part of it may be what the look
 			// meets (a mesh or collider under the root): it used to have to be the root itself, and a prop hit on another
 			// part was refused without a word and went on to HN's action, which is HN's own grab for its props.
@@ -2904,8 +3132,8 @@ namespace nc
 			//  5. a prop HN would take into its own hotbar: ours. HN keeps many props asleep, not simulating, until they
 			//     are touched, and the TV, BP_Picture_set and BP_Trashcan were refused as "not a physics object" without a
 			//     word, so HN's action took them into HN's hotbar (the 22:57-23:01 session). Such a prop: HN says its
-			//     action applies to it as a whole (OnIsActionComponent yes on its root), its root is movable, it is one
-			//     mesh and at most 70 cm in half size (a sink or a stove has parts or is bigger, and keeps HN's action);
+			//     action applies to what the look meets (not a part of a fixed thing: rule 1), its root is movable, and it
+			//     is at most 90 cm in half size (a wardrobe is bigger; its doors are parts);
 			//  6. anything else: HN's action.
 			if (hinged_part(*r) || hinged_part(*component))
 				return refuse(L"a door or drawer");
@@ -2931,8 +3159,9 @@ namespace nc
 			if (!loose || !*loose)
 			{
 				const PropShape shape = prop_shape(*actor, *r);
-				if (!(*component == *r && shape.movable && shape.parts == 1 && shape.extent > 0.0f && shape.extent <= 70.0f &&
-						flat_actionable(*actor, *component) == 1))
+				// a whole movable prop HN acts on (not one of its parts: those were refused above), up to 90 cm in half size,
+				// whatever it is made of: requiring one mesh left chairs (seat, legs, back) to HN's take into its hotbar
+				if (!(shape.movable && shape.extent > 0.0f && shape.extent <= 90.0f && flat_actionable(*actor, *component) == 1))
 					return refuse(L"not a physics object");
 			}
 			if (bodyOut)
@@ -3309,7 +3538,7 @@ namespace nc
 		}
 
 		/// Q holding a carried object: thrown along the look, a little upwards, from just in front of Steve.
-		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls)
+		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls, float charge)
 		{
 			Carried *c = carried_for(pc, pawn, id, cls);
 			if (!c)
@@ -3323,10 +3552,13 @@ namespace nc
 				log(L"carry: no room to throw " + std::wstring(id.begin(), id.end()) + L" (in the way: " + blocker + L")");
 				return false;
 			}
-			// lighter objects fly further; on HN's mass scale (props 30-400 kg) 6-11 m/s
-			const float speed = std::clamp(1100.0f / (1.0f + c->mass / 600.0f), 600.0f, 1100.0f);
+			// lighter objects fly further; on HN's mass scale (props 30-400 kg) 6-11 m/s at the middle of the charge; a tap
+			// 0.45 of it, the whole 1.2 s charge 1.45 of it (the cap: holding Q longer adds nothing)
+			const float base = std::clamp(1100.0f / (1.0f + c->mass / 600.0f), 600.0f, 1100.0f);
+			const float speed = base * (0.45f + std::clamp(charge, 0.0f, 1.0f));
 			const Vec3f v{dir.x * speed, dir.y * speed, dir.z * speed + 200.0f};
-			log(L"carry: threw " + std::wstring(id.begin(), id.end()) + L" at " + std::to_wstring(int(speed)) + L" cm/s");
+			log(L"carry: threw " + std::wstring(id.begin(), id.end()) + L" at " + std::to_wstring(int(speed)) + L" cm/s (charge " +
+				std::to_wstring(int(charge * 100.0f)) + L"%)");
 			release(id, *c, at, v);
 			g_ws.send("{\"t\":\"swing\"}");
 			return true;
@@ -3334,7 +3566,7 @@ namespace nc
 
 		void carry_start_pickup(UObject *actor, UObject *body)
 		{
-			g_pickup = {actor, body, GetTickCount(), true};
+			g_pickup = {actor, body, GetTickCount(), true, electric(actor)};
 			log(L"carry: pickup started on " + actor->GetName() + L" (hold " + std::to_wstring(kPickupHold) + L" ms)");
 		}
 
@@ -3343,7 +3575,14 @@ namespace nc
 			if (g_pickup.active)
 			{
 				notify("");
-				log(L"carry: pickup cancelled (released after " + std::to_wstring(GetTickCount() - g_pickup.start) + L" ms)");
+				if (g_pickup.tapActivates)
+				{
+					// a tap on the radio: HN switches it (the same thing under the crosshair: HN's E traces from the eyes)
+					log(L"right click: a tap on " + g_pickup.actor->GetName() + L": HN's action (switch it)");
+					hn_action_tap();
+				}
+				else
+					log(L"carry: pickup cancelled (released after " + std::to_wstring(GetTickCount() - g_pickup.start) + L" ms)");
 			}
 			g_pickup.active = false;
 		}
@@ -4523,6 +4762,8 @@ namespace nc
 			g_controlsPc = pc;
 			carry_tick(pc, pawn);
 			mesh_path_probe(pawn);
+			light_census(pawn);
+			steve_shadow_tick(pc, pawn);
 			for (const std::string &id : g_throwRequests)
 				carry_throw(pc, pawn, id, g_heldId == id ? g_heldCls : std::string{});
 		}

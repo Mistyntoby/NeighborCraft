@@ -445,3 +445,45 @@ BP_Trashcan9 ... HN's action`, no `class chain` lines; ReShade.log: NeighborCraf
   here: Unreal puts any hidden-shadow-casting primitive into every light's shadow pass, no render hook needed.
 - Tests: handtest OK, itemtest OK, turntest STEADY (3.1 deg max; one run had 0 positions because the test switched
   slot and picked up in the same instant, leaving the token in another slot: a test sequencing artefact).
+
+## Interactions, HN's hotbar, mining, charged throw, shadows (2026-10-11, afternoon)
+Evidence kinds: [src] source reading, [test] automated test on the final code, [game] seen in Hello Neighbor. Nothing
+of this round is [game] yet.
+- Mining (fixed, [test]): holding left click made one hit only. Minecraft's handleKeybinds calls
+  continueAttack(screen == null && keyAttack.isDown() && mouseHandler.isMouseGrabbed()), and Minecraft's window is
+  hidden behind HN's, which owns the mouse: never "grabbed", so block-breaking progress never continued [src: javap of
+  Minecraft.handleKeybinds]. Fix: MinecraftAttackMixin redirects that one isMouseGrabbed call to
+  `Passthrough.driving || isMouseGrabbed()`. Temporary logs proved it on the running game: "attack held: driving
+  true, grabbed false", then continueAttack(true) with a block hit [test]. `tools/minetest.py` (with the new test-only
+  `ungrab` message, the window as in the game): tap 0.05 s -> block stays, hold 0.4 s -> stays (progress stops on
+  release), hold 1.6 s -> broken, a new block afterwards -> not mined: before the fix the 1.6 s hold failed, after it
+  `results: OK` [test]. Menus and cursor are unchanged (only that call is redirected).
+- TVs, radios, other electric devices (dispatch [src], not [game]): the TV rule refused everything (no grab and no
+  action), and our right click held E down while the button was held, which HN reads as its pick-up, not a press.
+  Now: `electric()` = the class chain has Electric or Tumbler (HN's switchable devices: BP_Radio_apartments_C <
+  Radio < Tumbler < Electric). Right click on a device we don't carry (TV, lamp) -> one E tap (`hn_action_tap`: key
+  down, up 60 ms later) = HN switches it, logged `right click: <actor> is electric: HN's action (switch it)`. A
+  carryable electric device (radio): a tap switches it (`a tap on X: HN's action (switch it)`), holding past the
+  pickup time carries it. HN's other actions (doors, switches) also use the tap now, never a held E, so one press is
+  one activation. release_hn_action() at the start of each right click releases any key still down.
+- HN's own hotbar (rule [src], not [game]): a chair still went to HN's hotbar: rule 5 (a prop HN keeps asleep) also
+  required a single primitive component, and chairs have several. The broader cause is "anything movable and
+  small that HN would take with its action": rule 5 now = OnIsActionComponent on the root, root movable, <= 90 cm
+  half size, any number of parts. Fixtures stay HN's (not movable, or bigger). `carry: HN took <actor> ...` remains
+  as the detector for anything the rule still misses. HN's inventory isn't disabled (its items/keys keep HN's pickup).
+- Charged throw (Q, [src], not [game]): Q down starts a charge (0 -> 100% over 1.2 s, action bar `Throw [####  ]`),
+  Q up throws once at base x (0.45 + charge) (a tap ~half of the old throw, full ~1.45x), logged `carry: threw <actor>
+  ... (charge N%)`. Cancelled without a throw if the held item changes or a screen opens. Ctrl+Q unchanged.
+- Shadows ([src], not [game]): the 12:00 session made a block stand-in and no shadow was seen. Changes: stand-ins are
+  no longer hidden actors but visible actors whose mesh has SetRenderInMainPass(false) (Unreal's own "in the shadow
+  passes only"), movable, bCastDynamicShadow, bCastHiddenShadow; a readback logs the flags as the engine has them
+  (`shadows: a stand-in as the engine has it: ...`). Steve gets a shadow: his model's 6 boxes (Minecraft's player
+  model proportions) as the same shadow-only boxes at his feet, facing his way, arms/legs swinging with his walk,
+  flat while crawling. `shadows: HN's lights: N (static a, stationary b, movable c), k able to cast dynamic shadows`
+  plus the 6 nearest lights: a static light only has baked shadows and gives nothing movable a shadow (HN's own
+  props included), so if the house's lights are static no native shadow is possible from them. That census line is
+  the evidence to read first. SkyCraft (read last round: skse/src/WorldRender.cpp DepthVS/ShadowPS,
+  SunShadowRenderHook, SkyrimSunShadow) draws depth into Skyrim's shadow map by hooking it; Unreal does that for any
+  shadow-casting primitive, so no render hook is used. No fake darkening, decals or blobs.
+- Tests on the final code: minetest OK, handtest OK, itemtest OK, turntest STEADY (3.9 deg max). HN DLL `f3dd464e...`
+  built after the last source edit and installed (md5 of built = installed).

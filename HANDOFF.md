@@ -217,6 +217,19 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+000000. **Play-test 2026-10-11 afternoon** (P0), in this order, reading UE4SS.log:
+        1. Interactions: right click the TV and a lamp (switches; `is electric: HN's action`), tap the radio (switches;
+           `a tap on ...`), hold on it (carried), the front door and a switch (one activation per press).
+        2. HN's hotbar: right click/hold every chair, stool, box: always the NeighborCraft hotbar; any
+           `carry: HN took ...` line names a prop the rule still misses (movable/size are in it).
+        3. Mining: hold left click on dirt/stone: breaks; let go midway: stops; tap: one swing.
+        4. Throw: tap Q (short), hold Q ~1.2 s (far), `carry: threw ... (charge N%)`; switch slot while charging
+           (no throw); Ctrl+Q still drops the stack.
+        5. Shadows: `shadows: HN's lights: ...` (are any able to cast dynamic shadows?), `shadows: a stand-in as the
+           engine has it: ... bRenderInMainPass 0 ... mobility 2`, `Steve's shadow made of 6 boxes`; look for Steve's
+           and stone blocks' shadows near a movable/stationary light. If every light is static, native shadows are
+           impossible from them (see MODLOG).
+
 00000. **Play-test 2026-10-11** (P0): right click/hold the trash can, picture frames, TV, a sink, the stove, doors,
        switches: props ours (NeighborCraft hotbar icon), TV nothing, fixtures HN's action; any `carry: HN took ...`
        line names a prop the rule misses (with its movable/parts/size). Held items about twice the fist (tune the
@@ -345,6 +358,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+2026-10-11 afternoon: minetest (new, fails before the fix, OK after), handtest, itemtest pass; turntest STEADY; HN DLL `f3dd464e...` installed (md5 checked); interactions, hotbar rule, throw charge and shadows not run in game.
+
 2026-10-11: opaque classification, handtest, itemtest, turntest pass; HN DLL `a5f38254...` and grips installed; pickup rule, held size and shadow proxies not run in game.
 
 Night 5: turntest STEADY, relight_check, handtest/itemtest unchanged; HN DLL + shader installed (md5 checked); nothing of night 5 run in game.
@@ -412,4 +427,14 @@ Earlier:
   apply_blocks with `opaque`, destroy_colliders).
 - `hn/NeighborCraft_grips.txt`: `scale` column.
 - `mc/src/main/java/dev/neighborcraft/WorldBridge.java`: block changes 0/1/2, `opaque` list.
+- MODLOG, this file.
+
+## 17. 2026-10-11 afternoon: files changed
+- `hn/NeighborCraftMod/src/bridge.cpp`: electric() + hn_action_tap()/release_hn_action() (E as a tap); right click
+  on electric devices; tap-activates for carryable devices; pickup rule 5 without the one-part limit (<= 90 cm);
+  charged throw (g_throwCharge, carry_throw charge); shadow-only boxes (spawn_shadow_box, SetRenderInMainPass false),
+  light_census, Steve's shadow (steve_shadow_tick).
+- `mc/.../mixin/MinecraftAttackMixin.java`: hold-to-mine (isMouseGrabbed redirect in handleKeybinds).
+- `mc/.../ClientInput.java`: `ungrab` test message.
+- `tools/minetest.py`: hold-to-mine test.
 - MODLOG, this file.
