@@ -758,6 +758,7 @@ namespace nc
 		UObject *g_receiverMaterial = nullptr; // this level's (shadow_extras_reset forgets it)
 		UObject *g_receiverTexture = nullptr;
 		bool g_receiverTried = false;
+		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot);
 		UObject *receiver_material(UObject *context)
 		{
 			if (g_receiverTried)
@@ -795,13 +796,19 @@ namespace nc
 				return nullptr;
 			}
 			Call(*mid, STR("SetTextureParameterValue")).set(STR("ParameterName"), name_param(STR("Diffuse"))).set<UObject *>(STR("Value"), *texture).invoke();
-			// kept alive: nothing of the engine's holds them (no UPROPERTY points at them while no stand-in uses the
-			// material), and the garbage collector freed them: the next SetMaterial used a freed material and the game
-			// crashed (19:11, in SetMaterial from stand_in_receives). Let go on the level change (shadow_extras_reset)
-			(*mid)->SetRootSet();
-			(*texture)->SetRootSet();
-			g_receiverTexture = *texture;
+			// kept alive by the engine's own reference: a keeper stand-in (hidden, far below) always uses the material, and
+			// the material holds the texture. Nothing of the engine's held them, and the garbage collector freed them: the
+			// next SetMaterial read a freed material and the game crashed (19:11 and 19:2x, on F5, when Steve's boxes
+			// start being drawn). UE4SS's SetRootSet didn't keep them in this build. The keeper dies with its level;
+			// the pool's level change makes a new material (shadow_boxes_tick)
 			material = *mid;
+			g_receiverTexture = *texture;
+			if (UObject *keeper = spawn_shadow_box(context, Vec3f{g_eye.x, g_eye.y, g_eye.z - 100000.0f}, Vec3f{0.01f, 0.01f, 0.01f}, Rot3f{}))
+				if (UObject **km = keeper->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); km && *km)
+				{
+					Call(*km, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), material).invoke();
+					Call(*km, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
+				}
 			log(L"receivers: HN's base_m with a flat grey texture: stand-ins of blocks and models are drawn by HN to light them");
 			return material;
 		}
@@ -1166,6 +1173,9 @@ namespace nc
 			{
 				P = ShadowPool{}; // the old level's boxes went with it
 				P.level = pc;
+				// a new level: a new material and keeper (the old ones went with the old level)
+				g_receiverMaterial = g_receiverTexture = nullptr;
+				g_receiverTried = false;
 				receiver_material(pawn); // made now, not at the first block placed (an import and a material: a hitch)
 			}
 			std::vector<double> boxes = shadow_boxes_fresh() ? g_shadowBoxes : std::vector<double>{};
@@ -1395,10 +1405,6 @@ namespace nc
 			g_pool = ShadowPool{};
 			g_steveShadow = SteveShadow{};
 			g_lent = LentLight{};
-			if (g_receiverMaterial)
-				g_receiverMaterial->ClearRootSet();
-			if (g_receiverTexture)
-				g_receiverTexture->ClearRootSet();
 			g_receiverMaterial = g_receiverTexture = nullptr;
 			g_receiverTried = false;
 			g_pendingReceivers.clear();
