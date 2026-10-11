@@ -1,4 +1,7 @@
-"""The compositor's light colour for Minecraft blocks (NeighborCraft.fx relight: the near-light tint and the grade),
+"""(History: the screen-based estimate this compares was replaced, 2026-10-11 night, by Hello Neighbor's sun colour
+passed in by the add-on: any estimate from the picture changes with where one looks. Kept as the record of why.)
+
+The compositor's light colour for Minecraft blocks (NeighborCraft.fx relight: the near-light tint and the grade),
 old against new, emulated on synthetic Hello Neighbor pictures:
 
   A. midday, a lawn filling most of the screen, a grey road below: white light. A grey stone block must stay grey.

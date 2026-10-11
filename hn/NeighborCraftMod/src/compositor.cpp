@@ -28,6 +28,7 @@ namespace
 	std::atomic<bool> g_cameraLocked{false};
 	std::atomic<float> g_lookLight{-1.0f}, g_lookBias{-1.0f}, g_lookSlope{-1.0f};
 	std::atomic<float> g_shakeX{0.0f}, g_shakeY{0.0f}, g_shakeRoll{0.0f}, g_portalWarp{0.0f};
+	std::atomic<float> g_lightR{1.0f}, g_lightG{1.0f}, g_lightB{1.0f};
 	float g_savedLight = -1.0f, g_savedBias = -1.0f, g_savedSlope = -1.0f;
 
 	struct Pose
@@ -492,6 +493,8 @@ namespace
 			runtime->set_uniform_value_float(v, g_shakeX.load(), g_shakeY.load(), g_shakeRoll.load());
 		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "PortalWarp"); v.handle != 0)
 			runtime->set_uniform_value_float(v, g_portalWarp.load());
+		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "HostLightColour"); v.handle != 0)
+			runtime->set_uniform_value_float(v, g_lightR.load(), g_lightG.load(), g_lightB.load());
 		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "HostPlanes"); v.handle != 0)
 			runtime->set_uniform_value_float(v, g_hostNear.load(), g_hostFar.load());
 
@@ -613,6 +616,13 @@ namespace compositor
 		g_shakeY = shake_y;
 		g_shakeRoll = shake_roll;
 		g_portalWarp = portal_warp;
+	}
+
+	void set_light_colour(float r, float g, float b)
+	{
+		g_lightR = r;
+		g_lightG = g;
+		g_lightB = b;
 	}
 
 	void set_look(float light_match, float depth_bias, float slope_bias)

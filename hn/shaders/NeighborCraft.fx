@@ -71,11 +71,10 @@ uniform float3 WarpT = float3(0.0, 0.0, 0.0);
 texture HostLightTex { Width = BUFFER_WIDTH / 4; Height = BUFFER_HEIGHT / 4; Format = RGBA8; MipLevels = 7; };
 sampler sHostLight { Texture = HostLightTex; AddressU = CLAMP; AddressV = CLAMP; };
 
-// The light's colour: Hello Neighbor's near-grey pixels only (road, walls, paths), each weighted by how grey it is, as
-// (colour * weight, weight; weight exp(-saturation / 0.15)) at quarter size with mips: a mip's rgb / a is the light's colour over that area. A grey
-// surface shows the light's colour (an orange sunset, a red night); a lawn shows its own green, which isn't the light.
-texture HostGreyTex { Width = BUFFER_WIDTH / 4; Height = BUFFER_HEIGHT / 4; Format = RGBA16F; MipLevels = 7; };
-sampler sHostGrey { Texture = HostGreyTex; AddressU = CLAMP; AddressV = CLAMP; };
+// Set by the add-on: the colour of Hello Neighbor's sun (its directional light's LightColor), which tints Minecraft's
+// surfaces. It used to be estimated from the picture, which is mostly the surfaces' own colours: blocks went green
+// in front of grass and beige in front of sky, changing with where one looked.
+uniform float3 HostLightColour = float3(1.0, 1.0, 1.0);
 
 // The composited world (Hello Neighbor + Minecraft, no overlay) and, per pixel: Minecraft's coverage, its depth and Hello Neighbor's.
 texture CompositeTex { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA8; };
@@ -96,28 +95,10 @@ float4 PS_Light(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	return float4(tex2D(ReShade::BackBuffer, uv).rgb, 1.0);
 }
 
-float4 PS_Grey(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+/// The light's colour, normalised to luma 1 (Hello Neighbor's sun; white until the add-on sets it).
+float3 light_colour()
 {
-	const float3 c = tex2D(sHostLight, uv).rgb;
-	const float hi = max(c.r, max(c.g, c.b)), lo = min(c.r, min(c.g, c.b));
-	const float sat = hi > 1e-3 ? (hi - lo) / hi : 1.0;
-	// the greyer the more it counts (soft: under a strongly coloured light nothing is quite grey, and the least
-	// coloured surfaces still show the light best), neither black nor blown out
-	const float w = exp(-sat / 0.15) * saturate(hi * 8.0) * saturate((0.98 - hi) * 20.0);
-	return float4(c * w, w);
-}
-
-/// The light's colour, normalised to luma 1: over the area around uv (mip `level`), else over the whole picture, else
-/// white (no grey anywhere).
-float3 light_colour(float2 uv, float level)
-{
-	float4 g = tex2Dlod(sHostGrey, float4(uv, 0, level));
-	if (g.a < 0.002)
-		g = tex2Dlod(sHostGrey, float4(0.5, 0.5, 0, 6.0));
-	if (g.a < 0.0002)
-		return 1.0;
-	const float3 c = g.rgb / g.a;
-	return c / max(luma(c), 1e-3);
+	return HostLightColour / max(luma(HostLightColour), 1e-3);
 }
 
 float mc_linear(float d)
@@ -145,13 +126,13 @@ float host_linear(float d)
 /// front of a dark doorway dark, the hand took the colour of whatever was behind it, and colour that follows the
 /// background reads as see-through or reflective. Twelve taps on a disc ~0.6 m wide around it (golden-angle spiral),
 /// each weighted by how close its Hello Neighbor depth is to the Minecraft surface's; with too few near surfaces (the
-/// hand, a block against the sky) the picture's overall light instead.
+/// hand, a block against the sky) neutral light instead.
 float3 host_light_near(float2 uv, float zm)
 {
-	float3 global = 0.0;
-	[unroll] for (int g = 0; g < 5; ++g)
-		global += tex2Dlod(sHostLight, float4(0.2 + 0.15 * g, 0.35 + 0.075 * g, 0, 6.0)).rgb;
-	global *= 0.2;
+	// with nothing of HN's near it: neutral light (gain 1, no colour). It was the picture's average, which is whatever
+	// fills the screen: the hand and a wall in front of a lawn went green, in front of the sky bright and beige,
+	// changing as one looked up and down (the user)
+	const float3 global = LightReference;
 	if (zm < 0.0)
 		return global; // the first-person hand: nothing of HN's is beside it (HN's held object, 25 cm off, is not its light)
 	const float r = clamp(0.6 / (max(zm, 0.3) * 2.0 * WarpTan.x), 0.01, 0.25); // 0.6 m as a fraction of the screen height
@@ -182,13 +163,13 @@ float3 relight(float3 c, float2 uv, float zm)
 	// the light's it painted blocks with their surroundings (the user's cobblestone: green below, pink above); a local
 	// estimate from grey surfaces only still fell back to the grass where nothing grey was near. The light's
 	// strength stays local (gain, above): shade and bright spots still show on blocks.
-	const float3 tint = clamp(lerp(1.0, light_colour(float2(0.5, 0.5), 6.0), LightTint), 0.55, 1.5);
+	const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
 	c = lerp(c, c * gain * tint, LightMatch);
 	// the picture's grade, gentled (Hello Neighbor's own grade keeps some colour in everything) and kept off lights (bright
 	// things keep their colour: fire, lava, the portal)
 	// (the grade's colour from the picture's grey surfaces too, not its average colour: a screen full of green isn't a
 	// green grade)
-	const float3 grade = clamp(lerp(1.0, light_colour(float2(0.5, 0.5), 6.0), 0.6), 0.6, 1.6);
+	const float3 grade = 1.0; // no colour grade from the picture (it is the surfaces' colours, not a grade)
 	c = lerp(c, c * grade, GradeMatch * (1.0 - saturate((max(c.r, max(c.g, c.b)) - 0.45) * 2.5)));
 	const float h = zm < 0.0 ? 0.0 : saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
 	const float3 H = tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb;
@@ -378,12 +359,6 @@ technique NeighborCraft < ui_tooltip = "Minecraft passthrough: enabled automatic
 		VertexShader = PostProcessVS;
 		PixelShader = PS_Light;
 		RenderTarget = HostLightTex;
-	}
-	pass Grey
-	{
-		VertexShader = PostProcessVS;
-		PixelShader = PS_Grey;
-		RenderTarget = HostGreyTex;
 	}
 	pass Composite
 	{

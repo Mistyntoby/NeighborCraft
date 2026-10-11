@@ -1093,6 +1093,49 @@ namespace nc
 			P.used = used;
 		}
 
+		/// The colour of HN's sun (its directional light's LightColor, following HN's day and night), once a second, to
+		/// the compositor: Minecraft's surfaces are tinted by it. The compositor used to take the light's colour from
+		/// the picture, which is mostly the surfaces' own colour: a cobblestone wall went green while the screen
+		/// showed grass and beige while it showed sky and houses (the user: "bipolar"). The sun's colour doesn't
+		/// change with where one looks.
+		void light_colour_tick(UObject *pc)
+		{
+			static UObject *level = nullptr, *sun = nullptr;
+			static DWORD next = 0;
+			if (level != pc)
+			{
+				level = pc;
+				sun = nullptr;
+				for (UObject *l : find_all(L"DirectionalLightComponent"))
+				{
+					bool visible = false;
+					get_bool_property(l, STR("bVisible"), visible);
+					if (visible)
+					{
+						sun = l;
+						break;
+					}
+				}
+				log(sun ? L"light: Minecraft's tint from HN's sun " + sun->GetFullName() : std::wstring(L"light: no sun in this level: Minecraft untinted"));
+			}
+			if (GetTickCount() < next)
+				return;
+			next = GetTickCount() + 1000;
+			float r = 1.0f, g = 1.0f, b = 1.0f;
+			if (sun)
+				if (const uint8_t *c = sun->GetValuePtrByPropertyNameInChain<uint8_t>(STR("LightColor"))) // FColor: B, G, R, A
+					b = c[0] / 255.0f, g = c[1] / 255.0f, r = c[2] / 255.0f;
+			compositor::set_light_colour(r, g, b);
+			static float lr = -1.0f, lg = -1.0f, lb = -1.0f;
+			if (std::abs(r - lr) + std::abs(g - lg) + std::abs(b - lb) > 0.02f)
+			{
+				lr = r, lg = g, lb = b;
+				char line[120];
+				snprintf(line, sizeof(line), "light: HN's sun colour %.2f %.2f %.2f", r, g, b);
+				log(std::wstring(line, line + strlen(line)));
+			}
+		}
+
 		/// Steve's shadow: his model's boxes (Minecraft's player model: head 8 px, body 8x12x4, arms and legs 4x12x4; 32 px =
 		/// his height) as shadow-only boxes at his feet, facing his way, legs and arms swinging with his walk. HN's player
 		/// is a puppet without a shadow; Minecraft's Steve is a picture HN's lights never see.
@@ -5691,6 +5734,7 @@ namespace nc
 			steve_shadow_tick(pc, pawn);
 			shadow_boxes_tick(pc, pawn);
 			lend_shadows_tick(pc);
+			light_colour_tick(pc);
 			for (const std::string &id : g_throwRequests)
 				carry_throw(pc, pawn, id, g_heldId == id ? g_heldCls : std::string{});
 		}

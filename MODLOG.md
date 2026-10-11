@@ -553,3 +553,12 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   on a lawn stays grey.
 - Not resolved this round: in the second automated session right clicks on the lawn didn't place blocks (HN logged
   "Minecraft use" on the landscape); blocks placed by command were fine. Not investigated.
+
+## Colour that doesn't change with the view (2026-10-11 night, later)
+- The user: a cobblestone wall changed colour looking up and down. Screenshots ([game]): green looking at grass,
+  beige looking at the sky; the held sword too. Cause: every colour the compositor took from the picture is the
+  surfaces' own colour (the light's tint, the grade, and the "no surface near it" fallback, the screen's average).
+- Now: the tint is Hello Neighbor's sun colour (the add-on reads the directional light's LightColor once a second:
+  HostLightColour; white until set), no grade from the picture, and the fallback is neutral. Brightness stays local
+  (HN surfaces near in depth). [game] after the change: the same wall grey looking down, level and up; the sword
+  its own colour. The sun-colour part is built, installed at the next restart.
