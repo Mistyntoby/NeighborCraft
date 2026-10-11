@@ -552,6 +552,7 @@ namespace nc
 		/// FTransform in UE 4.20 (floats): rotation quaternion, translation, scale, each 16-byte aligned.
 		// Minecraft's drawn things as boxes (ShadowExport.java): per box its centre and three half-axes (blocks, world)
 		std::vector<double> g_shadowBoxes;
+		std::vector<int> g_shadowKinds;     // per box: 1 a model's real surface (drawn by HN: receives its light)
 		DWORD g_shadowBoxesAt = 0;
 		double g_hand3p[12] = {};      // Steve's main-hand item frame: origin, then unit x, y, z axes (Minecraft world)
 		double g_heldBoxHalf = 0.0;    // the held HN object's half size in Steve's hand (blocks), 0: none shown
@@ -748,6 +749,65 @@ namespace nc
 		///    ReShade off (stand-ins only, Minecraft's picture gone) settled it: with the stand-ins drawn (F6) the sun
 		///    cast Steve's and the blocks' shadows on the road and curb; with them out of the main pass, no shadow at
 		///    all. In this build (UE 4.20) a primitive out of the main pass is out of the sun's shadow too.
+		/// The stand-ins' material where HN draws them (receivers): HN's own plain opaque material (base_m, its
+		/// Diffuse texture) with a flat mid-grey texture the mod writes and imports, so HN lights them exactly as its
+		/// own surfaces (its sun, its shadows, its ambient) and the compositor reads that light off the picture
+		/// (NeighborCraft.fx: Minecraft's colour times it): a roof's shadow edge crosses a block or Steve as it crosses
+		/// the ground (the user). Once per level; nullptr if any step fails (the stand-ins stay shadow-only).
+		std::wstring module_dir();
+		UObject *g_receiverMaterial = nullptr; // this level's (shadow_extras_reset forgets it)
+		bool g_receiverTried = false;
+		UObject *receiver_material(UObject *context)
+		{
+			if (g_receiverTried)
+				return g_receiverMaterial;
+			g_receiverTried = true;
+			UObject *&material = g_receiverMaterial;
+			material = nullptr;
+			static const unsigned char png[] = {0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x04,0x08,0x02,0x00,0x00,0x00,0x26,0x93,0x09,0x29,0x00,0x00,0x00,0x13,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0x6c,0x68,0x68,0x60,0x80,0x01,0x26,0x38,0x0b,0x2f,0x07,0x00,0x4c,0x04,0x01,0x88,0xc6,0xef,0x54,0x68,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82};
+			const std::wstring file = module_dir() + L"neighborcraft_grey.png";
+			if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
+				if (FILE *f = _wfopen(file.c_str(), L"wb"))
+				{
+					fwrite(png, 1, sizeof(png), f);
+					fclose(f);
+				}
+			static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
+			static UObject *matLib = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetMaterialLibrary"));
+			UObject *parent = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Game/Objects/Materials/Base/base_m.base_m"));
+			if (!rendering || !matLib || !parent)
+			{
+				log(L"receivers: no material (base_m " + std::wstring(parent ? L"found" : L"missing") + L"): stand-ins stay shadow-only");
+				return nullptr;
+			}
+			Call import(rendering, STR("ImportFileAsTexture2D"));
+			import.set<UObject *>(STR("WorldContextObject"), context).set(STR("Filename"), FString(file.c_str()));
+			UObject *const *texture = import.invoke() ? import.param<UObject *>(STR("ReturnValue")) : nullptr;
+			Call make(matLib, STR("CreateDynamicMaterialInstance"));
+			make.set<UObject *>(STR("WorldContextObject"), context).set<UObject *>(STR("Parent"), parent).set(STR("OptionalName"), NameParam{});
+			UObject *const *mid = make.invoke() ? make.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!texture || !*texture || !mid || !*mid)
+			{
+				log(L"receivers: the grey texture or the material couldn't be made: stand-ins stay shadow-only");
+				return nullptr;
+			}
+			Call(*mid, STR("SetTextureParameterValue")).set(STR("ParameterName"), name_param(STR("Diffuse"))).set<UObject *>(STR("Value"), *texture).invoke();
+			material = *mid;
+			log(L"receivers: HN's base_m with a flat grey texture: stand-ins of blocks and models are drawn by HN to light them");
+			return material;
+		}
+
+		/// A stand-in drawn by HN (receiver: its grey material, visible) or only casting (hidden).
+		void stand_in_receives(UObject *actor, bool receive)
+		{
+			UObject **mesh = actor ? actor->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")) : nullptr;
+			if (!mesh || !*mesh)
+				return;
+			if (receive)
+				Call(*mesh, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), receiver_material(actor)).invoke();
+			Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), !receive && !g_proxiesShown).set_bool(STR("bPropagateToChildren"), false).invoke();
+		}
+
 		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot)
 		{
 			static UObject *meshActor = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshActor"));
@@ -812,7 +872,10 @@ namespace nc
 
 		UObject *spawn_shadow(UObject *context, const Vec3f &centre)
 		{
-			return spawn_shadow_box(context, centre, Vec3f{0.98f, 0.98f, 0.98f}, Rot3f{});
+			UObject *a = spawn_shadow_box(context, centre, Vec3f{0.99f, 0.99f, 0.99f}, Rot3f{});
+			if (a && receiver_material(context))
+				stand_in_receives(a, true);
+			return a;
 		}
 
 		/// HN's lights as the engine has them, once per level: which can cast a dynamic shadow at all (a static light's
@@ -978,6 +1041,7 @@ namespace nc
 			UObject *level = nullptr;
 			std::vector<UObject *> boxes;
 			std::vector<bool> casting;
+			std::vector<int> receiving; // -1 unknown, 0 hidden, 1 drawn
 			size_t used = 0;
 		} g_pool;
 		constexpr size_t kMaxPool = 420;
@@ -1070,6 +1134,7 @@ namespace nc
 					break;
 				P.boxes.push_back(a);
 				P.casting.push_back(true);
+				P.receiving.push_back(-1);
 			}
 			size_t used = 0;
 			for (size_t i = 0; i < want && i < P.boxes.size(); ++i)
@@ -1079,10 +1144,23 @@ namespace nc
 					continue;
 				Call(P.boxes[used], STR("K2_SetActorTransform")).set(STR("NewTransform"), t).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
 				pool_cast(used, true);
+				const int receive = i < g_shadowKinds.size() && g_shadowKinds[i] == 1 && receiver_material(pawn) ? 1 : 0;
+				if (P.receiving[used] != receive)
+				{
+					P.receiving[used] = receive;
+					stand_in_receives(P.boxes[used], receive == 1);
+				}
 				++used;
 			}
 			for (size_t i = used; i < P.boxes.size(); ++i)
+			{
 				pool_cast(i, false);
+				if (P.receiving[i] == 1)
+				{
+					P.receiving[i] = 0;
+					stand_in_receives(P.boxes[i], false);
+				}
+			}
 			static size_t reported = size_t(-1);
 			if ((used == 0) != (reported == 0) || (reported != size_t(-1) && used > reported + 50))
 			{
@@ -1126,6 +1204,26 @@ namespace nc
 				if (const uint8_t *c = sun->GetValuePtrByPropertyNameInChain<uint8_t>(STR("LightColor"))) // FColor: B, G, R, A
 					b = c[0] / 255.0f, g = c[1] / 255.0f, r = c[2] / 255.0f;
 			compositor::set_light_colour(r, g, b);
+			// and where it shines from: the light travels along its forward vector; towards the sun is the opposite, in
+			// Minecraft's axes (Unreal x, y, z = Minecraft x, z, y)
+			float strength = 0.0f;
+			Vec3f toward{0.0f, 0.0f, 1.0f};
+			if (sun)
+			{
+				Call f(sun, STR("GetForwardVector"));
+				if (const Vec3f *fw = f.invoke() ? f.param<Vec3f>(STR("ReturnValue")) : nullptr)
+					toward = {-fw->x, -fw->y, -fw->z};
+				const float *intensity = sun->GetValuePtrByPropertyNameInChain<float>(STR("Intensity"));
+				strength = intensity && *intensity > 0.0f && toward.z > 0.0f ? 1.0f : 0.0f; // below the horizon: no sun
+			}
+			compositor::set_sun(toward.x, toward.z, toward.y, strength);
+			static int logged = 0;
+			if (logged++ < 1 || (logged % 120) == 0)
+			{
+				char line[160];
+				snprintf(line, sizeof(line), "light: towards HN's sun (Minecraft axes) %.2f %.2f %.2f, strength %.0f", toward.x, toward.z, toward.y, strength);
+				log(std::wstring(line, line + strlen(line)));
+			}
 			static float lr = -1.0f, lg = -1.0f, lb = -1.0f;
 			if (std::abs(r - lr) + std::abs(g - lg) + std::abs(b - lb) > 0.02f)
 			{
@@ -1239,6 +1337,8 @@ namespace nc
 			g_pool = ShadowPool{};
 			g_steveShadow = SteveShadow{};
 			g_lent = LentLight{};
+			g_receiverMaterial = nullptr;
+			g_receiverTried = false;
 		}
 
 		void destroy_colliders(bool alive)
@@ -2176,6 +2276,8 @@ namespace nc
 			else if (m.find("\"t\":\"shadows\"") != std::string::npos)
 			{
 				json_doubles(m, "b", g_shadowBoxes);
+				g_shadowKinds.clear();
+				json_ints(m, "k", g_shadowKinds);
 				g_shadowBoxesAt = GetTickCount();
 				if (json_numbers(m, "hand", g_hand3p, 12))
 					g_hand3pAt = GetTickCount();
@@ -5517,7 +5619,7 @@ namespace nc
 			g_proxiesShown = !g_proxiesShown;
 			int n = 0;
 			for (auto &[key, actor] : g_shadows)
-				proxy_main_pass(actor, g_proxiesShown), ++n;
+				proxy_main_pass(actor, g_proxiesShown || receiver_material(actor) != nullptr), ++n;
 			for (UObject *part : g_steveShadow.parts)
 				if (part)
 					proxy_main_pass(part, g_proxiesShown), ++n;

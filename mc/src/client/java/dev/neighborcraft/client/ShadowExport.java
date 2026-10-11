@@ -45,7 +45,9 @@ import org.joml.Vector3f;
 /**
  * What Minecraft draws in the world, as boxes for Hello Neighbor's shadows: every frame, each box's centre and three
  * half-axis vectors in world space ({"t":"shadows","b":[cx,cy,cz, ux,uy,uz, vx,vy,vz, wx,wy,wz, ...],"hand":[...]}).
- * HN gives each a hidden, shadow-casting cube of its own (bridge.cpp shadow_boxes_apply), so its lights cast them.
+ * HN gives each a hidden, shadow-casting cube of its own (bridge.cpp shadow_boxes_tick), so its lights cast them.
+ * "k": per box, 1 if it is a model's real surface (living entities' cubes): HN also draws those, plain grey, so the
+ * compositor can read the light HN puts on them (shadow edges across Steve).
  *
  * <p>The boxes are the renderers' own geometry, placed by the renderers' own steps, so they move exactly as drawn:
  * <ul>
@@ -73,7 +75,10 @@ public final class ShadowExport {
 
 	private static final class Out {
 		final StringBuilder b = new StringBuilder(16384);
+		final StringBuilder kinds = new StringBuilder(512);
 		int boxes;
+		/** The next boxes are a model's real surfaces (HN may draw them to light them: NeighborCraft.fx receivers). */
+		boolean surface;
 		final Vec3 origin;
 
 		Out(final Vec3 origin) {
@@ -106,6 +111,7 @@ public final class ShadowExport {
 			num(w.x).append(',');
 			num(w.y).append(',');
 			num(w.z);
+			kinds.append(boxes > 0 ? "," : "").append(surface ? '1' : '0');
 			boxes++;
 		}
 
@@ -155,7 +161,7 @@ public final class ShadowExport {
 			}
 
 			particles(minecraft, partial, out);
-			StringBuilder msg = new StringBuilder(out.b.length() + 200).append("{\"t\":\"shadows\",\"b\":[").append(out.b).append(']');
+			StringBuilder msg = new StringBuilder(out.b.length() + 200).append("{\"t\":\"shadows\",\"b\":[").append(out.b).append("],\"k\":[").append(out.kinds).append(']');
 			if (hand != null) {
 				msg.append(",\"hand\":[");
 				for (int i = 0; i < hand.length; i++) {
@@ -201,7 +207,9 @@ public final class ShadowExport {
 			pose.translate(0.0F, -1.501F, 0.0F);
 			EntityModel model = living.getModel();
 			model.setupAnim(s);
+			out.surface = true;
 			part(model.root(), "", pose, out);
+			out.surface = false;
 			float[] hand = null;
 			if (model instanceof ArmedModel armed && s instanceof ArmedEntityRenderState armedState) {
 				for (HumanoidArm arm : HumanoidArm.values()) {

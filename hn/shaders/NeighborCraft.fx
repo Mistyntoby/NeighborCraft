@@ -75,6 +75,17 @@ sampler sHostLight { Texture = HostLightTex; AddressU = CLAMP; AddressV = CLAMP;
 // surfaces. It used to be estimated from the picture, which is mostly the surfaces' own colours: blocks went green
 // in front of grass and beige in front of sky, changing with where one looked.
 uniform float3 HostLightColour = float3(1.0, 1.0, 1.0);
+// Set by the add-on: the direction towards Hello Neighbor's sun in the camera Minecraft rendered with, and whether it
+// shines (0: night, no sun). Minecraft's own fixed face shading is off (ClientLevelLightingMixin): each face is lit by
+// its angle to this sun.
+uniform float3 SunDirMc = float3(0.0, 1.0, 0.0);
+uniform float SunStrength = 0.0;
+uniform float ReceiverMatch < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Light from Hello Neighbor's stand-ins";
+	ui_tooltip = "Where Hello Neighbor draws a grey stand-in under a Minecraft block or Steve, take the light it gets (its sun, its shadow edges)."; > = 1.0;
+uniform float ReceiverReference < ui_type = "drag"; ui_min = 0.05; ui_max = 1.0; ui_step = 0.01; ui_label = "Stand-in brightness = full light";
+	ui_tooltip = "How bright the grey stand-in looks where Minecraft should keep its own brightness (measured: ~0.88 in sun, ~0.5 in shade)."; > = 0.8;
+uniform float SunContrast < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Sun on Minecraft's faces";
+	ui_tooltip = "How much brighter Minecraft's faces turned to Hello Neighbor's sun are than those turned away."; > = 0.75;
 
 // The composited world (Hello Neighbor + Minecraft, no overlay) and, per pixel: Minecraft's coverage, its depth and Hello Neighbor's.
 texture CompositeTex { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA8; };
@@ -153,11 +164,19 @@ float3 host_light_near(float2 uv, float zm)
 
 /// Minecraft renders at full daylight, so treat its colour as albedo and light it with Hello Neighbor's light near it; then give it
 /// Hello Neighbor's colour grade (the whole picture's colour) and, far away, Hello Neighbor's haze (fade into the picture around it).
-float3 relight(float3 c, float2 uv, float zm)
+float3 relight(float3 c, float2 uv, float zm, float ndl)
 {
 	const float3 L = host_light_near(uv, zm);
 	const float lum = luma(L);
-	const float gain = clamp(lum / LightReference, 0.42, 1.3);
+	float gain = clamp(lum / LightReference, 0.42, 1.3);
+	// the face's angle to the sun (ndl: its normal against the sun's direction; < -1.5: unknown), where the sun reaches:
+	// Hello Neighbor's surfaces around it are lit (in a shadow or indoors they aren't, and neither is the face). A face
+	// turned to the sun up to ~1.25x, one turned away down to ~0.65x of the light around it
+	if (ndl > -1.5 && SunStrength > 0.0)
+	{
+		const float sunlit = SunStrength * saturate((lum / LightReference - 0.55) / 0.45);
+		gain *= lerp(1.0, lerp(1.0 - 0.35 * SunContrast, 1.0 + 0.25 * SunContrast, saturate(ndl)), sunlit);
+	}
 	// the light's colour: the whole picture's grey surfaces (a sunset's orange, a night's blue), never the surfaces
 	// around the block. Around a block, the colour is mostly theirs (a lawn's green, a red house's red), and taken as
 	// the light's it painted blocks with their surroundings (the user's cobblestone: green below, pink above); a local
@@ -271,7 +290,43 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 
 	const float visible = zm < zh + allow ? 1.0 : 0.0;
 	const float cover = world.a * visible;
-	outColor = float4(relight(world.rgb, uv, zm) * visible + host * (1.0 - cover), 1.0);
+	// the face's normal, from Minecraft's depth around this point (the neighbour on the side with the nearer depth, so
+	// a block's edge doesn't bend it), in Minecraft's camera space; facing the camera
+	float ndl = -2.0;
+	if (cover > 0.0)
+	{
+		const float2 texel = 1.0 / tex2Dsize(sDepth, 0);
+		const float2 mcScale = float2(WarpTan.y * WarpTan.z, WarpTan.y);
+		const float3 pc = float3((muv * 2.0 - 1.0) * mcScale, -1.0) * mc_linear(tex2Dlod(sDepth, float4(muv, 0, 0)).r);
+		const float2 ur = muv + float2(texel.x, 0), ul = muv - float2(texel.x, 0), uu = muv + float2(0, texel.y), ud = muv - float2(0, texel.y);
+		const float3 pr = float3((ur * 2.0 - 1.0) * mcScale, -1.0) * mc_linear(tex2Dlod(sDepth, float4(ur, 0, 0)).r);
+		const float3 pl = float3((ul * 2.0 - 1.0) * mcScale, -1.0) * mc_linear(tex2Dlod(sDepth, float4(ul, 0, 0)).r);
+		const float3 pu = float3((uu * 2.0 - 1.0) * mcScale, -1.0) * mc_linear(tex2Dlod(sDepth, float4(uu, 0, 0)).r);
+		const float3 pd = float3((ud * 2.0 - 1.0) * mcScale, -1.0) * mc_linear(tex2Dlod(sDepth, float4(ud, 0, 0)).r);
+		const float3 dx = abs(pr.z - pc.z) < abs(pc.z - pl.z) ? pr - pc : pc - pl;
+		const float3 dy = abs(pu.z - pc.z) < abs(pc.z - pd.z) ? pu - pc : pc - pd;
+		float3 n = cross(dx, dy);
+		if (dot(n, n) > 1e-12 && abs(pc.z) < 1e8)
+		{
+			n = normalize(n);
+			if (dot(n, pc) > 0.0)
+				n = -n;
+			ndl = dot(n, normalize(SunDirMc));
+		}
+	}
+	float3 lit = relight(world.rgb, uv, zm, ndl);
+	// Hello Neighbor's own light on this very point: where Hello Neighbor's surface is at Minecraft's depth, it is the
+	// grey stand-in HN draws under blocks and models (bridge.cpp receiver_material), lit by HN's sun with HN's shadows:
+	// a roof's shadow edge crosses the block as it crosses the ground. Its brightness only (a stand-in can coincide
+	// with a coloured HN surface: a block sunk level with the grass); the colour stays the sun's
+	if (cover > 0.0 && ReceiverMatch > 0.0 && abs(zh - zm) < 0.06 + 0.01 * zm)
+	{
+		const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
+		const float3 received = world.rgb * tint * clamp(luma(host) / ReceiverReference, 0.15, 1.6);
+		const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
+		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch);
+	}
+	outColor = float4(lit * visible + host * (1.0 - cover), 1.0);
 	outInfo = float4(cover, cover > 0.0 ? zm : 0.0, zh, 0.0);
 }
 
@@ -347,7 +402,7 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	// so it darkens indoors and takes the room's colour; its own layer, so the GUI above stays as it is
 	const float4 hand = tex2D(sHand, float2(uv.x, 1.0 - uv.y));
 	if (hand.a > 0.0)
-		color = relight(hand.rgb, uv, -1.0) + saturate(color) * (1.0 - hand.a);
+		color = relight(hand.rgb, uv, -1.0, -2.0) + saturate(color) * (1.0 - hand.a);
 	const float4 overlay = tex2D(sOverlay, float2(uv.x, 1.0 - uv.y)); // HUD and screens are screen-space: never shaken
 	return overlay.rgb + saturate(color) * (1.0 - overlay.a);
 }

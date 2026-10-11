@@ -29,6 +29,7 @@ namespace
 	std::atomic<float> g_lookLight{-1.0f}, g_lookBias{-1.0f}, g_lookSlope{-1.0f};
 	std::atomic<float> g_shakeX{0.0f}, g_shakeY{0.0f}, g_shakeRoll{0.0f}, g_portalWarp{0.0f};
 	std::atomic<float> g_lightR{1.0f}, g_lightG{1.0f}, g_lightB{1.0f};
+	std::atomic<float> g_sunX{0.0f}, g_sunY{1.0f}, g_sunZ{0.0f}, g_sunStrength{0.0f};
 	float g_savedLight = -1.0f, g_savedBias = -1.0f, g_savedSlope = -1.0f;
 
 	struct Pose
@@ -534,6 +535,19 @@ namespace
 			for (int i = 0; i < 3; ++i)
 				t[i] = rm[0][i] * d[0] + rm[1][i] * d[1] + rm[2][i] * d[2];
 		}
+		// the sun in the camera Minecraft rendered with (world-to-camera: the transpose of camera_rotation)
+		{
+			float rm[3][3];
+			camera_rotation(g_mcPose, rm);
+			const float s[3] = {g_sunX.load(), g_sunY.load(), g_sunZ.load()};
+			float c[3];
+			for (int i = 0; i < 3; ++i)
+				c[i] = rm[0][i] * s[0] + rm[1][i] * s[1] + rm[2][i] * s[2];
+			if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "SunDirMc"); v.handle != 0)
+				runtime->set_uniform_value_float(v, c[0], c[1], c[2]);
+			if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "SunStrength"); v.handle != 0)
+				runtime->set_uniform_value_float(v, g_mcPose.valid ? g_sunStrength.load() : 0.0f);
+		}
 		const char *rows[3] = {"WarpRow0", "WarpRow1", "WarpRow2"};
 		for (int i = 0; i < 3; ++i)
 			if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, rows[i]); v.handle != 0)
@@ -616,6 +630,14 @@ namespace compositor
 		g_shakeY = shake_y;
 		g_shakeRoll = shake_roll;
 		g_portalWarp = portal_warp;
+	}
+
+	void set_sun(float x, float y, float z, float strength)
+	{
+		g_sunX = x;
+		g_sunY = y;
+		g_sunZ = z;
+		g_sunStrength = strength;
 	}
 
 	void set_light_colour(float r, float g, float b)

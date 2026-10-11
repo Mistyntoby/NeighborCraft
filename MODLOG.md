@@ -562,3 +562,19 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   HostLightColour; white until set), no grade from the picture, and the fallback is neutral. Brightness stays local
   (HN surfaces near in depth). [game] after the change: the same wall grey looking down, level and up; the sword
   its own colour. The sun-colour part is built, installed at the next restart.
+
+## Faces lit by HN's sun, HN's shadow edges across blocks and Steve (2026-10-11 night, later)
+- The user: a wall's sunlit front was as dark as its shaded side; a roof's shadow edge crossed the ground but not
+  the blocks or Steve.
+- Minecraft's fixed face shading is off (ClientLevelLightingMixin: flat CardinalLighting). The compositor lights
+  faces by HN's sun: the add-on reads the sun's direction (GetForwardVector) and intensity, the compositor turns it
+  into Minecraft's camera space (SunDirMc), the shader rebuilds each face's normal from Minecraft's depth.
+- Receivers: the stand-ins of blocks and of living models' cubes are drawn by HN (hidden before) with HN's own
+  opaque base_m and a flat grey texture the mod writes and imports (receiver_material), so HN lights them with its
+  sun, shadows and ambient. Where HN's depth equals Minecraft's, the compositor takes that pixel's brightness as the
+  light on the block (Minecraft's colour times luma / ReceiverReference; colour from the sun). Measured with ReShade
+  off: the grey stand-in is ~0.88 in sun, ~0.5 in shade; ReceiverReference 0.8.
+- [game] screenshots: the roof's shadow edge crosses Steve's shoulder and a plank wall exactly as it crosses the
+  road; with ReShade off the grey stand-ins show the same edge. Particles and item silhouettes stay shadow-only.
+- With ReShade off, blocks and Steve now show as grey boxes (HN draws the receivers).
+- Limits: a block face flush with an HN surface may read that surface's brightness; colour comes from the sun only.

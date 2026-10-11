@@ -27,6 +27,8 @@ namespace compositor
 	void set_screen_fx(float shake_x, float shake_y, float shake_roll, float portal_warp);
 	/// The colour of the host's light (its sun's LightColor, 0..1): what tints Minecraft's surfaces.
 	void set_light_colour(float r, float g, float b);
+	/// The direction towards the host's sun in Minecraft's world (unit) and how strongly it shines (0: no sun).
+	void set_sun(float x, float y, float z, float strength);
 	/// The host's backbuffer size as ReShade sees it (0 until the first frame).
 	void backbuffer_size(int &width, int &height);
 }
