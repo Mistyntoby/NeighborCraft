@@ -136,6 +136,7 @@ abstract class CameraMixin {
 	/** Step smoothing: the camera's height and vertical speed, and when they were last updated. */
 	private static double smoothY = Double.NaN, smoothV;
 	private static long smoothAt;
+	private static boolean smoothGrounded;
 
 	/** How quickly the camera's height settles on the eyes' (rad/s): on the ground (~70 ms), and in the air. */
 	private static final double SMOOTH_RATE = 15.0, AIR_RATE = 60.0;
@@ -146,8 +147,10 @@ abstract class CameraMixin {
 	 * On the ground the camera's height tracks the eyes with a critically damped second-order filter instead: it keeps
 	 * their average vertical speed (no lag on a steady slope, where a plain exponential follow floated 10-25 cm
 	 * above them) and spreads each step over ~70 ms (Source smooths stairs the same way). Off the ground (jumps,
-	 * falls) it follows four times as fast: practically exact, without a snap at the take-off. A big jump of position
-	 * (teleport, respawn) is never smoothed.
+	 * falls) it follows four times as fast: practically exact, without a snap at the take-off. Landing, the fall's
+	 * speed is dropped: carried into the ground filter it took the camera ~20 cm below the eyes and back after every
+	 * jump (the user felt it as something stopping them, jumping down the slope). A big jump of position (teleport,
+	 * respawn) is never smoothed.
 	 */
 	private void passthrough$smoothSteps(final Entity player) {
 		Vec3 at = ((Camera) (Object) this).position();
@@ -160,6 +163,10 @@ abstract class CameraMixin {
 			smoothV = 0.0;
 		} else {
 			// y' = v + 2w e, v' = w^2 e (e: the eyes' height minus the camera's), in steps of at most 2 ms
+			if (player.onGround() && !smoothGrounded) {
+				smoothV = 0.0; // landed: the eyes stopped falling within a tick
+			}
+
 			double w = player.onGround() ? SMOOTH_RATE : AIR_RATE;
 			for (double left = dt; left > 1.0E-6; left -= 0.002) {
 				double h = Math.min(0.002, left), e = at.y - smoothY;
@@ -168,6 +175,7 @@ abstract class CameraMixin {
 			}
 		}
 
+		smoothGrounded = player.onGround();
 		this.setPosition(at.x, smoothY, at.z);
 	}
 

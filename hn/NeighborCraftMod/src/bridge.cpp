@@ -726,7 +726,11 @@ namespace nc
 		{
 			const float s = 12.5f;
 			const Vec3f c{p.origin.x + (x + n * 0.5f) * s, p.origin.y + (z + n * 0.5f) * s, p.origin.z + (y + n * 0.5f) * s};
-			const float h = n * s * 0.5f - 0.5f; // a hair inside, so a surface exactly on the edge isn't counted twice
+			// a hair inside, so a surface exactly on the edge isn't counted twice; a single sub-cell is solid only when
+			// HN's geometry reaches its middle 6.5 cm (a wall grazing its edge made a whole 12.5 cm cell solid: walls,
+			// door frames and furniture up to 12.5 cm bigger than they are, too strict for the user). Floors keep their
+			// exact height from the floor rays.
+			const float h = n == 1 ? 3.25f : n * s * 0.5f - 0.5f;
 			++p.queries;
 			return blocks_player(p.self, c, {h, h, h});
 		}
@@ -2685,23 +2689,49 @@ namespace nc
 			g_carried.erase(it);
 		}
 
-		bool overlaps_world(UObject *pawn, const Vec3f &at, float extent, UObject *ignore)
+		/// Whether something solid is in the way of an object of half size `extent` at `at`: what blocks a player (the
+		/// "Pawn" profile), not Steve's own capsule, not the object itself. It was an overlap by object types, and HN's
+		/// levels are full of trigger volumes (overlap only, never blocking): every place and throw of the 20:31 session
+		/// found "no room". `blocker` names what was in the way.
+		bool overlaps_world(UObject *pawn, const Vec3f &at, float extent, UObject *ignore, std::wstring *blocker = nullptr)
 		{
-			static const uint8_t types[] = {0, 1, 2, 3}; // WorldStatic, WorldDynamic, Pawn, PhysicsBody
-			Call c(kismet(), STR("BoxOverlapComponents"));
+			Call c(kismet(), STR("BoxTraceSingleByProfile"));
 			if (!c)
 				return false;
+			static const NameParam pawnProfile = name_param(STR("Pawn"));
 			UObject *ignored[1] = {ignore};
-			const float e = extent * 0.9f;
+			const float e = extent * 0.8f;
 			c.set<UObject *>(STR("WorldContextObject"), pawn)
-				.set(STR("BoxPos"), at)
-				.set(STR("Extent"), Vec3f{e, e, e})
-				.set(STR("ObjectTypes"), ScriptArray{types, 4, 4})
-				.set<UObject *>(STR("ComponentClassFilter"), nullptr)
-				.set(STR("ActorsToIgnore"), ScriptArray{ignored, ignore ? 1 : 0, ignore ? 1 : 0});
+				.set(STR("Start"), Vec3f{at.x, at.y, at.z + 0.5f})
+				.set(STR("End"), Vec3f{at.x, at.y, at.z - 0.5f})
+				.set(STR("HalfSize"), Vec3f{e, e, e})
+				.set(STR("Orientation"), Rot3f{})
+				.set(STR("ProfileName"), pawnProfile)
+				.set(STR("ActorsToIgnore"), ScriptArray{ignored, ignore ? 1 : 0, ignore ? 1 : 0})
+				.set_bool(STR("bTraceComplex"), false)
+				.set<uint8_t>(STR("DrawDebugType"), 0)
+				.set_bool(STR("bIgnoreSelf"), true);
 			c.invoke();
-			const uint8_t *any = c.param<uint8_t>(STR("ReturnValue"));
-			return any && *any;
+			const uint8_t *hit = c.param<uint8_t>(STR("ReturnValue"));
+			if (!hit || !*hit)
+				return false;
+			if (blocker)
+			{
+				*blocker = L"?";
+				FProperty *outHit = c.property(STR("OutHit"));
+				Call brk(gameplay_statics(), STR("BreakHitResult"));
+				FProperty *hitParam = brk ? brk.property(STR("Hit")) : nullptr;
+				if (outHit && hitParam)
+				{
+					std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
+					brk.invoke();
+					UObject *const *actor = brk.param<UObject *>(STR("HitActor"));
+					UObject *const *component = brk.param<UObject *>(STR("HitComponent"));
+					*blocker = (actor && *actor ? (*actor)->GetName() : std::wstring(L"-")) + L" / " +
+						(component && *component ? (*component)->GetName() : std::wstring(L"-"));
+				}
+			}
+			return true;
 		}
 
 		/// The carried object for an id: the hidden one, or a new one of its class (the old one went with its level).
@@ -2792,10 +2822,11 @@ namespace nc
 			}
 			const float fromEye = std::hypot(at.x - g_eye.x, at.y - g_eye.y);
 			bool free = false;
+			std::wstring blocker;
 			for (int lift = 0; lift < 4 && !free; ++lift)
 			{
 				const Vec3f tryAt{at.x, at.y, at.z + lift * 10.0f};
-				if (!overlaps_world(pawn, tryAt, c->extent, c->actor) && fromEye > 20.0f)
+				if (!overlaps_world(pawn, tryAt, c->extent, c->actor, &blocker) && fromEye > 20.0f)
 				{
 					at = tryAt;
 					free = true;
@@ -2804,7 +2835,8 @@ namespace nc
 			if (!free)
 			{
 				notify("No room to put it there");
-				log(L"carry: no room to place " + std::wstring(id.begin(), id.end()));
+				log(L"carry: no room to place " + std::wstring(id.begin(), id.end()) + L" (" + std::to_wstring(int(c->extent)) + L" cm, " +
+					(fromEye <= 20.0f ? std::wstring(L"too close") : L"in the way: " + blocker) + L")");
 				return false;
 			}
 			log(L"carry: placed " + std::wstring(id.begin(), id.end()));
@@ -2821,10 +2853,10 @@ namespace nc
 			const Vec3f dir = look_dir();
 			const float out = g_steveWidth * 0.5f + c->extent + 10.0f;
 			const Vec3f at{g_eye.x + dir.x * out, g_eye.y + dir.y * out, g_eye.z - 20.0f + dir.z * out};
-			if (overlaps_world(pawn, at, c->extent, c->actor))
+			if (std::wstring blocker; overlaps_world(pawn, at, c->extent, c->actor, &blocker))
 			{
 				notify("No room to throw it");
-				log(L"carry: no room to throw " + std::wstring(id.begin(), id.end()));
+				log(L"carry: no room to throw " + std::wstring(id.begin(), id.end()) + L" (in the way: " + blocker + L")");
 				return false;
 			}
 			// lighter objects fly further; on HN's mass scale (props 30-400 kg) 6-11 m/s
@@ -2901,10 +2933,21 @@ namespace nc
 			if (g_heldId.empty())
 				return;
 			Carried *c = nullptr;
-			if (auto it = g_carried.find(g_heldId); it != g_carried.end() && it->second.confirmed)
-				c = &it->second;
+			const auto found = g_carried.find(g_heldId);
+			if (found != g_carried.end() && found->second.confirmed)
+				c = &found->second;
+			static std::string reported;
 			if (!c)
+			{
+				if (reported != g_heldId)
+				{
+					reported = g_heldId;
+					log(L"carry: holding " + std::wstring(g_heldId.begin(), g_heldId.end()) +
+						(found == g_carried.end() ? L" but HN has no such object here" : L" but Minecraft hasn't confirmed it yet"));
+				}
 				return;
+			}
+			const bool first = g_shownId != g_heldId;
 			g_shownId = g_heldId;
 			const float fit = std::min(1.0f, 17.0f / c->extent);
 			set_actor_scale(c->actor, Vec3f{c->scale.x * fit, c->scale.y * fit, c->scale.z * fit});
@@ -2916,6 +2959,18 @@ namespace nc
 			const Vec3f hand{g_mcCamera.x + fwd.x * 45.0f + right.x * 22.0f, g_mcCamera.y + fwd.y * 45.0f + right.y * 22.0f,
 				g_mcCamera.z + fwd.z * 45.0f - 22.0f};
 			place_actor(c->actor, hand, g_mcLookYaw + 90.0f);
+			if (first)
+			{
+				Vec3f o{}, e{};
+				const bool b = actor_bounds(c->actor, o, e);
+				Call hidden(c->actor, STR("IsHidden"));
+				hidden.invoke();
+				const uint8_t *h = hidden.param<uint8_t>(STR("ReturnValue"));
+				char line[320];
+				snprintf(line, sizeof(line), "carry: in the hand: camera %.0f %.0f %.0f, object at %.0f %.0f %.0f (bounds %s %.0f %.0f %.0f, extent %.0f %.0f %.0f), scale %.2f, hidden %d",
+					g_mcCamera.x, g_mcCamera.y, g_mcCamera.z, hand.x, hand.y, hand.z, b ? "ok" : "none", o.x, o.y, o.z, e.x, e.y, e.z, fit, h ? int(*h) : -1);
+				log(std::wstring(line, line + strlen(line)));
+			}
 		}
 
 		// ---- doors ----------------------------------------------------------------------------------------------------
@@ -3051,15 +3106,39 @@ namespace nc
 
 		/// Mark the sub-cells (1/8 block) whose centres lie in a component's oriented box (local bounds at its transform),
 		/// grown by half a sub-cell so thin parts (a door leaf) are never missed.
+		void voxelise_at(UObject *component, const Transform4 &t, std::unordered_map<unsigned long long, std::array<uint8_t, 64>> &out);
+
 		void voxelise(UObject *component, std::unordered_map<unsigned long long, std::array<uint8_t, 64>> &out)
 		{
 			Transform4 t;
+			if (component_transform(component, t))
+				voxelise_at(component, t, out);
+		}
+
+		/// The sub-cells whose centres a part's box covers, at transform `t`. Every part used to grow by half a sub-cell
+		/// all round (up to 12.5 cm more than the part: too tight to walk past, the user said); now a part is its own
+		/// size, and only a part thinner than a sub-cell along an axis (a door leaf, 4-5 cm) is widened to one, so a
+		/// row of centres always falls inside it and it never has gaps.
+		void voxelise_at(UObject *component, const Transform4 &t, std::unordered_map<unsigned long long, std::array<uint8_t, 64>> &out)
+		{
 			Vec3f lo, hi;
-			if (!component_transform(component, t) || !local_bounds(component, lo, hi))
+			if (!local_bounds(component, lo, hi))
 				return;
 			const float inv[4] = {-t.rot[0], -t.rot[1], -t.rot[2], t.rot[3]};
 			const Vec3f pos{t.pos[0], t.pos[1], t.pos[2]};
-			const float grow = 6.25f; // half a sub-cell, cm
+			auto widen = [](float &a, float &b, float scale) {
+				const float minSize = 13.0f / std::max(std::abs(scale), 1.0e-3f); // a sub-cell (12.5 cm) and a bit, local units
+				if (b - a < minSize)
+				{
+					const float mid = (a + b) * 0.5f;
+					a = mid - minSize * 0.5f;
+					b = mid + minSize * 0.5f;
+				}
+			};
+			widen(lo.x, hi.x, t.scale[0]);
+			widen(lo.y, hi.y, t.scale[1]);
+			widen(lo.z, hi.z, t.scale[2]);
+			const float grow = 0.0f;
 			// the box's world corners -> the Minecraft blocks to look at
 			double bx0 = 1e18, by0 = 1e18, bz0 = 1e18, bx1 = -1e18, by1 = -1e18, bz1 = -1e18;
 			for (int i = 0; i < 8; ++i)
@@ -3184,6 +3263,30 @@ namespace nc
 					static int logged = 0;
 					if (logged++ < 20)
 						log(L"moving part: " + w.component->GetFullName());
+					// Where it stood until now was probed as part of the static world (a closed door is a wall until it
+					// first moves): that stayed collision, a door-shaped remnant in the open doorway, until the blocks
+					// were probed again (the user, 20:31). Its sub-cells at rest leave the static world now.
+					std::unordered_map<unsigned long long, std::array<uint8_t, 64>> rest;
+					voxelise_at(w.component, w.first, rest);
+					for (auto &[key, bits] : rest)
+					{
+						const auto b = g_bits.find(key);
+						if (b == g_bits.end())
+							continue;
+						for (int j = 0; j < 64; ++j)
+							b->second.box[j] &= uint8_t(~bits[j]);
+						// floor heights measured on its top (a drawer's, a cabinet door's)
+						for (int sx = 0; sx < 8; ++sx)
+							for (int sz = 0; sz < 8; ++sz)
+							{
+								float &h = b->second.floor[sx * 8 + sz];
+								const int sy = std::clamp(int(std::ceil(h * 8.0f)) - 1, 0, 7);
+								if (h > 0.0f && (bits[sx * 8 + sy] >> sz & 1u))
+									h = 0.0f;
+							}
+						b->second.boxKnown = false; // and probed again, without it
+						g_dirty.insert(key);
+					}
 				}
 				voxelise(w.component, now);
 			}

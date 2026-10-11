@@ -146,6 +146,9 @@ async def downhill(ws, seconds):
     for name, ys in (("eyes", [p[1] for _, p, _ in run]), ("camera", [c for _, _, c in run])):
         worst, mean = jolts(ts, ys)
         print(f"  {name:6s} height jolts: worst {worst:.2f} cm, mean {mean:.2f} cm per 1/60 s")
+    # how far the camera strays from the eyes (bob included: a few cm down while walking)
+    off = [c - p[1] for _, p, c in run]
+    print(f"  camera - eyes: lowest {min(off) * 100:.1f} cm, highest {max(off) * 100:.1f} cm")
 
 
 async def main(seconds):

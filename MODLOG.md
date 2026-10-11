@@ -216,3 +216,23 @@ Evidence: the 20:03 play session (first run of `1a830a4`): `mc-client.log`, reco
 14. A drive-test run that ends in the void leaves the next run's Steve falling: keep courses closed (runout).
 15. PassthroughClient forces view bob on; the `cam` height in `mcpos` includes it.
 16. The HN-launched Minecraft stays up after HN quits to the menu; it exits when HN's process is gone.
+
+## Second play session (20:30): jump landings, door remnant, leeway, carry placement (2026-10-10, night)
+Evidence: `mc-client.log`, `UE4SS.log` and recorder `session-20261010-203047` of the 20:30 session.
+- "Something stops me jumping down the slope": the recorder shows clean jumps (speed kept, no collisions, ticks
+  287-344), so it was the camera. Landing, the eyes stop falling (~9 blocks/s) within a tick, and the height filter
+  carried that speed into its ground mode: ~20 cm below the eyes and back after every landing. Landing now drops the
+  filter's speed. Drive test `--downhill --jump`: lowest camera - eyes -21 -> -8 cm, worst jolt 32 -> 21 cm, mean
+  4.8 -> 3.2 cm. (Ground waits, 11 that session, no longer stopped anyone: 0 velocity resets on the slope.)
+- Door remnant after opening: a part becomes "moving" only once it has moved, so the closed leaf had been probed into
+  the static world, and stayed there until the doorway was probed again (budgeted). On its first move, its sub-cells at
+  rest (`voxelise_at` with the first transform) leave the static box bits and floor heights at once, and are re-probed.
+- Leeway ("collision too strict"): moving parts no longer grow by half a sub-cell all round (only parts thinner than a
+  sub-cell are widened to one, so door leaves have no gaps); a static 1/8 sub-cell is solid only when HN's geometry
+  reaches its middle 6.5 cm (was: touches it anywhere), so walls and furniture stick out up to ~9 cm, not 12.5.
+- Carry placing/throwing always "no room": the room check was `BoxOverlapComponents` by object types, which returns
+  overlap-only trigger volumes (HN levels are full of them). Now a "Pawn"-profile box trace (what blocks a player),
+  ignoring Steve's capsule and the object; a refusal logs what was in the way.
+- Carried object not seen in the hand: cause unknown. Logged now: `carry: in the hand: ...` (camera, position,
+  bounds, scale, hidden flag) the first time, or `carry: holding ... but ...` when HN can't show it.
+- Not run in game yet: all HN changes above (DLL md5 `b3ffa30e…` installed).
