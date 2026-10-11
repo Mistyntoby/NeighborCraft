@@ -7,10 +7,14 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.CustomData;
+import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.phys.AABB;
 
 /**
@@ -38,7 +42,10 @@ public final class Carry {
 		return data(stack).getStringOr("id", "");
 	}
 
-	/** HN picked an object up: its token into the inventory (a free slot; one object per slot), then HN is told. */
+	/**
+	 * HN picked an object up: its token into the hand (the selected slot, which must be empty: one object at a time, held
+	 * until placed or thrown), then HN is told; only then the hand swings and the pickup sound plays, once.
+	 */
 	public static void give(final String id, final String name, final String cls, final int kg) {
 		MinecraftServer s = WorldBridge.server();
 		if (s == null) {
@@ -61,6 +68,12 @@ public final class Carry {
 				}
 			}
 
+			if (!inventory.getSelectedItem().isEmpty()) {
+				Passthrough.LOG.info("carry: {} not taken: the hand holds {}", id, inventory.getSelectedItem());
+				reply(id, false, "hand not empty");
+				return;
+			}
+
 			ItemStack token = new ItemStack(Passthrough.HN_OBJECT);
 			CompoundTag tag = new CompoundTag();
 			tag.putString("id", id);
@@ -68,9 +81,13 @@ public final class Carry {
 			tag.putInt("kg", kg);
 			token.set(DataComponents.CUSTOM_DATA, CustomData.of(tag));
 			token.set(DataComponents.ITEM_NAME, Component.literal(name));
-			boolean added = inventory.add(token) && token.isEmpty();
-			Passthrough.LOG.info("carry: {} ({}) {}", name, id, added ? "into the inventory" : "not taken: the inventory is full");
-			reply(id, added, added ? "" : "inventory full");
+			inventory.setItem(inventory.getSelectedSlot(), token);
+			Passthrough.LOG.info("carry: {} ({}) into the hand (slot {})", name, id, inventory.getSelectedSlot());
+			reply(id, true, "");
+			// as when Minecraft picks an item up: the sound (to everyone, this player too) and the hand's swing
+			player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+			player.level().playSound(null, player.getX(), player.getY(), player.getZ(), SoundEvents.ITEM_PICKUP, SoundSource.PLAYERS, 0.4F,
+				(player.getRandom().nextFloat() - player.getRandom().nextFloat()) * 0.7F + 1.6F);
 		});
 	}
 

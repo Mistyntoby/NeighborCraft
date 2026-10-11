@@ -6,7 +6,9 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import dev.neighborcraft.client.FrameExporter;
 import dev.neighborcraft.client.PlayerSync;
 import net.minecraft.client.Minecraft;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.PlayerRenderState;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -73,6 +75,12 @@ abstract class GameRendererMixin {
 	)
 	private void passthrough$captureHand(final CallbackInfo ci) {
 		FrameExporter.captureHand(this.mainRenderTarget);
+	}
+
+	/** The hand's projection FOV, for where the carrying fist is on screen (CarryHand). */
+	@Inject(method = "renderItemInHand", at = @At("HEAD"))
+	private void passthrough$hudFov(final CameraRenderState camera, final PlayerRenderState player, final GpuTextureView depth, final CallbackInfo ci) {
+		dev.neighborcraft.client.CarryHand.hudFov = camera.hudFov;
 	}
 
 	@Inject(method = "render", at = @At("TAIL"))

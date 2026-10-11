@@ -100,15 +100,18 @@ public class PassthroughClient implements ClientModInitializer {
 	private static int heldRepeat;
 
 	private static void tick(final Minecraft minecraft) {
-		// the Hello Neighbor object in the selected hotbar slot (if any): HN shows that very object in the hand
+		// the Hello Neighbor object in the selected hotbar slot (if any): HN shows that very object in the hand; and
+		// whether the hand is empty (only an empty hand picks HN's objects up)
 		if (minecraft.player != null) {
-			var data = dev.neighborcraft.Carry.data(minecraft.player.getMainHandItem());
+			var held = minecraft.player.getMainHandItem();
+			var data = dev.neighborcraft.Carry.data(held);
 			String id = data.getStringOr("id", "");
-			if (!id.equals(heldReported) || ++heldRepeat >= 40) {
-				heldReported = id;
+			String state = id + (held.isEmpty() ? "|empty" : "|item");
+			if (!state.equals(heldReported) || ++heldRepeat >= 40) {
+				heldReported = state;
 				heldRepeat = 0;
-				dev.neighborcraft.Passthrough.events.accept(String.format(java.util.Locale.ROOT, "{\"t\":\"held\",\"id\":\"%s\",\"cls\":\"%s\"}",
-					id, data.getStringOr("cls", "")));
+				dev.neighborcraft.Passthrough.events.accept(String.format(java.util.Locale.ROOT, "{\"t\":\"held\",\"id\":\"%s\",\"cls\":\"%s\",\"empty\":%b}",
+					id, data.getStringOr("cls", ""), held.isEmpty()));
 			}
 		}
 

@@ -155,6 +155,16 @@ final class ClientInput {
 					minecraft.level.playLocalSound(player.getX(), player.getEyeY(), player.getZ(), sound, SoundSource.PLAYERS, 1.0F, 1.0F, false);
 				}
 			}
+			case "shot" -> {
+				// a test tool's screenshot of Minecraft's own frame (tools/handtest.py): run/screenshots/<name>
+				String name = m.has("n") ? m.get("n").getAsString() : "neighborcraft-test.png";
+				if (m.has("layer") && "hand".equals(m.get("layer").getAsString())) {
+					FrameExporter.handShot = name; // the hand is cleared from the frame once captured: taken there
+				} else {
+					net.minecraft.client.Screenshot.grab(minecraft.gameDirectory, name, minecraft.gameRenderer.mainRenderTarget(), 1,
+						message -> dev.neighborcraft.Passthrough.LOG.info("screenshot: {}", message.getString()));
+				}
+			}
 			case "swing" -> {
 				// the player used one of HN's objects (a door): the hand swings as when using a block in Minecraft
 				if (player != null) {

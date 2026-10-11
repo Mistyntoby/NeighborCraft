@@ -236,3 +236,33 @@ Evidence: `mc-client.log`, `UE4SS.log` and recorder `session-20261010-203047` of
 - Carried object not seen in the hand: cause unknown. Logged now: `carry: in the hand: ...` (camera, position,
   bounds, scale, hidden flag) the first time, or `carry: holding ... but ...` when HN can't show it.
 - Not run in game yet: all HN changes above (DLL md5 `b3ffa30e…` installed).
+
+## Empty-hand pickup, carrying arm, crawl at doors again (2026-10-10, late)
+Evidence: the 20:44 session (`UE4SS.log`, recorder `session-20261010-204419`), `tools/handtest.py` runs.
+- Forced crawl at Door_inward_2092 (4 times at 20:44-20:46, 45 forced ticks): boxes inside Steve's standing box at the
+  door plane the tick before each. Cause: the clearance keeps moving collision out of Steve by removing those cells
+  from `g_dynBits`, and the static probe masked moving parts with that same map; a swinging leaf (its blocks are
+  re-probed every tick it moves) was found in exactly the cleared cells and baked into the static world there.
+  Now the probe and the floor rays mask with `g_dynMask`: every moving part's cells, never cleared around Steve, half
+  a sub-cell wider (a static sub-cell counts geometry in its middle 6.5 cm, a moving one its centre only).
+- Pickup needs an empty hand: Minecraft reports `held` with `empty`; HN starts a pickup only then (a Minecraft item in
+  the hand is used instead), and `Carry.give` refuses unless the selected slot is empty ("hand not empty", HN shows
+  "Empty your hand first"); the token goes into the selected slot. On success only: the server swings the hand and
+  plays ITEM_PICKUP, once (`handtest`: 4 cases as expected, one "into the hand" log line per pickup).
+- Not carried: anything HN's OnIsActionComponent says yes to, and TV/Switch/Tumbler/Lamp classes (Act 1's TV is a
+  loose physics object).
+- Carrying arm: Minecraft drew no arm while the token (empty model) was in the hand. `FirstPersonCarryMixin` draws
+  the player's own arm (renderPlayerArm: skin, swing, equip motion) in a carrying pose (raised 0.16, 0.10 inward),
+  and `CarryHand` sends the fist every frame (`{"t":"hand"}`): the arm cube's end (-1, 10, 0) px after the arm part
+  transform (pivot (-5, 2, 0), zRot 0.1). Measured: the hand space looks along +z with +x to the left; the fist goes
+  through the hand projection (hudFov) to a screen point, then out of the world camera (FOV without the overscan)
+  at the distance where sizes match. `handtest`: fist 0.66 right, 0.28 down, 1.15 ahead of the camera = screen
+  (0.46, -0.35), where the hand layer screenshot shows it. HN rests the object's visual bounds on that point along the
+  camera's up (85% of its half height above), scaled to at most 18% of the fist distance in half size.
+- `tools/handtest.py`: the pickup rules over the link, and hand-layer screenshots (`shot` with `layer: hand`; the
+  hand is cleared from Minecraft's frame once captured, so ordinary screenshots never show it).
+
+### Gotchas
+17. FrameExporter clears the hand from Minecraft's frame after copying it: screenshots need the hand layer.
+18. Minecraft 26.3 names: `GameRenderer.mainCamera()`, `GameRenderer.mainRenderTarget()`,
+    `FirstPersonHandsAndItemsRenderer` (was ItemInHandRenderer).

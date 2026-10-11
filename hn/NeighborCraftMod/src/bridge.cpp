@@ -830,7 +830,14 @@ namespace nc
 			bool boxKnown = false;
 		};
 		std::unordered_map<unsigned long long, BlockBits> g_bits;
-		std::unordered_map<unsigned long long, std::array<uint8_t, 64>> g_dynBits; // moving parts' sub-cells, per block
+		std::unordered_map<unsigned long long, std::array<uint8_t, 64>> g_dynBits; // moving parts' sub-cells, per block (sent; kept out of Steve)
+		/// Where the moving parts are, for the static probe to leave alone: all of them (never cleared around Steve) and
+		/// half a sub-cell wider. The probe used to mask with g_dynBits, which has the cells inside Steve removed: a door
+		/// leaf swinging into him was re-probed every tick of its swing, found in exactly those cells, and baked into
+		/// the static world there, inside his standing box (the 20:44 session: boxes in his head the tick before every
+		/// forced crawl at Door_inward_2092, 4 times). Wider, because a static sub-cell counts geometry anywhere in its
+		/// middle 6.5 cm while a moving one counts its centre only.
+		std::unordered_map<unsigned long long, std::array<uint8_t, 64>> g_dynMask;
 
 		/// Whether a point (Minecraft coordinates) lies in a moving part's sub-cells this tick (a door leaf, a cabinet
 		/// door, a loose object). The static probe leaves those to the moving collision: a door re-probed mid-swing
@@ -839,8 +846,8 @@ namespace nc
 		bool in_moving_part(double mx, double my, double mz)
 		{
 			const int bx = int(std::floor(mx)), by = int(std::floor(my)), bz = int(std::floor(mz));
-			const auto it = g_dynBits.find(cell_key(bx, by, bz));
-			if (it == g_dynBits.end())
+			const auto it = g_dynMask.find(cell_key(bx, by, bz));
+			if (it == g_dynMask.end())
 				return false;
 			const int sx = std::clamp(int((mx - bx) * 8.0), 0, 7), sy = std::clamp(int((my - by) * 8.0), 0, 7), sz = std::clamp(int((mz - bz) * 8.0), 0, 7);
 			return (it->second[sx * 8 + sy] >> sz & 1) != 0;
@@ -1148,7 +1155,7 @@ namespace nc
 						for (int j = 0; j < 64; ++j)
 							b.box[j] = uint8_t(std::stoi(hex.substr(j * 2, 2), nullptr, 16));
 					// the moving parts here now are theirs, not the static world's
-					if (const auto dyn = g_dynBits.find(key); dyn != g_dynBits.end())
+					if (const auto dyn = g_dynMask.find(key); dyn != g_dynMask.end())
 						for (int j = 0; j < 64; ++j)
 							b.box[j] &= uint8_t(~dyn->second[j]);
 				}
@@ -1396,6 +1403,10 @@ namespace nc
 		std::vector<int> g_pendingSet, g_pendingClear; // block changes from Minecraft, applied on the next tick
 		std::vector<std::string> g_throwRequests;      // tokens Minecraft dropped: HN throws the objects
 		std::string g_heldId, g_heldCls;               // the HN object in Minecraft's selected slot ("" none)
+		bool g_handEmpty = true;                       // Minecraft's main hand holds nothing (only then HN's objects are picked up)
+		Vec3f g_handFist, g_handUp;                    // where Minecraft draws the carrying fist (Unreal cm), and the camera's up
+		float g_handDist = 1.35f;                      // how far that is from the camera (blocks)
+		DWORD g_handAt = 0;                            // when that came (it comes every frame while an object is held)
 		void carry_answer(const std::string &id, bool ok, const std::string &why);
 		bool carry_place(UObject *pc, UObject *pawn);
 		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls);
@@ -1476,6 +1487,24 @@ namespace nc
 			{
 				g_heldId = json_string(m, "id");
 				g_heldCls = json_string(m, "cls");
+				g_handEmpty = m.find("\"empty\":false") == std::string::npos;
+			}
+			else if (m.find("\"t\":\"hand\"") != std::string::npos)
+			{
+				double p[3], u[3];
+				if (json_vec3(m, "p", p) && json_vec3(m, "u", u))
+				{
+					g_handFist = to_ue(p[0], p[1], p[2]);
+					const Vec3f o = to_ue(0.0, 0.0, 0.0), up = to_ue(u[0], u[1], u[2]);
+					g_handUp = {up.x - o.x, up.y - o.y, up.z - o.z};
+					const float n = std::sqrt(g_handUp.x * g_handUp.x + g_handUp.y * g_handUp.y + g_handUp.z * g_handUp.z);
+					if (n > 1.0e-3f)
+						g_handUp = {g_handUp.x / n, g_handUp.y / n, g_handUp.z / n};
+					g_handAt = GetTickCount();
+					double d = 0.0;
+					if (json_number(m, "d", d) && d > 0.2)
+						g_handDist = float(d);
+				}
 			}
 			else if (m.find("\"t\":\"picked\"") != std::string::npos)
 				carry_answer(json_string(m, "id"), m.find("\"ok\":true") != std::string::npos, json_string(m, "why"));
@@ -1962,7 +1991,9 @@ namespace nc
 		{
 			const int e = edge(VK_RBUTTON);
 			// carrying: a held HN object is put down; a loose object under the crosshair starts a pickup (hold)
-			if (e > 0 && g_controlsPawn && (!g_heldId.empty() ? (carry_place(g_controlsPc, g_controlsPawn), true) : carry_start_pickup(g_controlsPawn)))
+			// (a hand holding a Minecraft item uses it instead: one thing in the hand at a time)
+			if (e > 0 && g_controlsPawn &&
+				(!g_heldId.empty() ? (carry_place(g_controlsPc, g_controlsPawn), true) : g_handEmpty && carry_start_pickup(g_controlsPawn)))
 			{
 				g_rightClickCarry = true;
 				return;
@@ -2616,6 +2647,11 @@ namespace nc
 				return nullptr;
 			if (interactive_actor(*actor)) // a door, or one of HN's story items (keys...): HN's own pickup
 				return nullptr;
+			// what HN itself uses (its OnIsActionComponent says yes: cabinets, switches...) is used, not carried; nor TVs, switches, lamps (Act
+			// 1's TV is a loose physics object)
+			if (flat_actionable(*actor, *component) == 1 || class_contains(*actor, L"TV") || class_contains(*actor, L"Switch") ||
+				class_contains(*actor, L"Tumbler") || class_contains(*actor, L"Lamp"))
+				return nullptr;
 			if (bodyOut)
 				*bodyOut = *component;
 			return *actor;
@@ -2685,7 +2721,7 @@ namespace nc
 			}
 			set_carried_state(it->second.actor, it->second.body, true);
 			log(L"carry: Minecraft didn't take " + std::wstring(id.begin(), id.end()) + L" (" + std::wstring(why.begin(), why.end()) + L"): back in HN's world");
-			notify(why == "inventory full" ? "Inventory full" : "Couldn't pick that up");
+			notify(why == "hand not empty" ? "Empty your hand first" : why == "inventory full" ? "Inventory full" : "Couldn't pick that up");
 			g_carried.erase(it);
 		}
 
@@ -2949,15 +2985,38 @@ namespace nc
 			}
 			const bool first = g_shownId != g_heldId;
 			g_shownId = g_heldId;
-			const float fit = std::min(1.0f, 17.0f / c->extent);
+			// its size fitted to the hand: at most ~18% of the fist's distance across in half (24 cm at Minecraft's
+			// 1.35 blocks, an object Steve's big fist can hold); in front of the camera without the fist, 17 cm
+			const bool fistKnown = GetTickCount() - g_handAt < 250;
+			const float fit = std::min(1.0f, (fistKnown ? 18.0f * g_handDist : 17.0f) / c->extent);
 			set_actor_scale(c->actor, Vec3f{c->scale.x * fit, c->scale.y * fit, c->scale.z * fit});
 			Call(c->actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), false).invoke();
 			const Vec3f fwd = look_dir();
 			const float d2r = 3.14159265f / 180.0f;
 			const float yaw = g_mcLookYaw * d2r;
 			const Vec3f right{-std::cos(yaw), -std::sin(yaw), 0.0f};
-			const Vec3f hand{g_mcCamera.x + fwd.x * 45.0f + right.x * 22.0f, g_mcCamera.y + fwd.y * 45.0f + right.y * 22.0f,
+			Vec3f hand{g_mcCamera.x + fwd.x * 45.0f + right.x * 22.0f, g_mcCamera.y + fwd.y * 45.0f + right.y * 22.0f,
 				g_mcCamera.z + fwd.z * 45.0f - 22.0f};
+			// Minecraft draws the arm holding it (FirstPersonCarryMixin) and says where the fist is, every frame: the
+			// object rests on it (its visual bounds' bottom on the fist, along the camera's up), and follows the swing,
+			// the equip motion and the bob. Without it (third person, the message late) the old spot in front.
+			const bool onFist = GetTickCount() - g_handAt < 250;
+			if (onFist)
+			{
+				Vec3f o{}, e{};
+				Call loc(c->actor, STR("K2_GetActorLocation"));
+				loc.invoke();
+				const Vec3f *at = loc.param<Vec3f>(STR("ReturnValue"));
+				Call bounds(c->actor, STR("GetActorBounds"));
+				bounds.set_bool(STR("bOnlyCollidingComponents"), false);
+				if (at && bounds.invoke())
+					if (const Vec3f *bo = bounds.param<Vec3f>(STR("Origin")), *be = bounds.param<Vec3f>(STR("BoxExtent")); bo && be)
+						o = {bo->x - at->x, bo->y - at->y, bo->z - at->z}, e = *be;
+				// the bounds' half height along the camera's up, and the actor's origin away from their centre
+				const float half = std::abs(g_handUp.x) * e.x + std::abs(g_handUp.y) * e.y + std::abs(g_handUp.z) * e.z;
+				const float lift = half * 0.85f; // a little into the fingers: held, not balanced on top
+				hand = {g_handFist.x + g_handUp.x * lift - o.x, g_handFist.y + g_handUp.y * lift - o.y, g_handFist.z + g_handUp.z * lift - o.z};
+			}
 			place_actor(c->actor, hand, g_mcLookYaw + 90.0f);
 			if (first)
 			{
@@ -2967,8 +3026,9 @@ namespace nc
 				hidden.invoke();
 				const uint8_t *h = hidden.param<uint8_t>(STR("ReturnValue"));
 				char line[320];
-				snprintf(line, sizeof(line), "carry: in the hand: camera %.0f %.0f %.0f, object at %.0f %.0f %.0f (bounds %s %.0f %.0f %.0f, extent %.0f %.0f %.0f), scale %.2f, hidden %d",
-					g_mcCamera.x, g_mcCamera.y, g_mcCamera.z, hand.x, hand.y, hand.z, b ? "ok" : "none", o.x, o.y, o.z, e.x, e.y, e.z, fit, h ? int(*h) : -1);
+				snprintf(line, sizeof(line), "carry: in the hand (%s): camera %.0f %.0f %.0f, object at %.0f %.0f %.0f (bounds %s %.0f %.0f %.0f, extent %.0f %.0f %.0f), scale %.2f, hidden %d",
+					onFist ? "on Minecraft's fist" : "fist not reported, in front", g_mcCamera.x, g_mcCamera.y, g_mcCamera.z, hand.x, hand.y, hand.z,
+					b ? "ok" : "none", o.x, o.y, o.z, e.x, e.y, e.z, fit, h ? int(*h) : -1);
 				log(std::wstring(line, line + strlen(line)));
 			}
 		}
@@ -3106,20 +3166,24 @@ namespace nc
 
 		/// Mark the sub-cells (1/8 block) whose centres lie in a component's oriented box (local bounds at its transform),
 		/// grown by half a sub-cell so thin parts (a door leaf) are never missed.
-		void voxelise_at(UObject *component, const Transform4 &t, std::unordered_map<unsigned long long, std::array<uint8_t, 64>> &out);
+		using CellMap = std::unordered_map<unsigned long long, std::array<uint8_t, 64>>;
+		void voxelise_at(UObject *component, const Transform4 &t, CellMap &out, float grow = 0.0f);
 
-		void voxelise(UObject *component, std::unordered_map<unsigned long long, std::array<uint8_t, 64>> &out)
+		/// A part's collision cells (`out`), and the same half a sub-cell wider (`mask`, for the static probe).
+		void voxelise(UObject *component, CellMap &out, CellMap &mask)
 		{
 			Transform4 t;
-			if (component_transform(component, t))
-				voxelise_at(component, t, out);
+			if (!component_transform(component, t))
+				return;
+			voxelise_at(component, t, out);
+			voxelise_at(component, t, mask, 6.25f);
 		}
 
 		/// The sub-cells whose centres a part's box covers, at transform `t`. Every part used to grow by half a sub-cell
 		/// all round (up to 12.5 cm more than the part: too tight to walk past, the user said); now a part is its own
 		/// size, and only a part thinner than a sub-cell along an axis (a door leaf, 4-5 cm) is widened to one, so a
 		/// row of centres always falls inside it and it never has gaps.
-		void voxelise_at(UObject *component, const Transform4 &t, std::unordered_map<unsigned long long, std::array<uint8_t, 64>> &out)
+		void voxelise_at(UObject *component, const Transform4 &t, CellMap &out, float grow)
 		{
 			Vec3f lo, hi;
 			if (!local_bounds(component, lo, hi))
@@ -3138,7 +3202,6 @@ namespace nc
 			widen(lo.x, hi.x, t.scale[0]);
 			widen(lo.y, hi.y, t.scale[1]);
 			widen(lo.z, hi.z, t.scale[2]);
-			const float grow = 0.0f;
 			// the box's world corners -> the Minecraft blocks to look at
 			double bx0 = 1e18, by0 = 1e18, bz0 = 1e18, bx1 = -1e18, by1 = -1e18, bz1 = -1e18;
 			for (int i = 0; i < 8; ++i)
@@ -3240,7 +3303,7 @@ namespace nc
 					if (UObject *const *item = h.param<UObject *>(STR("ReturnValue")))
 						held = *item;
 			}
-			std::unordered_map<unsigned long long, std::array<uint8_t, 64>> now;
+			CellMap now, mask;
 			for (Watched &w : g_watched)
 			{
 				if (held && owner_of(w.component) == held)
@@ -3267,7 +3330,7 @@ namespace nc
 					// first moves): that stayed collision, a door-shaped remnant in the open doorway, until the blocks
 					// were probed again (the user, 20:31). Its sub-cells at rest leave the static world now.
 					std::unordered_map<unsigned long long, std::array<uint8_t, 64>> rest;
-					voxelise_at(w.component, w.first, rest);
+					voxelise_at(w.component, w.first, rest, 6.25f);
 					for (auto &[key, bits] : rest)
 					{
 						const auto b = g_bits.find(key);
@@ -3288,11 +3351,11 @@ namespace nc
 						g_dirty.insert(key);
 					}
 				}
-				voxelise(w.component, now);
+				voxelise(w.component, now, mask);
 			}
 			for (UObject *component : g_nearPhysics)
 				if (!held || owner_of(component) != held)
-					voxelise(component, now);
+					voxelise(component, now, mask);
 			// Not where Steve is. A door leaf swinging into him or an object falling on his head became collision inside
 			// his hitbox: Minecraft can't push him out of it, finds no room to stand, and forces him to crawl (the
 			// recorder: boxes appearing in his head the tick before POSE_FORCED SWIMMING, at a door). HN's own physics
@@ -3341,7 +3404,12 @@ namespace nc
 			for (auto &[key, bits] : g_dynBits)
 				if (!now.count(key))
 					restale(key);
+			// restale also when only the mask changed (a part moving within the cells it already had)
+			for (auto &[key, bits] : mask)
+				if (const auto old = g_dynMask.find(key); old == g_dynMask.end() || old->second != bits)
+					restale(key);
 			g_dynBits = std::move(now);
+			g_dynMask = std::move(mask);
 		}
 
 		// ---- HN's surface material under Steve, for Minecraft's particles and footsteps -----------------------------

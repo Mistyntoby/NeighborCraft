@@ -180,7 +180,7 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Door remnants (static probe baked mid-swing leaf/handle) | BUILT, 2nd cause fixed | user still saw a remnant at 20:31: the closed leaf was in the static world until re-probed; now cleared on the first move (MODLOG night section); **not yet run** |
 | Collision leeway | BUILT | moving parts their own size, static sub-cells need geometry in their middle; **not yet run** |
 | Doors stuck open | BUILT, likely fixed | cause: HN capsule (51 cm) inside the leaf + our nudges on the 747 kg physics leaf; both fixed; no recent report of stuck doors |
-| Forced crawl at doors / objects on head | BUILT (2 causes) | 1) shape race (`session-20261010-014705`), fixed in `HostBlock.shape()`, ran 20:03 with no door crawl seen; 2) furniture parts opening into Steve (`session-20261010-200332`, ticks 1839-1857, `BP_Kitchen_stand5`): HN's clearance now his standing body + a sub-cell; **not yet run in game** |
+| Forced crawl at doors / objects on head | BUILT (3 causes) | shape race; furniture clearance; 3rd (20:44 session, 4 crawls at Door_inward_2092): the static probe re-baked the swinging leaf in the cells cleared around Steve, now masked with `g_dynMask`; **not yet run in game** |
 | Stops running/jumping downhill | BUILT, VERIFIED in the drive test | cause: the ground-wait hold zeroed speed (13 holds of ~50 ms in `mc-client.log` 20:03); drive test `--downhill --stream 1.6 --jump` 4.0 -> 6.7 m/s, 0 dips; **not yet run in game** |
 | Slope smoothness (micro-steps) | BUILT, VERIFIED in the drive test | step-down + camera height filter; downhill 4.87 -> 5.6 m/s, worst camera jolt 19.8 -> 7.2 cm; **feel not yet judged by the user** |
 | Cabinets / wardrobes / TV-stand drawers open | VERIFIED | log `OnIsActionComponent(Door1) yes`, user |
@@ -196,7 +196,7 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Shutdown crash | VERIFIED fixed | no CrashDumps since |
 | Cutscene glitch (MC kit/HUD/drive during cutscene) | VERIFIED gate fires (`cutscene: Minecraft waits` / `cutscene over`) | the user hasn't re-judged the item glitch |
 | Inventory left-click | VERIFIED (log 02:01: MC button 1 = left picks the full stack) | |
-| Carry: pickup/hold/place/throw | pickup VERIFIED (20:31 log); place/throw fix BUILT (room check ignored triggers wrongly); **object not visible in hand: OPEN**, diagnostics added | §9, MODLOG night section |
+| Carry: pickup/hold/place/throw | pickup, place, throw VERIFIED in game (20:45 log); empty-hand rule, sound, swing VERIFIED in `tools/handtest.py` (no HN); carrying arm drawn and fist position VERIFIED by hand-layer screenshot + numbers; **object on the fist in HN: not yet seen in game** | §9, MODLOG late section |
 | Per-item inventory icons | OPEN | one generic icon (ours) |
 | Lighting/shadows, transparency, GPU sharing, macOS, block mining in HN geometry, Neighbor combat | OPEN | not started |
 
@@ -312,6 +312,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+Late update: `tools/handtest.py` passes (4 pickup cases, fist on screen where drawn); drive tests unchanged; HN DLL md5 `9e7ff2de…` installed, not run in game.
+
 Night update: drive tests of the landing fix (MODLOG); HN DLL md5 `b3ffa30e…` installed, not run in game.
 
 Evening update:

@@ -205,10 +205,21 @@ public final class FrameExporter {
 	}
 
 	/** Right after the first-person hand is drawn: it alone is in the colour target (cleared after the world). */
+	/** A screenshot of the next hand layer (tools/handtest.py), or null. */
+	public static volatile String handShot;
+
 	public static void captureHand(final RenderTarget target) {
 		Capture c = current;
 		if (c == null || target.width != c.width || target.height != c.height) {
 			return;
+		}
+
+		String shot = handShot;
+		if (shot != null) {
+			// a test tool's screenshot of the hand layer (it is cleared from Minecraft's own frame right after)
+			handShot = null;
+			net.minecraft.client.Screenshot.grab(net.minecraft.client.Minecraft.getInstance().gameDirectory, shot, target, 1,
+				message -> dev.neighborcraft.Passthrough.LOG.info("screenshot (hand layer): {}", message.getString()));
 		}
 
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
