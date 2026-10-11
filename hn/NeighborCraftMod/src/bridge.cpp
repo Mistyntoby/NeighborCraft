@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -1461,11 +1462,15 @@ namespace nc
 		Vec3f g_handFist, g_handUp;                    // where Minecraft draws the carrying fist (Unreal cm), and the camera's up
 		float g_handDist = 1.35f;                      // how far that is from the camera (blocks)
 		DWORD g_handAt = 0;                            // when that came (it comes every frame while an object is held)
+		Vec3f g_handLocal{0.66f, -0.28f, 1.15f};       // the fist in the camera's frame (blocks: right, up, forward)
+		void carry_hand_follow(const Vec3f &cameraLoc, const Rot3f &cameraRot);
+		Vec3f rotate(const float q[4], const Vec3f &v);
+		bool local_bounds(UObject *component, Vec3f &lo, Vec3f &hi);
 		void carry_answer(const std::string &id, bool ok, const std::string &why);
 		bool carry_place(UObject *pc, UObject *pawn);
 		bool carry_throw(UObject *pc, UObject *pawn, const std::string &id, const std::string &cls);
 		void carry_start_pickup(UObject *actor, UObject *body);
-		UObject *pickup_target(UObject *pawn, UObject **bodyOut);
+		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut = nullptr);
 		void carry_cancel_pickup();
 		bool actor_bounds(UObject *actor, Vec3f &origin, Vec3f &extent);
 		UObject *g_controlsPc = nullptr;
@@ -1556,6 +1561,9 @@ namespace nc
 					if (n > 1.0e-3f)
 						g_handUp = {g_handUp.x / n, g_handUp.y / n, g_handUp.z / n};
 					g_handAt = GetTickCount();
+					double l[3];
+					if (json_vec3(m, "l", l))
+						g_handLocal = {float(l[0]), float(l[1]), float(l[2])};
 					double d = 0.0;
 					if (json_number(m, "d", d) && d > 0.2)
 						g_handDist = float(d);
@@ -1974,14 +1982,15 @@ namespace nc
 							 (key_held(VK_SPACE) ? 16 : 0) | (key_held(VK_SHIFT) ? 32 : 0) | (key_held(VK_CONTROL) ? 64 : 0);
 			sendf("{\"t\":\"move\",\"m\":%d}", g_minecraftScreen ? 0 : bits);
 			forward_key('E', "inventory");
-			// Q throws a held HN object; otherwise Minecraft's drop
+			// Q throws a held HN object (one per slot: Ctrl+Q too); otherwise Minecraft's drop, with Ctrl the whole stack
+			// (Minecraft can't see Ctrl itself: its window never has the keys). One press, one of the two.
 			if (!g_heldId.empty() && g_controlsPawn)
 			{
 				if (edge('Q') > 0)
 					carry_throw(g_controlsPc, g_controlsPawn, g_heldId, g_heldCls);
 			}
-			else
-				forward_key('Q', "drop");
+			else if (const int q = edge('Q'))
+				sendf("{\"t\":\"key\",\"k\":\"drop\",\"down\":%s,\"stack\":%s}", q > 0 ? "true" : "false", key_held(VK_CONTROL) ? "true" : "false");
 			forward_key('F', "swap");
 			forward_key(VK_F5, "perspective");
 			const int wheel = g_wheel.exchange(0);
@@ -2057,7 +2066,11 @@ namespace nc
 					return;
 				}
 				UObject *body = nullptr;
-				if (UObject *target = pickup_target(g_controlsPawn, &body))
+				const wchar_t *why = nullptr;
+				UObject *target = pickup_target(g_controlsPawn, &body, &why);
+				if (!target && why && std::wcscmp(why, L"not a physics object") != 0 && std::wcscmp(why, L"no root component") != 0)
+					log(std::wstring(L"carry: what the look meets isn't carried: ") + why);
+				if (target)
 				{
 					if (g_handEmpty)
 						carry_start_pickup(target, body);
@@ -2204,6 +2217,8 @@ namespace nc
 				g_setHfov = hfov;
 				if (UObject **component = camera->GetValuePtrByPropertyNameInChain<UObject *>(STR("CameraComponent")); component && *component)
 					Call(*component, STR("SetFieldOfView")).set(STR("InFieldOfView"), hfov).invoke();
+				// the held object in the hand, from this very camera pose (placed before it, it was a frame behind)
+				carry_hand_follow(pose.loc, pose.rot);
 			}
 			// the view target: ours while Minecraft drives (re-applied if HN takes it), the player's otherwise
 			Call current(pc, STR("GetViewTarget"));
@@ -2620,6 +2635,7 @@ namespace nc
 			std::wstring cls;          // class path, to make a new one when the object is gone (another level)
 			Vec3f scale{1, 1, 1};
 			float extent = 20.0f;      // half size (cm, largest axis) at its own scale
+			float fit = 1.0f;          // its size in the hand (times its own scale), before the near placement
 			float mass = 10.0f;
 			bool confirmed = false;    // Minecraft has its token
 			UObject *level = nullptr;  // the player controller of its level (gone with it)
@@ -2677,7 +2693,7 @@ namespace nc
 		}
 
 		/// The loose object under the crosshair, if it can be carried (else nullptr).
-		UObject *pickup_target(UObject *pawn, UObject **bodyOut)
+		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut)
 		{
 			if (!g_haveEye)
 				return nullptr;
@@ -2708,25 +2724,41 @@ namespace nc
 			UObject *const *component = brk.param<UObject *>(STR("HitComponent"));
 			if (!actor || !*actor || !component || !*component)
 				return nullptr;
-			Call simulating(*component, STR("IsSimulatingPhysics"));
-			simulating.set(STR("BoneName"), NameParam{}).invoke();
-			if (const uint8_t *yes = simulating.param<uint8_t>(STR("ReturnValue")); !yes || !*yes)
+			// The object is the actor; its body is its root, which simulates physics. Any part of it may be what the look
+			// meets (a mesh or collider under the root): it used to have to be the root itself, and a prop hit on another
+			// part was refused without a word and went on to HN's action, which is HN's own grab for its props.
+			auto refuse = [&](const wchar_t *why) -> UObject * {
+				if (whyOut)
+					*whyOut = why;
 				return nullptr;
+			};
 			Call root(*actor, STR("K2_GetRootComponent"));
 			root.invoke();
 			UObject *const *r = root.param<UObject *>(STR("ReturnValue"));
-			if (!r || *r != *component || hinged_part(*component))
-				return nullptr;
+			if (!r || !*r)
+				return refuse(L"no root component");
+			Call simulating(*r, STR("IsSimulatingPhysics"));
+			simulating.set(STR("BoneName"), NameParam{}).invoke();
+			const uint8_t *loose = simulating.param<uint8_t>(STR("ReturnValue"));
+			if (!loose || !*loose)
+			{
+				Call part(*component, STR("IsSimulatingPhysics"));
+				part.set(STR("BoneName"), NameParam{}).invoke();
+				const uint8_t *partLoose = part.param<uint8_t>(STR("ReturnValue"));
+				return refuse(partLoose && *partLoose ? L"its physics body isn't its root (a loose part of a fixed object)" : L"not a physics object");
+			}
+			if (hinged_part(*r) || hinged_part(*component))
+				return refuse(L"a door or drawer");
 			if (interactive_actor(*actor)) // a door, or one of HN's story items (keys...): HN's own pickup
-				return nullptr;
+				return refuse(L"one of HN's own items (InteractiveComponent): HN's pickup");
 			// TVs, switches and lamps are used, not carried (Act 1's TV is a loose physics object). Not decided by HN's
 			// OnIsActionComponent: it says yes for its loose props too (BP_Video_Recorder, BP_Dining_chair: there its
 			// "action" is its own grab), and excluding those handed every pickup to HN's grab (the 21:31 session).
 			if (class_contains(*actor, L"TV") || class_contains(*actor, L"Switch") || class_contains(*actor, L"Tumbler") ||
 				class_contains(*actor, L"Lamp"))
-				return nullptr;
+				return refuse(L"a TV, switch or lamp: used, not carried");
 			if (bodyOut)
-				*bodyOut = *component;
+				*bodyOut = *r;
 			return *actor;
 		}
 
@@ -2751,6 +2783,12 @@ namespace nc
 			Call(actor, STR("SetActorScale3D")).set(STR("NewScale3D"), scale).invoke();
 		}
 
+		void place_actor_rot(UObject *actor, const Vec3f &at, const Rot3f &rot)
+		{
+			Call c(actor, STR("K2_SetActorLocationAndRotation"));
+			c.set(STR("NewLocation"), at).set(STR("NewRotation"), rot).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+		}
+
 		void place_actor(UObject *actor, const Vec3f &at, float yaw)
 		{
 			Call c(actor, STR("K2_SetActorLocationAndRotation"));
@@ -2758,6 +2796,85 @@ namespace nc
 		}
 
 		/// Pickup completes: out of HN's world (hidden, no collision, no physics), and Minecraft is asked for a slot.
+		void quat_of(const Rot3f &r, float q[4]);
+
+		std::unordered_set<std::wstring> g_iconsMade; // classes with a picture made this session (or tried)
+
+		/// The object's picture for Minecraft's hotbar and inventory, once per class: a scene capture of the object alone
+		/// (its components only, from a three-quarter view above, 64 px), exported by UE 4.20's ExportRenderTarget into
+		/// icons/ next to the mod; Minecraft loads it ({"t":"icon"}, CarryIcons). Taken at the pickup, before the
+		/// object is hidden. Any step failing is logged and Minecraft keeps its fallback icon for the class.
+		void capture_icon(UObject *pawn, UObject *object, const std::wstring &cls)
+		{
+			if (!g_iconsMade.insert(cls).second)
+				return;
+			static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
+			static UObject *captureClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.SceneCapture2D"));
+			UObject *statics = gameplay_statics();
+			auto fail = [&](const wchar_t *why) { log(L"carry: no icon for " + cls + L": " + why); };
+			if (!rendering || !captureClass || !statics)
+				return fail(L"the engine's capture or rendering library isn't there");
+			Call rt(rendering, STR("CreateRenderTarget2D"));
+			rt.set<UObject *>(STR("WorldContextObject"), pawn).set<int32_t>(STR("Width"), 64).set<int32_t>(STR("Height"), 64).set<uint8_t>(STR("Format"), 2); // RTF_RGBA8
+			UObject *const *target = rt.invoke() ? rt.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!target || !*target)
+				return fail(L"no render target");
+			// where to look from: the object's visual bounds, seen from front-left above, filling the picture
+			Call b(object, STR("GetActorBounds"));
+			b.set_bool(STR("bOnlyCollidingComponents"), false);
+			const Vec3f *bo = b.invoke() ? b.param<Vec3f>(STR("Origin")) : nullptr, *be = b.param<Vec3f>(STR("BoxExtent"));
+			if (!bo || !be)
+				return fail(L"no bounds");
+			const float radius = std::max(5.0f, std::sqrt(be->x * be->x + be->y * be->y + be->z * be->z));
+			const float fov = 30.0f, dist = radius / std::tan(fov * 0.5f * 3.14159265f / 180.0f) * 1.05f;
+			const Vec3f dir{-0.62f, -0.62f, 0.48f}; // unit: from the object to the camera
+			Transform4 t;
+			t.pos[0] = bo->x + dir.x * dist, t.pos[1] = bo->y + dir.y * dist, t.pos[2] = bo->z + dir.z * dist;
+			quat_of(Rot3f{-std::asin(dir.z) * 180.0f / 3.14159265f, std::atan2(-dir.y, -dir.x) * 180.0f / 3.14159265f, 0.0f}, t.rot);
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), captureClass).set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
+			UObject *const *camera = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!camera || !*camera)
+				return fail(L"no scene capture");
+			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *camera).set(STR("SpawnTransform"), t).invoke();
+			UObject **component = (*camera)->GetValuePtrByPropertyNameInChain<UObject *>(STR("CaptureComponent2D"));
+			bool exported = false;
+			const std::wstring dirPath = module_dir() + L"icons\\";
+			std::wstring name = cls.substr(cls.find_last_of(L"./") + 1);
+			for (wchar_t &ch : name)
+				if (!iswalnum(ch) && ch != L'_')
+					ch = L'_';
+			name += L".hdr";
+			if (component && *component)
+			{
+				if (UObject **tt = (*component)->GetValuePtrByPropertyNameInChain<UObject *>(STR("TextureTarget")))
+					*tt = *target;
+				if (uint8_t *mode = (*component)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("PrimitiveRenderMode")))
+					*mode = 2; // PRM_UseShowOnlyList
+				if (uint8_t *source = (*component)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("CaptureSource")))
+					*source = 0; // SCS_SceneColorHDR: lit, no tone mapping or eye adaptation
+				if (float *angle = (*component)->GetValuePtrByPropertyNameInChain<float>(STR("FOVAngle")))
+					*angle = fov;
+				set_bool_property(*component, STR("bCaptureEveryFrame"), false);
+				Call(*component, STR("ShowOnlyActorComponents")).set<UObject *>(STR("InActor"), object).invoke();
+				Call(*component, STR("CaptureScene")).invoke();
+				CreateDirectoryW(dirPath.c_str(), nullptr);
+				Call ex(rendering, STR("ExportRenderTarget"));
+				ex.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("TextureRenderTarget"), *target)
+					.set(STR("FilePath"), FString(dirPath.c_str())).set(STR("FileName"), FString(name.c_str()));
+				exported = ex.invoke();
+			}
+			Call((*camera), STR("K2_DestroyActor")).invoke();
+			const std::wstring file = dirPath + name;
+			if (!exported || GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
+				return fail(component && *component ? L"the export wrote nothing" : L"no capture component");
+			std::string path = narrow(file);
+			std::replace(path.begin(), path.end(), '\\', '/');
+			sendf("{\"t\":\"icon\",\"key\":\"%s\",\"file\":\"%s\"}", narrow(cls).c_str(), path.c_str());
+			log(L"carry: icon for " + cls + L" in " + file);
+		}
+
 		void complete_pickup(UObject *pc, UObject *actor, UObject *body)
 		{
 			Vec3f origin, extent;
@@ -2773,6 +2890,7 @@ namespace nc
 			c.mass = mass_of(body);
 			c.level = pc;
 			const std::string id = "hn" + std::to_string(++g_carryCounter) + "-" + narrow(actor->GetName());
+			capture_icon(actor, actor, c.cls); // before it is hidden
 			set_carried_state(actor, body, false);
 			g_carried[id] = c;
 			const std::string name = object_name(actor);
@@ -2892,6 +3010,8 @@ namespace nc
 		{
 			set_actor_scale(c.actor, c.scale);
 			place_actor(c.actor, at, g_mcLookYaw + 90.0f);
+			if (c.body)
+				Call(c.body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
 			set_carried_state(c.actor, c.body, true);
 			if (c.body)
 				Call(c.body, STR("SetPhysicsLinearVelocity")).set(STR("NewVel"), velocity).set_bool(STR("bAddToCurrent"), false)
@@ -3058,52 +3178,144 @@ namespace nc
 			}
 			const bool first = g_shownId != g_heldId;
 			g_shownId = g_heldId;
+			if (first && c->body) // held at the eye, small: no shadow of it on the room (back with release())
+				Call(c->body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
 			// its size fitted to the hand: at most ~18% of the fist's distance across in half (24 cm at Minecraft's
 			// 1.35 blocks, an object Steve's big fist can hold); in front of the camera without the fist, 17 cm
 			const bool fistKnown = GetTickCount() - g_handAt < 250;
 			const float fit = std::min(1.0f, (fistKnown ? 18.0f * g_handDist : 17.0f) / c->extent);
-			set_actor_scale(c->actor, Vec3f{c->scale.x * fit, c->scale.y * fit, c->scale.z * fit});
+			c->fit = fit;
 			Call(c->actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), false).invoke();
-			const Vec3f fwd = look_dir();
-			const float d2r = 3.14159265f / 180.0f;
-			const float yaw = g_mcLookYaw * d2r;
-			const Vec3f right{-std::cos(yaw), -std::sin(yaw), 0.0f};
-			Vec3f hand{g_mcCamera.x + fwd.x * 45.0f + right.x * 22.0f, g_mcCamera.y + fwd.y * 45.0f + right.y * 22.0f,
-				g_mcCamera.z + fwd.z * 45.0f - 22.0f};
-			// Minecraft draws the arm holding it (FirstPersonCarryMixin) and says where the fist is, every frame: the
-			// object rests on it (its visual bounds' bottom on the fist, along the camera's up), and follows the swing,
-			// the equip motion and the bob. Without it (third person, the message late) the old spot in front.
-			const bool onFist = GetTickCount() - g_handAt < 250;
-			if (onFist)
-			{
-				Vec3f o{}, e{};
-				Call loc(c->actor, STR("K2_GetActorLocation"));
-				loc.invoke();
-				const Vec3f *at = loc.param<Vec3f>(STR("ReturnValue"));
-				Call bounds(c->actor, STR("GetActorBounds"));
-				bounds.set_bool(STR("bOnlyCollidingComponents"), false);
-				if (at && bounds.invoke())
-					if (const Vec3f *bo = bounds.param<Vec3f>(STR("Origin")), *be = bounds.param<Vec3f>(STR("BoxExtent")); bo && be)
-						o = {bo->x - at->x, bo->y - at->y, bo->z - at->z}, e = *be;
-				// the bounds' half height along the camera's up, and the actor's origin away from their centre
-				const float half = std::abs(g_handUp.x) * e.x + std::abs(g_handUp.y) * e.y + std::abs(g_handUp.z) * e.z;
-				const float lift = half * 0.85f; // a little into the fingers: held, not balanced on top
-				hand = {g_handFist.x + g_handUp.x * lift - o.x, g_handFist.y + g_handUp.y * lift - o.y, g_handFist.z + g_handUp.z * lift - o.z};
-			}
-			place_actor(c->actor, hand, g_mcLookYaw + 90.0f);
 			if (first)
 			{
-				Vec3f o{}, e{};
-				const bool b = actor_bounds(c->actor, o, e);
-				Call hidden(c->actor, STR("IsHidden"));
-				hidden.invoke();
-				const uint8_t *h = hidden.param<uint8_t>(STR("ReturnValue"));
-				char line[320];
-				snprintf(line, sizeof(line), "carry: in the hand (%s): camera %.0f %.0f %.0f, object at %.0f %.0f %.0f (bounds %s %.0f %.0f %.0f, extent %.0f %.0f %.0f), scale %.2f, hidden %d",
-					onFist ? "on Minecraft's fist" : "fist not reported, in front", g_mcCamera.x, g_mcCamera.y, g_mcCamera.z, hand.x, hand.y, hand.z,
-					b ? "ok" : "none", o.x, o.y, o.z, e.x, e.y, e.z, fit, h ? int(*h) : -1);
-				log(std::wstring(line, line + strlen(line)));
+				log(L"carry: in the hand: " + c->actor->GetName() + L", scale " + std::to_wstring(fit) +
+					(GetTickCount() - g_handAt < 250 ? L", on Minecraft's fist" : L", Minecraft's fist not reported yet (in front until it is)"));
 			}
+		}
+
+		/// How an object sits in the hand: offsets from the fist (cm, the camera's forward/right/up) and a turn from the
+		/// camera's own rotation (degrees, Unreal pitch/yaw/roll), matched by class name; the first match wins, "" for the
+		/// rest. Read from NeighborCraft_grips.txt next to the mod if it is there ("match fwd right up pitch yaw roll").
+		struct Grip
+		{
+			std::wstring match;
+			float fwd = 0.0f, right = 0.0f, up = 0.0f, pitch = 0.0f, yaw = 0.0f, roll = 0.0f;
+		};
+
+		const std::vector<Grip> &grips()
+		{
+			static std::vector<Grip> list;
+			static bool loaded = false;
+			if (!loaded)
+			{
+				loaded = true;
+				std::wifstream f(module_dir() + L"NeighborCraft_grips.txt");
+				std::wstring line;
+				while (std::getline(f, line))
+				{
+					if (line.empty() || line[0] == L'#')
+						continue;
+					std::wistringstream in(line);
+					Grip g;
+					if (in >> g.match >> g.fwd >> g.right >> g.up >> g.pitch >> g.yaw >> g.roll)
+					{
+						if (g.match == L"*")
+							g.match.clear();
+						list.push_back(g);
+					}
+				}
+				log(L"carry: " + std::to_wstring(list.size()) + L" grips from NeighborCraft_grips.txt");
+				if (std::none_of(list.begin(), list.end(), [](const Grip &g) { return g.match.empty(); }))
+					list.push_back(Grip{});
+			}
+			return list;
+		}
+
+		const Grip &grip_for(UObject *actor)
+		{
+			for (const Grip &g : grips())
+				if (g.match.empty() || class_contains(actor, g.match.c_str()))
+					return g;
+			return grips().back();
+		}
+
+		// Unreal's rotator <-> quaternion (x, y, z, w), degrees
+		void quat_of(const Rot3f &r, float q[4])
+		{
+			const float d = 3.14159265f / 360.0f;
+			const float sp = std::sin(r.pitch * d), cp = std::cos(r.pitch * d), sy = std::sin(r.yaw * d), cy = std::cos(r.yaw * d),
+						sr = std::sin(r.roll * d), cr = std::cos(r.roll * d);
+			q[0] = cr * sp * sy - sr * cp * cy;
+			q[1] = -cr * sp * cy - sr * cp * sy;
+			q[2] = cr * cp * sy - sr * sp * cy;
+			q[3] = cr * cp * cy + sr * sp * sy;
+		}
+
+		Rot3f rot_of(const float q[4])
+		{
+			const float x = q[0], y = q[1], z = q[2], w = q[3], r2d = 180.0f / 3.14159265f;
+			const float sing = z * x - w * y, yawY = 2.0f * (w * z + x * y), yawX = 1.0f - 2.0f * (y * y + z * z);
+			Rot3f r{};
+			r.yaw = std::atan2(yawY, yawX) * r2d;
+			if (sing < -0.4999995f)
+				r.pitch = -90.0f, r.roll = -r.yaw - 2.0f * std::atan2(x, w) * r2d;
+			else if (sing > 0.4999995f)
+				r.pitch = 90.0f, r.roll = r.yaw - 2.0f * std::atan2(x, w) * r2d;
+			else
+				r.pitch = std::asin(2.0f * sing) * r2d, r.roll = std::atan2(-2.0f * (w * x + y * z), 1.0f - 2.0f * (x * x + y * y)) * r2d;
+			return r;
+		}
+
+		void quat_mul(const float a[4], const float b[4], float out[4])
+		{
+			out[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+			out[1] = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+			out[2] = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+			out[3] = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+		}
+
+		/// The held object, rigid in the camera's frame: where Minecraft draws the fist (sent in the camera's frame:
+		/// HN's camera of this frame places it, not Minecraft's of an older one), turned with the camera's yaw, pitch and
+		/// roll plus the object's grip, its grip point (its mesh's bottom middle) on the fist. It used to be placed in
+		/// world space with the look's yaw only and before HN's camera moved: looking up or down it stayed upright and
+		/// slid up and down against the hand, a frame behind (the user: "moves vertically with the camera").
+		void carry_hand_follow(const Vec3f &loc, const Rot3f &rot)
+		{
+			const auto it = g_carried.find(g_shownId);
+			if (g_shownId.empty() || it == g_carried.end() || !it->second.actor)
+				return;
+			Carried &c = it->second;
+			float qc[4];
+			quat_of(rot, qc);
+			const Vec3f X = rotate(qc, {1, 0, 0}), Y = rotate(qc, {0, 1, 0}), Z = rotate(qc, {0, 0, 1});
+			const Grip &g = grip_for(c.actor);
+			// the fist (Minecraft's, while it draws the carrying arm; else low right in front), plus the grip's offset
+			const bool onFist = GetTickCount() - g_handAt < 250;
+			const Vec3f fist = onFist ? Vec3f{g_handLocal.z * 100.0f, g_handLocal.x * 100.0f, g_handLocal.y * 100.0f} : Vec3f{60.0f, 25.0f, -25.0f};
+			// Near the eye, the same picture: everything (the fist's place, the grip, the object's size) scaled towards the
+			// camera to kNear. At the fist's own distance (~1.35 m) the object went into walls and furniture in front of
+			// Steve and vanished in them (Minecraft draws held items in a pass of their own; HN can't per object); at
+			// 25 cm it is inside Steve's own collision radius (30 cm), where nothing of the world can be, and it looks
+			// exactly as it did from the eye. HN's near plane is ~10 cm.
+			constexpr float kNear = 25.0f;
+			const float reach = std::sqrt(fist.x * fist.x + fist.y * fist.y + fist.z * fist.z);
+			const float k = reach > kNear ? kNear / reach : 1.0f;
+			const float f = (fist.x + g.fwd) * k, r = (fist.y + g.right) * k, u = (fist.z + g.up) * k;
+			const Vec3f at{loc.x + X.x * f + Y.x * r + Z.x * u, loc.y + X.y * f + Y.y * r + Z.y * u, loc.z + X.z * f + Y.z * r + Z.z * u};
+			const float size = c.fit * k;
+			set_actor_scale(c.actor, Vec3f{c.scale.x * size, c.scale.y * size, c.scale.z * size});
+			float qg[4], qo[4];
+			quat_of(Rot3f{g.pitch, g.yaw, g.roll}, qg);
+			quat_mul(qc, qg, qo);
+			// its grip point, at its scale now: the bottom middle of its root's local bounds
+			Vec3f lo{}, hi{};
+			Vec3f grip{};
+			if (c.body && local_bounds(c.body, lo, hi))
+			{
+				const Vec3f sc = actor_scale(c.actor);
+				grip = rotate(qo, Vec3f{(lo.x + hi.x) * 0.5f * sc.x, (lo.y + hi.y) * 0.5f * sc.y, lo.z * sc.z});
+			}
+			place_actor_rot(c.actor, Vec3f{at.x - grip.x, at.y - grip.y, at.z - grip.z}, rot_of(qo));
 		}
 
 		// ---- doors ----------------------------------------------------------------------------------------------------

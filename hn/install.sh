@@ -25,6 +25,8 @@ fi
 
 mkdir -p "$MOD/dlls"
 cp "$BUILD/NeighborCraftMod/NeighborCraftMod.dll" "$MOD/dlls/main.dll"
+# how HN's objects sit in the hand (edit the installed copy to tune; reinstalling resets it)
+cp "$HERE/NeighborCraft_grips.txt" "$MOD/dlls/NeighborCraft_grips.txt"
 touch "$MOD/enabled.txt"
 # how the mod starts Minecraft when Hello Neighbor starts (and Minecraft isn't running yet)
 echo "cmd.exe /c \"$(cygpath -w "$HERE/../tools/start_minecraft.bat")\"" > "$MOD/minecraft_launch.txt"

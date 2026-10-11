@@ -1,0 +1,9 @@
+# How Hello Neighbor's objects sit in Steve's hand (installed next to the mod's DLL; read once per game start).
+# One line per kind of object: the first line whose match is in the object's class name wins; * matches the rest.
+#   match   fwd right up    pitch yaw roll
+# fwd/right/up: cm from Minecraft's fist along the camera's forward, right and up (the object's grip point, the
+# bottom middle of its mesh, goes there); pitch/yaw/roll: degrees, a turn on top of the camera's own rotation.
+Chair     5    0     -6     0    30   0
+Vase      0    0     -4     0    0    0
+Mug       0    0     -3     0    90   0
+*         0    0     -4     0    0    0

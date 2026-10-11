@@ -80,7 +80,10 @@ public final class CarryHand {
 		// as far as the fist, with the hand's and the world's FOV told apart (the same size on screen)
 		double distance = v.length() * hudTan / worldTan;
 		Vec3 at = camera.position().add(dir.scale(distance));
-		Passthrough.events.accept(String.format(Locale.ROOT, "{\"t\":\"hand\",\"p\":[%.4f,%.4f,%.4f],\"u\":[%.4f,%.4f,%.4f],\"d\":%.4f}",
-			at.x, at.y, at.z, u.x(), u.y(), u.z(), distance));
+		// and in the camera's own frame (right, up, forward): HN places the object from the camera it renders with
+		double n = Math.sqrt(1.0 + uy * uy + rx * rx);
+		Passthrough.events.accept(String.format(Locale.ROOT,
+			"{\"t\":\"hand\",\"p\":[%.4f,%.4f,%.4f],\"u\":[%.4f,%.4f,%.4f],\"l\":[%.4f,%.4f,%.4f],\"d\":%.4f}",
+			at.x, at.y, at.z, u.x(), u.y(), u.z(), rx / n * distance, uy / n * distance, distance / n, distance));
 	}
 }

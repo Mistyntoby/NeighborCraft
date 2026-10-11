@@ -25,6 +25,11 @@ public final class HostBlock extends Block {
 	/** Shape per block position. Single player: the integrated server and the client share this map. */
 	static final Map<Long, VoxelShape> SHAPES = new ConcurrentHashMap<>();
 
+	/** HN's shape at a position as the server placed it (also before the client has the block), or null. */
+	public static VoxelShape placedShape(final net.minecraft.core.BlockPos pos) {
+		return SHAPES.get(pos.asLong());
+	}
+
 	public HostBlock(final Properties properties) {
 		super(properties);
 	}

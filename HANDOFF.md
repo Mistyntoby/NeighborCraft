@@ -196,8 +196,9 @@ Frames go through shared memory `Local\NeighborCraftFrame`: 4 layers (world, dep
 | Shutdown crash | VERIFIED fixed | no CrashDumps since |
 | Cutscene glitch (MC kit/HUD/drive during cutscene) | VERIFIED gate fires (`cutscene: Minecraft waits` / `cutscene over`) | the user hasn't re-judged the item glitch |
 | Inventory left-click | VERIFIED (log 02:01: MC button 1 = left picks the full stack) | |
-| Carry: pickup/hold/place/throw | REGRESSED 21:30 (my exclusion handed props to HN's grab), fixed: BUILT; empty-hand rule/sound/swing/arm VERIFIED in `tools/handtest.py`; **HN-side dispatch and object on the fist not yet run in game** | §9, MODLOG night 2 |
-| Per-item inventory icons | OPEN | one generic icon (ours) |
+| Carry: pickup/hold/place/throw | pickup through our path VERIFIED in game (21:58: 7 pickups, place, throw); multi-part props, camera-frame attachment, near-eye placement, grips: BUILT; rules VERIFIED in handtest | §9, MODLOG night 3 |
+| Per-item inventory icons | fallbacks + loading HN pictures VERIFIED in itemtest (screenshot); **HN scene-capture export not yet run** | MODLOG night 3 |
+| Ctrl+Q stack drop | VERIFIED in itemtest (counts, empty slot, pickup again); not yet in game | MODLOG night 3 |
 | Lighting/shadows, transparency, GPU sharing, macOS, block mining in HN geometry, Neighbor combat | OPEN | not started |
 
 ## 5. Verified fixes (with the evidence that proved the cause)
@@ -214,6 +215,13 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 - Door capsule.
 
 ## 6. Outstanding issues (priority order)
+
+00. **Play-test night 3** (P0): pick up several props (video recorder, vase, chairs, mugs, anything multi-part): log
+    `carry: pickup started` / `carry: what the look meets isn't carried: <reason>` names any that still go to HN; look
+    up/down/turn while holding (the object should stay on the fist); stand against a wall holding it (it must not
+    vanish); hotbar: `carry: icon for <class> in ...` (HN) and `carry: icon for ... (64x64)` (Minecraft), or `carry: no
+    icon for <class>: <why>`; Ctrl+Q a block stack; sprint-jump downhill (no MIDAIR_STOP away from teleports). Tune
+    `dlls/NeighborCraft_grips.txt` from what the hand looks like.
 
 0. **Play-test night 2** (P0): hold right click on the video recorder / a chair with an empty hand (our pickup,
    never HN's grab; log `carry: pickup started`), with a sword (refused, no grab), TV/switch (HN's action), place,
@@ -318,6 +326,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+Night 3: itemtest, handtest and drive tests pass on the final code; HN DLL md5 `1c8984e8...` installed; nothing of night 3 run in game.
+
 Night 2: drive tests and handtest pass on the final code; HN DLL md5 `20224a47…` installed; nothing of night 2 run in game.
 
 Late update: `tools/handtest.py` passes (4 pickup cases, fist on screen where drawn); drive tests unchanged; HN DLL md5 `9e7ff2de…` installed, not run in game.
@@ -333,3 +343,16 @@ Earlier:
 - Ran: MC compile of HEAD (0 errors). The HN build of HEAD succeeded earlier (2026-10-10 01:59).
 - Installed and checked: installed `main.dll` md5 = built DLL md5 (`bd2d0f90…`), 2026-10-10.
 - Not run: any in-game test of `1a830a4` (crawl fix, door-remnant fix, carry).
+
+## 13. Render pipeline (state, night 3)
+- Owners: HN renders its world (UE 4.20, D3D11) with HN's camera placed at Minecraft's camera each tick
+  (`minecraft_view`); the held HN object is an HN actor in that world (now 25 cm from the eye). Minecraft renders its
+  world, its hand and its GUI into four layers (`FrameExporter`: world colour, depth, hand, overlay; GPU->CPU copies
+  into shared memory `Local\NeighborCraftFrame`); `compositor.cpp` (ReShade add-on in the same DLL) uploads them and
+  `NeighborCraft.fx` composites: world by depth (re-projected onto HN's newer camera), contact shadows, bloom, the
+  hand relit with HN's light at its pixels, the overlay on top.
+- Done this round: correct depth for the held object (near-eye placement), same-frame camera for it, item icons
+  (one GUI path), HN's object pictures (capture/export path, untested in game).
+- Next candidates, by evidence needed: (1) see the held object and icons in game and tune grips; (2) the four
+  per-frame GPU->CPU readbacks are the main cost: the hand and overlay layers could be skipped when unchanged or
+  empty (needs frame timing from `frames:` lines first); (3) GPU sharing (D3D11/GL interop) instead of readbacks.

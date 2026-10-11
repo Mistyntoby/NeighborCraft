@@ -295,3 +295,38 @@ Evidence: the 21:30 session (`UE4SS.log`, `mc-client.log`, recorder `session-202
 ### Gotchas
 19. HN's OnIsActionComponent says yes for loose props: it is not a "fixed interactable" test.
 20. Drive/hand tests teleport, then send the floor: a tick in between can drop Steve into a block-to-be (stuck).
+
+## Pickup for every loose prop, held-object attachment, item icons, Ctrl+Q, near-eye held object (2026-10-10, night 3)
+Evidence: the 21:58 session (`UE4SS.log`: 7 pickups through our path, every "in the hand" line "fist not reported";
+recorder `session-20261010-215810`: one MIDAIR_STOP), `tools/itemtest.py`, `tools/handtest.py`, drive tests.
+- Pickup eligibility: the hit component had to be the actor's root *and* simulate physics; a prop hit on another
+  part (a child mesh, a second collider) was refused silently and went on to HN's action = HN's grab. Now: any part of
+  an actor whose root simulates physics; refusals of physics objects are logged with their reason
+  (`carry: what the look meets isn't carried: ...`). Kept out: doors/drawers, HN's own items (InteractiveComponent:
+  keys etc. stay HN's pickup, the story needs them), TV/Switch/Tumbler/Lamp classes.
+- Held object: it was placed in world space with the look's yaw only, before HN's camera moved: upright while the hand
+  pitched (sliding up and down against it), a frame late. Now `carry_hand_follow` runs right after HN's camera is set,
+  from that pose: the fist in the camera's frame (Minecraft sends it, `"l"`: right/up/forward), the object turned with
+  the camera's yaw/pitch/roll plus a grip (`NeighborCraft_grips.txt` next to the DLL, installed from
+  `hn/NeighborCraft_grips.txt`: per class offsets and turn), its grip point (its mesh's bottom middle) on the fist.
+  Rotator/quaternion code checked numerically (round trip exact, forward/up axes as Unreal's).
+- Near-eye placement (render pipeline, depth): at the fist's distance (~1.35 m) the object went into walls in front of
+  Steve. Fist, grip and size are scaled towards the camera to 25 cm (inside Steve's 30 cm radius, HN's near plane
+  ~10 cm): the same picture from the eye, never inside the world. Its shadow is off while held.
+- Icons (`CarryIcons`, `GuiItemIconMixin` on `GuiGraphicsExtractor.item(...)`, the one path for hotbar, inventory and
+  the cursor stack): per class, a picture from HN when it has one, else a fallback (the class's hue from a mixed hash,
+  crate pattern, the name's first letter). HN makes the picture at the first pickup of a class (`capture_icon`:
+  SceneCapture2D, show-only the object, SceneColorHDR, 64 px, `ExportRenderTarget` into `dlls/icons/`, then
+  `{"t":"icon"}`); Minecraft reads Radiance (RLE or flat) or PNG. itemtest: an RLE .hdr replaces its class's fallback
+  in the hotbar (screenshot), empty slots stay empty, consumed tokens leave no icon. **The HN capture itself has not
+  run yet.**
+- Ctrl+Q: Minecraft's drop asks its own window for Ctrl (never focused: always "no"). HN sends `"stack"` with Q;
+  Minecraft calls `gameMode.dropItem(player, stack)` (never with a screen open, never from an empty slot). itemtest:
+  Q 64 -> 63, Ctrl+Q -> empty, empty slot: nothing, planks untouched, both drops picked up again: 64. A held HN object:
+  Q and Ctrl+Q throw it (one per slot).
+- Landing clamp: tick 353 of the 21:58 session: falling 0.445, stopped at y 148.0, the top of the block below that the
+  client didn't have yet, while its real (slope) surface was lower: a hang before the drop. When the server has placed
+  the shape already (`HostBlock.placedShape`), the clamp uses its real surface under Steve. Drive tests: 0 mid-air
+  stops on slopes (the only ones: test teleports onto ground not yet there).
+- SkyCraft: the only reference in the repo is MODLOG's "Same split as the SkyCraft (Skyrim) mashup"; no URL in the
+  repo, the lab or memory. Not consulted; nothing adapted from it.

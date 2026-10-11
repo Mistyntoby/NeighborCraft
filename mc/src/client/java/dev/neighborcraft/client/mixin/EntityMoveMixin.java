@@ -177,7 +177,25 @@ abstract class EntityMoveMixin {
 				continue;
 			}
 
+			// its real surface where the server has placed it already (the client just hasn't the block yet), under
+			// his path; else its top. Stopped at the block's top above a lower slope surface, Steve hung there for a
+			// tick before dropping onto it (the 21:58 session, tick 353: a fall of 0.445 cut to 0.121 at y 148.0).
 			double top = p.getY() + 1.0;
+			VoxelShape placed = dev.neighborcraft.HostBlock.placedShape(p);
+			if (placed != null) {
+				top = Double.NEGATIVE_INFINITY;
+				for (AABB b : placed.toAabbs()) {
+					AABB w = b.move(p.getX(), p.getY(), p.getZ());
+					if (w.maxX > path.minX && w.minX < path.maxX && w.maxZ > path.minZ && w.minZ < path.maxZ) {
+						top = Math.max(top, w.maxY);
+					}
+				}
+
+				if (top == Double.NEGATIVE_INFINITY) {
+					continue; // nothing of it under him
+				}
+			}
+
 			dy = Math.max(dy, top <= box.minY + 1.0E-7 ? top - box.minY : 0.0);
 		}
 

@@ -65,6 +65,20 @@ final class ClientInput {
 					return;
 				}
 
+				if (k.equals("drop")) {
+					// Q: one item; Ctrl+Q: the whole stack. Minecraft's own drop key asks its window whether Ctrl is
+					// down, and its hidden window never has the keys: the host says it ("stack"). Never with a screen open
+					// (the inventory has its own controls), never from an empty slot (dropItem drops nothing then).
+					if (down && player != null && minecraft.gameMode != null && minecraft.gui.screen() == null && !player.isSpectator()
+						&& !player.getMainHandItem().isEmpty()) {
+						boolean stack = m.has("stack") && m.get("stack").getAsBoolean();
+						minecraft.gameMode.dropItem(player, stack);
+						player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+					}
+
+					return;
+				}
+
 				KeyMapping key = switch (k) {
 					case "use" -> minecraft.options.keyUse;
 					case "attack" -> minecraft.options.keyAttack;
@@ -153,6 +167,19 @@ final class ClientInput {
 					var sound = sprint && strength > 0.9 ? SoundEvents.PLAYER_ATTACK_KNOCKBACK
 						: strength > 0.9 ? SoundEvents.PLAYER_ATTACK_STRONG : SoundEvents.PLAYER_ATTACK_WEAK;
 					minecraft.level.playLocalSound(player.getX(), player.getEyeY(), player.getZ(), sound, SoundSource.PLAYERS, 1.0F, 1.0F, false);
+				}
+			}
+			case "icon" -> CarryIcons.load(m.get("key").getAsString(), m.get("file").getAsString());
+			case "inv" -> {
+				// a test tool's question: the hotbar (item and count per slot) and the selected slot
+				if (player != null) {
+					StringBuilder b = new StringBuilder("{\"t\":\"inv\",\"sel\":").append(player.getInventory().getSelectedSlot()).append(",\"slots\":[");
+					for (int i = 0; i < 9; i++) {
+						var stack = player.getInventory().getItem(i);
+						b.append(i == 0 ? "" : ",").append("[\"").append(BuiltInRegistries.ITEM.getKey(stack.getItem())).append("\",").append(stack.getCount()).append(']');
+					}
+
+					dev.neighborcraft.Passthrough.events.accept(b.append("]}").toString());
 				}
 			}
 			case "shot" -> {
