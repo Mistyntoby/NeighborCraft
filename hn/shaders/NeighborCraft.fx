@@ -322,7 +322,9 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 	if (cover > 0.0 && ReceiverMatch > 0.0 && abs(zh - zm) < 0.06 + 0.01 * zm)
 	{
 		const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
-		const float3 received = world.rgb * tint * clamp(luma(host) / ReceiverReference, 0.15, 1.6);
+		// compressed (^0.6): the grey stand-in under dim indoor light came out much darker than HN's own bright-textured
+		// walls beside it (the user: Steve too dark in a lit room); edges keep their contrast, dim light lifts
+		const float3 received = world.rgb * tint * clamp(pow(max(luma(host) / ReceiverReference, 0.0), 0.6), 0.2, 1.35);
 		const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
 		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch);
 	}

@@ -923,7 +923,7 @@ namespace nc
 			// drawn (a receiver) only once Minecraft's picture has the block: a new block reaches Minecraft's picture a few
 			// frames after HN hears of it, and the grey stand-in showed in between (the user)
 			if (a && receiver_material(context))
-				g_pendingReceivers.push_back({a, GetTickCount() + 300});
+				g_pendingReceivers.push_back({a, GetTickCount() + 100});
 			return a;
 		}
 
