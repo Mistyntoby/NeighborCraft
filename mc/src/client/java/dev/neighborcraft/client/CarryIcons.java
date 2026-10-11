@@ -53,6 +53,7 @@ public final class CarryIcons {
 			byte[] bytes = Files.readAllBytes(Path.of(file));
 			NativeImage image = isRadiance(bytes) ? radiance(bytes) : NativeImage.read(bytes);
 			invertIfCoverage(image);
+			image = framed(image, key);
 			Identifier id = Identifier.fromNamespaceAndPath("neighborcraft", "hn_icon/" + Integer.toHexString(key.hashCode()));
 			Minecraft.getInstance().getTextureManager().register(id, new DynamicTexture(() -> "neighborcraft icon " + key, image));
 			PICTURES.put(key, id);
@@ -86,6 +87,86 @@ public final class CarryIcons {
 				image.setPixel(x, y, (255 - (c >>> 24)) << 24 | (c & 0xFFFFFF));
 			}
 		}
+	}
+
+	/** How much of the icon's side the object's longer side fills (Minecraft's own item icons: about 14 of 16 px). */
+	static final float FILL = 0.875F;
+
+	/**
+	 * The object brought to one size in its icon: its covered pixels' bounding box, scaled (both axes alike: its
+	 * proportions kept) so that the longer side fills FILL of the picture, centred. HN frames a capture from the
+	 * object's bounds, and whatever those count beyond what is drawn left some objects a speck in the middle (chairs
+	 * at 23% of the side, tools/iconcheck.py); the capture is framed tighter now (HN), and this makes every icon the
+	 * same size whatever the capture was. Only the icon: held size, collision and the object itself are untouched.
+	 */
+	static NativeImage framed(final NativeImage image, final String key) {
+		int w = image.getWidth(), h = image.getHeight();
+		int x0 = w, y0 = h, x1 = -1, y1 = -1;
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				if ((image.getPixel(x, y) >>> 24) > 16) {
+					x0 = Math.min(x0, x);
+					y0 = Math.min(y0, y);
+					x1 = Math.max(x1, x);
+					y1 = Math.max(y1, y);
+				}
+			}
+		}
+
+		if (x1 < 0) {
+			return image; // nothing drawn: left as it is (the fallback is no better)
+		}
+
+		int bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+		float scale = FILL * w / Math.max(bw, bh);
+		if (Math.abs(scale - 1.0F) < 0.04F && Math.abs((x0 + x1) * 0.5F - (w - 1) * 0.5F) < 1.0F && Math.abs((y0 + y1) * 0.5F - (h - 1) * 0.5F) < 1.0F) {
+			return image; // already so
+		}
+
+		NativeImage out = new NativeImage(w, h, true);
+		float cx = (x0 + x1 + 1) * 0.5F, cy = (y0 + y1 + 1) * 0.5F;
+		// each output pixel samples its footprint in the source (a box of 1/scale source pixels, several samples when
+		// shrinking, bilinear when growing), with colour weighted by coverage (no dark fringe from empty pixels)
+		int samples = Math.max(1, (int) Math.ceil(1.0F / scale));
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				float r = 0, g = 0, b = 0, a = 0;
+				for (int sy = 0; sy < samples; sy++) {
+					for (int sx = 0; sx < samples; sx++) {
+						float u = cx + (x + (sx + 0.5F) / samples - w * 0.5F) / scale - 0.5F;
+						float v = cy + (y + (sy + 0.5F) / samples - h * 0.5F) / scale - 0.5F;
+						int iu = (int) Math.floor(u), iv = (int) Math.floor(v);
+						float fu = u - iu, fv = v - iv;
+						for (int k = 0; k < 4; k++) {
+							int px = iu + (k & 1), py = iv + (k >> 1);
+							float wgt = ((k & 1) == 0 ? 1 - fu : fu) * ((k >> 1) == 0 ? 1 - fv : fv);
+							if (px < 0 || py < 0 || px >= w || py >= h || wgt <= 0) {
+								continue;
+							}
+
+							int c = image.getPixel(px, py);
+							float ca = (c >>> 24) / 255.0F * wgt;
+							a += ca;
+							r += ((c >> 16) & 0xFF) * ca;
+							g += ((c >> 8) & 0xFF) * ca;
+							b += (c & 0xFF) * ca;
+						}
+					}
+				}
+
+				int n = samples * samples;
+				int oa = Math.round(a / n * 255.0F);
+				if (oa <= 0) {
+					continue;
+				}
+
+				out.setPixel(x, y, Math.min(255, oa) << 24 | Math.round(r / a) << 16 | Math.round(g / a) << 8 | Math.round(b / a));
+			}
+		}
+
+		Passthrough.LOG.info("carry: icon for {} framed: the object was {}x{} of {}x{} px, scaled {}", key, bw, bh, w, h, String.format(Locale.ROOT, "%.2f", scale));
+		image.close();
+		return out;
 	}
 
 	private static boolean isRadiance(final byte[] b) {

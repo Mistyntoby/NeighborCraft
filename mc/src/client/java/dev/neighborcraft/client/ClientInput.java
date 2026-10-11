@@ -170,6 +170,9 @@ final class ClientInput {
 				}
 			}
 			case "icon" -> CarryIcons.load(m.get("key").getAsString(), m.get("file").getAsString());
+			case "bar" -> CarryBar.set(m.get("k").getAsString(), m.get("v").getAsFloat());
+			case "barq" -> dev.neighborcraft.Passthrough.events.accept(String.format(java.util.Locale.ROOT, "{\"t\":\"barq\",\"k\":\"%s\",\"v\":%.3f}",
+				CarryBar.kind(), CarryBar.value())); // a test tool's question: the bar showing now
 			case "ungrab" -> minecraft.mouseHandler.releaseMouse(); // a test tool: Minecraft's window as in the game (hidden, the mouse not its own)
 			case "inv" -> {
 				// a test tool's question: the hotbar (item and count per slot) and the selected slot

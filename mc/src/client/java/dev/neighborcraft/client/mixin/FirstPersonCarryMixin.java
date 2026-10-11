@@ -40,6 +40,7 @@ abstract class FirstPersonCarryMixin {
 		pose.pushPose();
 		CarryHand.applyPose(pose, arm);
 		CarryHand.capturing = true;
+		CarryHand.drawingId = dev.neighborcraft.Carry.id(stack);
 		try {
 			this.renderPlayerArm(pose, collector, light, equip, swing, arm, state);
 		} finally {

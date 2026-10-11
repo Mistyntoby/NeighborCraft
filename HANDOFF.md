@@ -217,6 +217,14 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+0000000. **Next (user, 2026-10-11 evening)** (P0):
+        1. Blocks get tinted by HN's whole picture (a green screen -> green blocks): NeighborCraft.fx GradeMatch.
+        2. Shadows of everything Minecraft draws, exactly in step: Steve's real model pose (animation, sneaking,
+           swinging), the held item, dropped items, particles. Steve's stand-in is six boxes with an approximate
+           walk swing now (steve_shadow_tick).
+        3. Third person: the held HN object is still on the camera (covers the screen); it belongs in Steve's hand.
+        Testing shadows: ReShade off with End, stand-ins visible with F6 (hnshot.ps1-style screenshots of the game).
+
 000000. **Play-test 2026-10-11 afternoon** (P0), in this order, reading UE4SS.log:
         1. Interactions: right click the TV and a lamp (switches; `is electric: HN's action`), tap the radio (switches;
            `a tap on ...`), hold on it (carried), the front door and a switch (one activation per press).
@@ -358,6 +366,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+2026-10-11 evening: keys unlock natively and are kept ([game] log); native block and Steve shadows seen with ReShade off ([game] screenshots); carryuitest, minetest (twice), handtest, itemtest, turntest pass; HN DLL `d16625f4...` installed.
+
 2026-10-11 afternoon: minetest (new, fails before the fix, OK after), handtest, itemtest pass; turntest STEADY; HN DLL `f3dd464e...` installed (md5 checked); interactions, hotbar rule, throw charge and shadows not run in game.
 
 2026-10-11: opaque classification, handtest, itemtest, turntest pass; HN DLL `a5f38254...` and grips installed; pickup rule, held size and shadow proxies not run in game.
@@ -438,3 +448,15 @@ Earlier:
 - `mc/.../ClientInput.java`: `ungrab` test message.
 - `tools/minetest.py`: hold-to-mine test.
 - MODLOG, this file.
+
+## 18. 2026-10-11 evening: files changed
+- `hn/NeighborCraftMod/src/bridge.cpp`: native_apply / flat_mode / item_use (HN's bound apply method); keys and
+  usable items carried (apply_component, item_name with codes); TV/lamp eligibility (m_bPickUp); fist ids and
+  shown-on-own-fist; CarryBar progress messages; item life (suspend_activity/resume_activity); icon framing;
+  stand-ins movable + hidden + bCastHiddenShadow, F6 toggle, light census, lend_shadows_tick, cleanup
+  (shadow_extras_reset).
+- `hn/shaders/NeighborCraft.fx`: contact shadow removed.
+- `mc/.../CarryBar.java`, `mixin/HudCarryBarMixin.java` (new), `CarryHand.java` + `FirstPersonCarryMixin.java`
+  (fist id), `CarryIcons.java` (framing), `ClientInput.java` (bar, barq), mixins json.
+- `tools/carryuitest.py`, `tools/iconcheck.py` (new), `tools/minetest.py` (server-side block check).
+- Reverse-engineering scripts (not in the repo, the lab's scratch): header dump in `<lab>/sdk/CXXHeaderDump`.

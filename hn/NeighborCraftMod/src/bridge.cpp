@@ -270,6 +270,13 @@ namespace nc
 			return k;
 		}
 
+		/// Pickup progress or throw charge (0..1) in Minecraft's experience bar's place (CarryBar), each its own kind;
+		/// a negative value ends it. Minecraft lets a value it stops getting run out by itself (400 ms).
+		void progress(const char *kind, float value)
+		{
+			sendf("{\"t\":\"bar\",\"k\":\"%s\",\"v\":%.3f}", kind, value);
+		}
+
 		/// A one-line message on screen, in Minecraft's action bar (composited over HN's picture).
 		void notify(const std::string &text)
 		{
@@ -660,6 +667,14 @@ namespace nc
 		// primitive in the scene.) Glass, slabs, torches (not full opaque cubes) get none.
 
 		std::unordered_map<unsigned long long, UObject *> g_shadows; // block -> its shadow stand-in
+		bool g_proxiesShown = false; // F6: the stand-ins drawn in the picture as well (to see where they are)
+		/// A stand-in seen by the camera or not: hidden (shadow only) normally; with F6 also drawn, to check its place and
+		/// size. Hidden in game, its shadow stays (bCastHiddenShadow).
+		void proxy_main_pass(UObject *actor, bool shown)
+		{
+			if (UObject **mesh = actor ? actor->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")) : nullptr; mesh && *mesh)
+				Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), !shown).set_bool(STR("bPropagateToChildren"), false).invoke();
+		}
 		constexpr size_t kMaxShadows = 1500;
 
 		/// Unreal's 1 m cube: loaded already, else through the asset registry (Blueprint-callable, shipped).
@@ -709,9 +724,14 @@ namespace nc
 		}
 
 		/// A box that only casts shadows: Unreal's 1 m cube at `centre`, `size` (m per axis) and `rot`, movable (dynamic
-		/// shadows), no collision, not drawn into the picture (SetRenderInMainPass false: the engine's own way to have a
-		/// primitive in the shadow passes only). The first version hid the actor and relied on bCastHiddenShadow; the
-		/// 12:00 session made one and no shadow was seen.
+		/// shadows), no collision, hidden from the camera (its component bHiddenInGame) and casting all the same
+		/// (bCastHiddenShadow: Unreal's own invisible shadow caster). History, with the evidence:
+		///  - 12:00: the actor hidden + bCastHiddenShadow, but the stand-in was static (SetMobility(2) hadn't taken,
+		///    readback "mobility 0"): a static primitive made at runtime has no baked shadow, so none was seen;
+		///  - 13:22: movable, SetRenderInMainPass(false) instead of hidden: still none. The 17:4x screenshots with
+		///    ReShade off (stand-ins only, Minecraft's picture gone) settled it: with the stand-ins drawn (F6) the sun
+		///    cast Steve's and the blocks' shadows on the road and curb; with them out of the main pass, no shadow at
+		///    all. In this build (UE 4.20) a primitive out of the main pass is out of the sun's shadow too.
 		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot)
 		{
 			static UObject *meshActor = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshActor"));
@@ -731,17 +751,32 @@ namespace nc
 			UObject **mesh = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent"));
 			if (mesh && *mesh)
 			{
-				Call(*mesh, STR("SetMobility")).set<uint8_t>(STR("NewMobility"), 2).invoke(); // movable: dynamic shadows
+				// movable: a static primitive gets its shadows only from baked lighting, which a stand-in made now has
+				// none of: the 12:42 session's readback said "mobility 0" after SetMobility(2) (the call didn't take), and
+				// no shadow was seen. The property is written before the actor is finished (as its constructor would),
+				// then SetMobility again, and the readback below says what the engine has.
+				if (uint8_t *mobility = (*mesh)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility")))
+					*mobility = 2;
+				Call(*mesh, STR("SetMobility")).set<uint8_t>(STR("NewMobility"), 2).invoke();
 				Call(*mesh, STR("SetStaticMesh")).set<UObject *>(STR("NewMesh"), cube).invoke();
 				Call(*mesh, STR("SetCollisionEnabled")).set<uint8_t>(STR("NewType"), 0).invoke(); // no collision
 				Call(*mesh, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
 				set_bool_property(*mesh, STR("bCastDynamicShadow"), true);
 				set_bool_property(*mesh, STR("bCastHiddenShadow"), true);
 				set_bool_property(*mesh, STR("bAffectDynamicIndirectLighting"), false);
-				Call(*mesh, STR("SetRenderInMainPass")).set_bool(STR("bValue"), false).invoke();
+				Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), !g_proxiesShown).set_bool(STR("bPropagateToChildren"), false).invoke();
 			}
 			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
 			Call(*actor, STR("SetActorEnableCollision")).set_bool(STR("bNewActorEnableCollision"), false).invoke();
+			if (mesh && *mesh)
+			{
+				Call(*mesh, STR("SetMobility")).set<uint8_t>(STR("NewMobility"), 2).invoke();
+				if (uint8_t *mobility = (*mesh)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility")); mobility && *mobility != 2)
+				{
+					*mobility = 2; // as a last resort, and the render state rebuilt with it
+					Call(*mesh, STR("MarkRenderStateDirty")).invoke();
+				}
+			}
 			static bool reported = false;
 			if (!reported && mesh && *mesh)
 			{
@@ -793,6 +828,9 @@ namespace nc
 						++byMobility[*mobility];
 					const bool dynamicShadow = cast && dynamic && mobility && *mobility >= 1 && visible;
 					shadowing += dynamicShadow;
+					if (dynamicShadow)
+						log(L"shadows: a light that casts dynamic shadows: " + std::wstring(kind) + L" " + l->GetFullName() + L", mobility " +
+							std::to_wstring(*mobility));
 					Call w(l, STR("K2_GetComponentLocation"));
 					const Vec3f *at = w.invoke() ? w.param<Vec3f>(STR("ReturnValue")) : nullptr;
 					const float d = at ? std::sqrt((at->x - g_eye.x) * (at->x - g_eye.x) + (at->y - g_eye.y) * (at->y - g_eye.y) + (at->z - g_eye.z) * (at->z - g_eye.z)) : 1e9f;
@@ -806,6 +844,90 @@ namespace nc
 			std::sort(nearest.begin(), nearest.end(), [](const Near &a, const Near &b) { return a.d < b.d; });
 			for (size_t i = 0; i < nearest.size() && i < 6; ++i)
 				log(L"shadows: near light: " + nearest[i].line);
+		}
+
+		/// Shadows indoors. HN's house lights are movable point and spot lights with shadows off (the 12:42 census: 120
+		/// movable lights, 2 able to cast dynamic shadows, both outdoor): indoors nothing casts a dynamic shadow, HN's own
+		/// props included, so neither can Steve or a block. The light that lights Steve most (in range, on, visible) is
+		/// given shadows (LightComponent::SetCastShadows(true)) while he is near it, and given back when another light
+		/// lights him more (by 30%) or the level changes: HN's own light then shadows everything near it in HN's way,
+		/// Steve's and the blocks' stand-ins included. One light at a time (a point light's shadow is six views).
+		struct LentLight
+		{
+			UObject *level = nullptr;
+			std::vector<UObject *> lights;  // this level's point and spot lights
+			UObject *lent = nullptr;        // the light given shadows (it had none)
+			float score = 0.0f;
+			DWORD next = 0;
+		} g_lent;
+		constexpr bool kLendShadows = true;
+
+		void lend_shadows_tick(UObject *pc)
+		{
+			LentLight &L = g_lent;
+			if (!kLendShadows || !g_haveFeet)
+				return;
+			if (L.level != pc)
+			{
+				L = LentLight{};
+				L.level = pc;
+				for (const wchar_t *kind : {L"PointLightComponent", L"SpotLightComponent"})
+					for (UObject *l : find_all(kind))
+						L.lights.push_back(l);
+			}
+			if (GetTickCount() < L.next)
+				return;
+			L.next = GetTickCount() + 500;
+			const Vec3f at{g_feet.x, g_feet.y, g_feet.z + g_steveHeight * 0.5f};
+			UObject *best = nullptr;
+			float bestScore = 0.0f, bestDist = 0.0f;
+			for (UObject *l : L.lights)
+			{
+				bool visible = false, cast = false;
+				get_bool_property(l, STR("bVisible"), visible);
+				const float *intensity = l->GetValuePtrByPropertyNameInChain<float>(STR("Intensity"));
+				const float *radius = l->GetValuePtrByPropertyNameInChain<float>(STR("AttenuationRadius"));
+				if (!visible || !intensity || *intensity <= 0.0f || !radius || *radius <= 0.0f)
+					continue;
+				get_bool_property(l, STR("CastShadows"), cast);
+				if (cast && l != L.lent)
+					continue; // it casts already (HN's own): nothing to lend
+				Call w(l, STR("K2_GetComponentLocation"));
+				const Vec3f *p = w.invoke() ? w.param<Vec3f>(STR("ReturnValue")) : nullptr;
+				if (!p)
+					continue;
+				const float d = std::hypot(p->x - at.x, p->y - at.y, p->z - at.z);
+				if (d >= *radius)
+					continue;
+				const float falloff = 1.0f - d / *radius;
+				const float score = *intensity * falloff * falloff;
+				if (score > bestScore)
+					best = l, bestScore = score, bestDist = d;
+			}
+			if (best == L.lent)
+			{
+				L.score = bestScore;
+				return;
+			}
+			if (L.lent && best && bestScore < L.score * 1.3f)
+				return; // not clearly brighter: no flicker between two lights
+			if (L.lent)
+			{
+				Call(L.lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
+				log(L"shadows: " + L.lent->GetName() + L" has no shadows again (as HN made it)");
+			}
+			L.lent = best;
+			L.score = bestScore;
+			if (best)
+			{
+				set_bool_property(best, STR("CastDynamicShadows"), true);
+				Call(best, STR("SetCastShadows")).set_bool(STR("bNewValue"), true).invoke();
+				bool now = false;
+				get_bool_property(best, STR("CastShadows"), now);
+				const uint8_t *mobility = best->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility"));
+				log(L"shadows: HN's light " + best->GetFullName() + L" (mobility " + (mobility ? std::to_wstring(*mobility) : L"?") + L", " +
+					std::to_wstring(int(bestDist)) + L" cm from Steve) casts shadows now: CastShadows " + std::to_wstring(now));
+			}
 		}
 
 		/// Steve's shadow: his model's boxes (Minecraft's player model: head 8 px, body 8x12x4, arms and legs 4x12x4; 32 px =
@@ -878,6 +1000,22 @@ namespace nc
 			}
 		}
 
+		/// Steve's shadow boxes and the light given shadows go with the blocks' stand-ins: on a level change (they die
+		/// with it: only forgotten) and when NeighborCraft stops driving (destroyed, the light as HN made it).
+		void shadow_extras_reset(bool alive)
+		{
+			if (alive)
+			{
+				for (UObject *part : g_steveShadow.parts)
+					if (part)
+						Call(part, STR("K2_DestroyActor")).invoke();
+				if (g_lent.lent)
+					Call(g_lent.lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
+			}
+			g_steveShadow = SteveShadow{};
+			g_lent = LentLight{};
+		}
+
 		void destroy_colliders(bool alive)
 		{
 			if (alive)
@@ -890,6 +1028,7 @@ namespace nc
 			g_colliders.clear();
 			g_shadows.clear();
 			g_probeIgnore.clear();
+			shadow_extras_reset(alive);
 		}
 
 		/// {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...]} from Minecraft: solid blocks placed and removed.
@@ -1727,6 +1866,12 @@ namespace nc
 		Vec3f g_handFist, g_handUp;                    // where Minecraft draws the carrying fist (Unreal cm), and the camera's up
 		float g_handDist = 1.35f;                      // how far that is from the camera (blocks)
 		DWORD g_handAt = 0;                            // when that came (it comes every frame while an object is held)
+		std::string g_handId;                          // the token whose arm that fist is (Minecraft draws one per frame)
+		/// Minecraft drew the carrying fist for this object within the last 250 ms: only then is it placed on it.
+		bool fist_for(const std::string &id)
+		{
+			return !id.empty() && g_handId == id && GetTickCount() - g_handAt < 250;
+		}
 		Vec3f g_handLocal{0.66f, -0.28f, 1.15f};       // the fist in the camera's frame (blocks: right, up, forward)
 		void carry_hand_follow(UObject *camera, const Vec3f &cameraLoc, const Rot3f &cameraRot);
 		Vec3f rotate(const float q[4], const Vec3f &v);
@@ -1741,6 +1886,7 @@ namespace nc
 			bool active = false;
 		} g_throwCharge; // Q held with an HN object in the hand
 		void carry_start_pickup(UObject *actor, UObject *body);
+		bool item_use(UObject *pc, UObject *pawn);
 		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut = nullptr, UObject **hitOut = nullptr);
 		bool electric(UObject *actor);
 		void hn_action_tap();
@@ -1842,6 +1988,7 @@ namespace nc
 					if (n > 1.0e-3f)
 						g_handUp = {g_handUp.x / n, g_handUp.y / n, g_handUp.z / n};
 					g_handAt = GetTickCount();
+					g_handId = json_string(m, "id");
 					double l[3];
 					if (json_vec3(m, "l", l))
 						g_handLocal = {float(l[0]), float(l[1]), float(l[2])};
@@ -2277,22 +2424,22 @@ namespace nc
 					if (g_throwCharge.id != g_heldId || g_minecraftScreen)
 					{
 						g_throwCharge.active = false; // the object left the hand, or a screen opened: no throw
-						notify("");
+						progress("throw", -1.0f);
+						log(L"carry: throw charge cancelled (" + std::wstring(g_minecraftScreen ? L"a screen opened" : L"another slot") + L")");
 					}
 					else if (q < 0)
 					{
 						g_throwCharge.active = false;
-						notify("");
+						progress("throw", -1.0f);
 						carry_throw(g_controlsPc, g_controlsPawn, g_heldId, g_heldCls, charge);
 					}
 					else
 					{
-						static DWORD nextNote = 0;
-						if (GetTickCount() > nextNote)
+						static DWORD nextBar = 0;
+						if (GetTickCount() > nextBar)
 						{
-							nextNote = GetTickCount() + 80;
-							const int filled = int(charge * 10.0f + 0.5f);
-							notify("Throw [" + std::string(filled, '#') + std::string(10 - filled, '.') + "]");
+							nextBar = GetTickCount() + 50;
+							progress("throw", charge);
 						}
 					}
 				}
@@ -2300,7 +2447,7 @@ namespace nc
 			else if (g_throwCharge.active)
 			{
 				g_throwCharge.active = false; // nothing in the hand any more
-				notify("");
+				progress("throw", -1.0f);
 			}
 			else if (const int q = edge('Q'))
 				sendf("{\"t\":\"key\",\"k\":\"drop\",\"down\":%s,\"stack\":%s}", q > 0 ? "true" : "false", key_held(VK_CONTROL) ? "true" : "false");
@@ -2349,7 +2496,16 @@ namespace nc
 			}
 			else if (const int attack = edge(VK_LBUTTON))
 			{
-				sendf("{\"t\":\"key\",\"k\":\"attack\",\"down\":%s}", attack > 0 ? "true" : "false");
+				// a usable item in the hand (a key): the left button uses it on what the crosshair is on, if that is one of
+				// HN's objects; only then is the click ours (no mining, no punch). Else, and with anything else in the hand,
+				// Minecraft's attack as always (mining with an empty hand, or with a non-usable object)
+				static bool used = false;
+				if (attack > 0)
+					used = !g_heldId.empty() && g_controlsPawn && item_use(g_controlsPc, g_controlsPawn);
+				if (!used)
+					sendf("{\"t\":\"key\",\"k\":\"attack\",\"down\":%s}", attack > 0 ? "true" : "false");
+				else if (attack < 0)
+					used = false;
 			}
 			right_click();
 			forward_key(VK_MBUTTON, "pick");
@@ -2403,6 +2559,11 @@ namespace nc
 				{
 					if (g_handEmpty)
 						carry_start_pickup(target, body);
+					else if (electric(target))
+					{
+						log(L"right click: " + target->GetName() + L" with something in the hand: HN's action as a tap (switch it)");
+						hn_action_tap();
+					}
 					else
 					{
 						notify("Empty your hand first");
@@ -2961,8 +3122,22 @@ namespace nc
 			float mass = 10.0f;
 			bool confirmed = false;    // Minecraft has its token
 			UObject *level = nullptr;  // the player controller of its level (gone with it)
+			// its life with us: picked (hidden, waiting for Minecraft's slot), held (shown in the hand), stored (another
+			// slot: hidden, and its own activity stopped), and back in the world (put down or thrown: as it was)
+			enum class Life
+			{
+				Picked,
+				Held,
+				Stored,
+			} life = Life::Picked;
+			DWORD selectedAt = 0;      // when it became the held one (shown once its fist is known)
+			bool shown = false;        // drawn in the hand
+			std::vector<UObject *> paused; // its sounds and effects stopped while stored (resumed with it)
+			bool tickWas = true;       // its tick before it was stored
 		};
 		std::unordered_map<std::string, Carried> g_carried;
+		void suspend_activity(Carried &c);
+		void resume_activity(Carried &c);
 		std::string g_shownId;           // what is shown in the hand now
 		int g_carryCounter = 0;
 		void carry_detach(Carried &c);
@@ -3008,6 +3183,8 @@ namespace nc
 			return actor && (class_contains(actor, L"Electric") || class_contains(actor, L"Tumbler"));
 		}
 
+		std::string narrow(const std::wstring &w);
+		bool get_bool_property(UObject *o, const TCHAR *name, bool &value);
 		std::string narrow(const std::wstring &w)
 		{
 			std::string s;
@@ -3039,6 +3216,58 @@ namespace nc
 				at = next + 1;
 			}
 			return out.empty() ? "Object" : out;
+		}
+
+		/// An FString property's text (empty if there is none).
+		std::wstring string_property(UObject *o, const TCHAR *name)
+		{
+			struct Str
+			{
+				const wchar_t *data;
+				int32 num, max;
+			};
+			const Str *v = o ? o->GetValuePtrByPropertyNameInChain<Str>(name) : nullptr;
+			return v && v->data && v->num > 1 ? std::wstring(v->data, size_t(v->num - 1)) : std::wstring();
+		}
+
+		/// One of HN's usable items: it has an ApplyComponent (keys and lockpicks, bulbs, the crowbar's kin, chairs,
+		/// buckets...), the component HN's own "apply" (its left mouse) works through.
+		UObject *apply_component(UObject *actor)
+		{
+			UObject **ac = actor ? actor->GetValuePtrByPropertyNameInChain<UObject *>(STR("ApplyComponent")) : nullptr;
+			return ac ? *ac : nullptr;
+		}
+
+		/// The item's name for Minecraft: HN's keys by what they are (their class: HN has no names for them), with
+		/// the key's code, which is what decides the lock it opens (a lock opens for the keys whose Code is among its
+		/// m_Codes); the rest from the class (object_name).
+		std::string item_name(UObject *actor);
+		std::wstring item_name_w(UObject *actor)
+		{
+			const std::string n = item_name(actor);
+			return std::wstring(n.begin(), n.end());
+		}
+
+		std::string item_name(UObject *actor)
+		{
+			static const std::pair<const wchar_t *, const char *> named[] = {
+				{L"KeyCar", "Car Key"}, {L"DollHouseKey", "Dollhouse Key"}, {L"Key_Card", "Key Card"}, {L"Key_Universal", "Key"},
+				{L"Tutorial_Key", "Key"}, {L"lockpick", "Lockpick"}, {L"Lock_Red", "Red Lock"}, {L"Lock_Blue", "Blue Lock"},
+				{L"Lock_Green", "Green Lock"}, {L"Lock_Yellow", "Yellow Lock"}};
+			const std::wstring cls = actor->GetClassPrivate()->GetName();
+			std::string name;
+			for (const auto &[match, readable] : named)
+				if (cls.find(match) != std::wstring::npos)
+				{
+					name = readable;
+					break;
+				}
+			if (name.empty())
+				name = object_name(actor);
+			if (class_contains(actor, L"Lockpick"))
+				if (const std::wstring code = string_property(actor, STR("Code")); !code.empty())
+					name += " (" + narrow(code) + ")";
+			return name;
 		}
 
 		Vec3f look_dir()
@@ -3126,7 +3355,8 @@ namespace nc
 				return refuse(L"no root component");
 			// The rule, in this order (each step names why in the log):
 			//  1. a part of a fixed object (a door leaf, a drawer, a switch's lever): HN's action;
-			//  2. a TV or lamp: neither carried nor grabbed (HN's action on it is HN's grab);
+			//  2. an electric device (TV, radio, lamp): ours if HN would let it be taken (m_bPickUp) or it is loose; a
+		//     tap switches it either way; one of HN's usable items (an ApplyComponent: keys...): ours;
 			//  3. one of HN's inventory items (InteractiveComponent + a class chain naming an item or key): HN's pickup;
 			//  4. a loose physics body: ours;
 			//  5. a prop HN would take into its own hotbar: ours. HN keeps many props asleep, not simulating, until they
@@ -3137,8 +3367,40 @@ namespace nc
 			//  6. anything else: HN's action.
 			if (hinged_part(*r) || hinged_part(*component))
 				return refuse(L"a door or drawer");
-			if (class_contains(*actor, L"TV") || class_contains(*actor, L"Lamp"))
-				return refuse(kNotCarriedNotGrabbed);
+			Call simulatingRoot(*r, STR("IsSimulatingPhysics"));
+			simulatingRoot.set(STR("BoneName"), NameParam{}).invoke();
+			const uint8_t *rootLoose = simulatingRoot.param<uint8_t>(STR("ReturnValue"));
+			// HN's own word for "can be taken": FlatActor::m_bPickUp (what HN's E pickup takes into its hands/hotbar)
+			bool hnPickUp = false;
+			get_bool_property(*actor, STR("m_bPickUp"), hnPickUp);
+			const PropShape shape = prop_shape(*actor, *r);
+			// HN's own word or a loose body only: a wall switch may well be movable and small (never carried)
+			const bool takeable = hnPickUp || (rootLoose && *rootLoose);
+			// an electric device (TV, radio, lamp): carried if HN lets it be taken (a tap on it still switches it: the
+			// pickup only completes on a hold); a fixed one (a wall switch, a ceiling lamp) only switches. The TV used to
+			// be refused outright (2026-10-11: it only ever switched on, never came along)
+			if (electric(*actor) || class_contains(*actor, L"TV") || class_contains(*actor, L"Lamp"))
+			{
+				if (!takeable)
+				{
+					static std::unordered_set<UObject *> told;
+					if (told.insert(*actor).second)
+						log(L"carry: " + (*actor)->GetName() + L" only switches (HN's m_bPickUp " + std::to_wstring(hnPickUp) + L", loose " +
+							std::to_wstring(rootLoose && *rootLoose) + L", movable " + std::to_wstring(shape.movable) + L", " + std::to_wstring(int(shape.extent)) + L" cm)");
+					return refuse(kNotCarriedNotGrabbed);
+				}
+				if (bodyOut)
+					*bodyOut = *r;
+				return *actor;
+			}
+			// one of HN's usable items (keys, lockpicks...): ours, used with the left button on what it is for (item_use).
+			// They went to HN's own pickup and HN's hotbar, where Minecraft's hand could never use them
+			if (apply_component(*actor) && takeable)
+			{
+				if (bodyOut)
+					*bodyOut = *r;
+				return *actor;
+			}
 			if (interactive_actor(*actor))
 			{
 				static std::unordered_set<UObject *> logged;
@@ -3153,12 +3415,8 @@ namespace nc
 					class_contains(*actor, L"Key"))
 					return refuse(L"one of HN's inventory items (its class chain names an item or key): HN's pickup");
 			}
-			Call simulating(*r, STR("IsSimulatingPhysics"));
-			simulating.set(STR("BoneName"), NameParam{}).invoke();
-			const uint8_t *loose = simulating.param<uint8_t>(STR("ReturnValue"));
-			if (!loose || !*loose)
+			if (!rootLoose || !*rootLoose)
 			{
-				const PropShape shape = prop_shape(*actor, *r);
 				// a whole movable prop HN acts on (not one of its parts: those were refused above), up to 90 cm in half size,
 				// whatever it is made of: requiring one mesh left chairs (seat, legs, back) to HN's take into its hotbar
 				if (!(shape.movable && shape.extent > 0.0f && shape.extent <= 90.0f && flat_actionable(*actor, *component) == 1))
@@ -3222,19 +3480,77 @@ namespace nc
 			if (!rendering || !captureClass || !statics)
 				return fail(L"the engine's capture or rendering library isn't there");
 			Call rt(rendering, STR("CreateRenderTarget2D"));
-			rt.set<UObject *>(STR("WorldContextObject"), pawn).set<int32_t>(STR("Width"), 64).set<int32_t>(STR("Height"), 64).set<uint8_t>(STR("Format"), 2); // RTF_RGBA8
+			rt.set<UObject *>(STR("WorldContextObject"), pawn).set<int32_t>(STR("Width"), 128).set<int32_t>(STR("Height"), 128).set<uint8_t>(STR("Format"), 2); // RTF_RGBA8
 			UObject *const *target = rt.invoke() ? rt.param<UObject *>(STR("ReturnValue")) : nullptr;
 			if (!target || !*target)
 				return fail(L"no render target");
-			// where to look from: the object's visual bounds, seen from front-left above, filling the picture
-			Call b(object, STR("GetActorBounds"));
-			b.set_bool(STR("bOnlyCollidingComponents"), false);
-			const Vec3f *bo = b.invoke() ? b.param<Vec3f>(STR("Origin")) : nullptr, *be = b.param<Vec3f>(STR("BoxExtent"));
-			if (!bo || !be)
-				return fail(L"no bounds");
-			const float radius = std::max(5.0f, std::sqrt(be->x * be->x + be->y * be->y + be->z * be->z));
-			const float fov = 30.0f, dist = radius / std::tan(fov * 0.5f * 3.14159265f / 180.0f) * 1.05f;
+			// where to look from: what is drawn of the object (its visible meshes' bounds, not the actor's, which count
+			// trigger boxes and volumes: a chair's icon was a speck, 23% of the picture), seen from front-left above, at
+			// the distance where its box's corners just fit the view (a sphere around the box wasted a third of it)
+			Vec3f lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
+			int meshes = 0;
+			{
+				static UObject *meshClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.MeshComponent"));
+				struct ObjectArray
+				{
+					UObject **data;
+					int32 num, max;
+				};
+				Call list(object, STR("GetComponentsByClass"));
+				list.set<UObject *>(STR("ComponentClass"), meshClass);
+				const ObjectArray *a = meshClass && list.invoke() ? list.param<ObjectArray>(STR("ReturnValue")) : nullptr;
+				for (int i = 0; a && i < a->num; ++i)
+				{
+					UObject *m = a->data[i];
+					bool visible = false, hiddenInGame = true;
+					if (!m || !get_bool_property(m, STR("bVisible"), visible) || !visible)
+						continue;
+					get_bool_property(m, STR("bHiddenInGame"), hiddenInGame);
+					if (hiddenInGame)
+						continue;
+					Call cb(kismet(), STR("GetComponentBounds"));
+					cb.set<UObject *>(STR("Component"), m);
+					const Vec3f *o = cb.invoke() ? cb.param<Vec3f>(STR("Origin")) : nullptr, *e = cb.param<Vec3f>(STR("BoxExtent"));
+					if (!o || !e || e->x + e->y + e->z <= 0.0f)
+						continue;
+					lo = {std::min(lo.x, o->x - e->x), std::min(lo.y, o->y - e->y), std::min(lo.z, o->z - e->z)};
+					hi = {std::max(hi.x, o->x + e->x), std::max(hi.y, o->y + e->y), std::max(hi.z, o->z + e->z)};
+					++meshes;
+				}
+			}
+			Vec3f boV, beV;
+			if (meshes)
+				boV = {(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f}, beV = {(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f};
+			else
+			{
+				Call b(object, STR("GetActorBounds"));
+				b.set_bool(STR("bOnlyCollidingComponents"), false);
+				const Vec3f *bo = b.invoke() ? b.param<Vec3f>(STR("Origin")) : nullptr, *be = b.param<Vec3f>(STR("BoxExtent"));
+				if (!bo || !be)
+					return fail(L"no bounds");
+				boV = *bo, beV = *be;
+			}
+			const Vec3f *bo = &boV, *be = &beV;
+			const float fov = 30.0f, tanHalf = std::tan(fov * 0.5f * 3.14159265f / 180.0f);
 			const Vec3f dir{-0.62f, -0.62f, 0.48f}; // unit: from the object to the camera
+			// the camera's right and up for that direction; the farthest a box corner reaches across the view, and
+			// towards the camera (it is nearer, so it looks bigger), give the distance where all eight fit
+			const float dl = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+			const Vec3f f{-dir.x / dl, -dir.y / dl, -dir.z / dl};
+			const float rl = std::hypot(f.y, f.x);
+			const Vec3f right{-f.y / rl, f.x / rl, 0.0f};
+			const Vec3f up{right.y * f.z - right.z * f.y, right.z * f.x - right.x * f.z, right.x * f.y - right.y * f.x};
+			float dist = 5.0f;
+			for (int corner = 0; corner < 8; ++corner)
+			{
+				const Vec3f v{(corner & 1 ? 1 : -1) * be->x, (corner & 2 ? 1 : -1) * be->y, (corner & 4 ? 1 : -1) * be->z};
+				const float across = std::max(std::abs(v.x * right.x + v.y * right.y + v.z * right.z), std::abs(v.x * up.x + v.y * up.y + v.z * up.z));
+				const float toward = -(v.x * f.x + v.y * f.y + v.z * f.z); // how much nearer the camera than the middle
+				dist = std::max(dist, across / tanHalf + toward);
+			}
+			dist *= 1.06f;
+			log(L"carry: icon of " + cls + L" framed on " + std::to_wstring(meshes) + L" visible meshes, " + std::to_wstring(int(be->x)) + L"x" +
+				std::to_wstring(int(be->y)) + L"x" + std::to_wstring(int(be->z)) + L" cm half size, from " + std::to_wstring(int(dist)) + L" cm");
 			Transform4 t;
 			t.pos[0] = bo->x + dir.x * dist, t.pos[1] = bo->y + dir.y * dist, t.pos[2] = bo->z + dir.z * dist;
 			quat_of(Rot3f{-std::asin(dir.z) * 180.0f / 3.14159265f, std::atan2(-dir.y, -dir.x) * 180.0f / 3.14159265f, 0.0f}, t.rot);
@@ -3356,7 +3672,7 @@ namespace nc
 			capture_icon(actor, actor, c.cls); // before it is hidden
 			set_carried_state(actor, body, false);
 			g_carried[id] = c;
-			const std::string name = object_name(actor);
+			const std::string name = item_name(actor);
 			sendf("{\"t\":\"pickup\",\"id\":\"%s\",\"name\":\"%s\",\"cls\":\"%s\",\"kg\":%d}", id.c_str(), name.c_str(), narrow(c.cls).c_str(), int(c.mass));
 			log(L"carry: picked up " + actor->GetName() + L" (" + std::wstring(name.begin(), name.end()) + L", " + std::to_wstring(int(c.mass)) +
 				L" kg, " + std::to_wstring(int(c.extent)) + L" cm) as " + std::wstring(id.begin(), id.end()) + L", waiting for Minecraft's inventory");
@@ -3467,10 +3783,93 @@ namespace nc
 			return &(g_carried[id] = c);
 		}
 
+		/// What an object does by itself in HN's world, stopped while it is stored in another slot: its playing sounds
+		/// (a radio's music), its active particle effects, its tick. A stored object is hidden, without collision and
+		/// physics, and left where it was last held: the radio went on playing there (the user: "it stayed there as I
+		/// walked away"). Each one stopped is remembered and started again when the object is held or put back.
+		/// Nothing else is touched (other objects' sounds, HN's audio).
+		void suspend_activity(Carried &c)
+		{
+			if (!c.actor || !c.paused.empty() || c.life == Carried::Life::Stored)
+				return; // stored already: its tick state stays the one it had before (read again, it would be "off")
+			static UObject *audio = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.AudioComponent"));
+			static UObject *particles = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.ParticleSystemComponent"));
+			struct ObjectArray
+			{
+				UObject **data;
+				int32 num, max;
+			};
+			int sounds = 0, effects = 0;
+			for (UObject *kind : {audio, particles})
+			{
+				if (!kind)
+					continue;
+				Call list(c.actor, STR("GetComponentsByClass"));
+				list.set<UObject *>(STR("ComponentClass"), kind);
+				const ObjectArray *a = list.invoke() ? list.param<ObjectArray>(STR("ReturnValue")) : nullptr;
+				for (int i = 0; a && i < a->num; ++i)
+				{
+					UObject *comp = a->data[i];
+					if (!comp)
+						continue;
+					if (kind == audio)
+					{
+						Call playing(comp, STR("IsPlaying"));
+						const uint8_t *on = playing.invoke() ? playing.param<uint8_t>(STR("ReturnValue")) : nullptr;
+						if (on && *on)
+						{
+							Call(comp, STR("SetPaused")).set_bool(STR("bPause"), true).invoke();
+							c.paused.push_back(comp);
+							++sounds;
+						}
+					}
+					else
+					{
+						Call active(comp, STR("IsActive"));
+						const uint8_t *on = active.invoke() ? active.param<uint8_t>(STR("ReturnValue")) : nullptr;
+						if (on && *on)
+						{
+							Call(comp, STR("Deactivate")).invoke();
+							c.paused.push_back(comp);
+							++effects;
+						}
+					}
+				}
+			}
+			Call ticking(c.actor, STR("IsActorTickEnabled"));
+			const uint8_t *t = ticking.invoke() ? ticking.param<uint8_t>(STR("ReturnValue")) : nullptr;
+			c.tickWas = !t || *t;
+			Call(c.actor, STR("SetActorTickEnabled")).set_bool(STR("bEnabled"), false).invoke();
+			log(L"carry: stored " + c.actor->GetName() + L": " + std::to_wstring(sounds) + L" sounds paused, " + std::to_wstring(effects) +
+				L" effects stopped, its tick off");
+		}
+
+		void resume_activity(Carried &c)
+		{
+			if (!c.actor)
+				return;
+			if (c.life == Carried::Life::Stored)
+				Call(c.actor, STR("SetActorTickEnabled")).set_bool(STR("bEnabled"), c.tickWas).invoke();
+			if (c.paused.empty())
+				return;
+			static UObject *audio = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.AudioComponent"));
+			for (UObject *comp : c.paused)
+			{
+				if (audio && comp->IsA(static_cast<UClass *>(audio)))
+					Call(comp, STR("SetPaused")).set_bool(STR("bPause"), false).invoke();
+				else
+					Call(comp, STR("Activate")).set_bool(STR("bReset"), false).invoke();
+			}
+			log(L"carry: " + c.actor->GetName() + L" active again (" + std::to_wstring(c.paused.size()) + L" sounds/effects resumed)");
+			c.paused.clear();
+		}
+
 		/// Back into HN's world at `at`, as itself (scale, collision, physics), moving with `velocity`; Minecraft's
 		/// token goes after.
 		void release(const std::string &id, Carried &c, const Vec3f &at, const Vec3f &velocity)
 		{
+			resume_activity(c);
+			c.life = Carried::Life::Picked;
 			carry_detach(c);
 			set_actor_scale(c.actor, c.scale);
 			place_actor(c.actor, at, g_mcLookYaw + 90.0f);
@@ -3564,9 +3963,223 @@ namespace nc
 			return true;
 		}
 
+		/// What the crosshair is on in HN (Minecraft's eye and look, as the right click and the pickup trace), up to
+		/// `reach` cm, not `ignore`: the actor, the component, and the point.
+		bool look_hit(UObject *pawn, UObject *ignore, float reach, UObject *&actor, UObject *&component, Vec3f &point)
+		{
+			actor = component = nullptr;
+			if (!g_haveEye)
+				return false;
+			const Vec3f dir = look_dir();
+			Call c(kismet(), STR("LineTraceSingle"));
+			if (!c)
+				return false;
+			UObject *ignored[1] = {ignore};
+			c.set<UObject *>(STR("WorldContextObject"), pawn).set(STR("Start"), g_eye)
+				.set(STR("End"), Vec3f{g_eye.x + dir.x * reach, g_eye.y + dir.y * reach, g_eye.z + dir.z * reach})
+				.set<uint8_t>(STR("TraceChannel"), 0).set(STR("ActorsToIgnore"), ScriptArray{ignored, ignore ? 1 : 0, ignore ? 1 : 0})
+				.set_bool(STR("bTraceComplex"), false).set<uint8_t>(STR("DrawDebugType"), 0).set_bool(STR("bIgnoreSelf"), true);
+			c.invoke();
+			const uint8_t *ok = c.param<uint8_t>(STR("ReturnValue"));
+			FProperty *outHit = c.property(STR("OutHit"));
+			if (!ok || !*ok || !outHit)
+				return false;
+			impact_point(c, point);
+			Call brk(gameplay_statics(), STR("BreakHitResult"));
+			FProperty *hitParam = brk ? brk.property(STR("Hit")) : nullptr;
+			if (!hitParam)
+				return false;
+			std::memcpy(brk.data() + hitParam->GetOffset_Internal(), c.data() + outHit->GetOffset_Internal(), size_t(outHit->GetSize()));
+			brk.invoke();
+			UObject *const *a = brk.param<UObject *>(STR("HitActor"));
+			UObject *const *k = brk.param<UObject *>(STR("HitComponent"));
+			actor = a ? *a : nullptr;
+			component = k ? *k : nullptr;
+			return actor != nullptr;
+		}
+
+		struct FStringArray
+		{
+			struct Str
+			{
+				const wchar_t *data;
+				int32 num, max;
+			} *data;
+			int32 num, max;
+		};
+
+		/// A lock's state for the log: open or not, and the codes it opens for.
+		std::wstring lock_state(UObject *lock, bool *openOut = nullptr)
+		{
+			Call open(lock, STR("IsOpen"));
+			const uint8_t *o = open.invoke() ? open.param<uint8_t>(STR("ReturnValue")) : nullptr;
+			if (openOut)
+				*openOut = o && *o;
+			std::wstring codes;
+			if (const FStringArray *a = lock->GetValuePtrByPropertyNameInChain<FStringArray>(STR("m_Codes")))
+				for (int i = 0; i < a->num; ++i)
+					codes += (codes.empty() ? L"" : L", ") + (a->data[i].data && a->data[i].num > 1 ? std::wstring(a->data[i].data, size_t(a->data[i].num - 1)) : L"\"\"");
+			return std::wstring(o ? (*o ? L"open" : L"locked") : L"?") + L" (codes: " + (codes.empty() ? L"none" : codes) + L")";
+		}
+
+		/// Whether a lock opens for this key, by HN's own rule (the key's Code is one of the lock's m_Codes).
+		bool key_fits(UObject *key, UObject *lock)
+		{
+			const std::wstring code = string_property(key, STR("Code"));
+			const FStringArray *a = lock->GetValuePtrByPropertyNameInChain<FStringArray>(STR("m_Codes"));
+			for (int i = 0; a && !code.empty() && i < a->num; ++i)
+				if (a->data[i].data && a->data[i].num > 1 && _wcsicmp(std::wstring(a->data[i].data, size_t(a->data[i].num - 1)).c_str(), code.c_str()) == 0)
+					return true; // as HN compares them (case-insensitive)
+			return false;
+		}
+
+		/// HN's own apply of a usable item, the code HN runs when its left mouse uses the item in its hands: each usable
+		/// class binds a native method (not a UFUNCTION: nothing reflection can name) into its ApplyComponent, in the
+		/// component's unreflected bytes at 0xF0 (an FDelegateBase: the bound instance, then its size), signature
+		/// bool (ACharacter *, AActor *target). Found in the game's code (HelloNeighbor-Win64-Shipping.exe): ALockpick's
+		/// constructor at 0x14050c1c0 binds 0x14051fea0, which checks the key's Code against each of the lock's m_Codes
+		/// (case-insensitive), and on a match tells the character, frees the lock from its door, sets it open (byte
+		/// 0x440, what IsOpen reads), calls OnChange(true), plays the lock's OpenSound, and deletes the key only if it is
+		/// bOneOff (FlatComponent mode FM_Delete); no match: the character's "doesn't fit". The blueprint event
+		/// OnApplyToMe that the first version called has no native code and the locks don't implement it (nothing
+		/// happened), and the lock's OnChange(true) it fell back to is only the lock's look: no sound, HN's state
+		/// left locked (the 13:28 session).
+		/// The bound instance is checked before it is called: its object is this very item (the weak pointer's index is
+		/// the item's), its vtable and method are in the game's own image. False if it isn't there or doesn't check out.
+		bool native_apply(UObject *item, UObject *character, UObject *target, bool &result, std::wstring &why)
+		{
+			UObject *component = apply_component(item);
+			if (!component)
+				return why = L"no ApplyComponent", false;
+			static const uint8_t *image = reinterpret_cast<const uint8_t *>(GetModuleHandleW(nullptr));
+			static size_t imageSize = [] {
+				const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(image);
+				const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(image + dos->e_lfanew);
+				return size_t(nt->OptionalHeader.SizeOfImage);
+			}();
+			auto inImage = [](const void *ptr) { return ptr >= image && ptr < image + imageSize; };
+			const uint8_t *instance = *reinterpret_cast<const uint8_t *const *>(reinterpret_cast<const uint8_t *>(component) + 0xF0);
+			if (!instance)
+				return why = L"its ApplyComponent has nothing bound (HN gives this item no apply)", false;
+			const void *vtable = *reinterpret_cast<const void *const *>(instance);
+			const int32 objectIndex = *reinterpret_cast<const int32 *>(instance + 8);
+			const int32 itemIndex = *reinterpret_cast<const int32 *>(reinterpret_cast<const uint8_t *>(item) + 0xC); // UObjectBase::InternalIndex
+			using Apply = bool (*)(UObject *self, UObject *character, UObject *target);
+			const Apply method = *reinterpret_cast<const Apply *>(instance + 0x10);
+			if (!inImage(vtable) || !inImage(reinterpret_cast<const void *>(method)) || objectIndex != itemIndex)
+			{
+				wchar_t text[200];
+				swprintf(text, 200, L"the bound apply doesn't check out (vtable %p, method %p, object %d, item %d)", vtable,
+					reinterpret_cast<const void *>(method), objectIndex, itemIndex);
+				return why = text, false;
+			}
+			wchar_t text[96];
+			swprintf(text, 96, L"HN's native apply (image+0x%llx)", static_cast<unsigned long long>(reinterpret_cast<const uint8_t *>(method) - image));
+			why = text;
+			// its answer: true only when the item is used up (the lockpick's: a fitting bOneOff key); a reusable key that
+			// opened the lock answers false, as one that didn't fit (the lock's state says which)
+			result = method(item, character, target);
+			return true;
+		}
+
+		/// The FlatComponent's mode (EFlatMode: 0 free, 1 delete, 2 fixed, 4 in the human's hand, 7 inventory...).
+		int flat_mode(UObject *actor)
+		{
+			UObject **flat = actor ? actor->GetValuePtrByPropertyNameInChain<UObject *>(STR("FlatComponent")) : nullptr;
+			const uint8_t *mode = flat && *flat ? (*flat)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mode")) : nullptr;
+			return mode ? *mode : -1;
+		}
+
+		/// Left button with one of HN's usable items in the hand (a key): HN's own apply of it (native_apply) on what the
+		/// crosshair is on; for a door, its lock nearest the crosshair (the locks hang on the door). One call per click.
+		/// Logged with the lock's state before and after, HN's answer, and the item's fate, which is HN's: an item HN
+		/// deletes (a one-off lockpick) or takes (its mode changed) leaves Minecraft's inventory; anything else stays,
+		/// as it is, in the hand (HN's keys are kept: only bOneOff ones go). The first version took the key's token
+		/// away whenever the key wasn't hidden, and a held key is never hidden: the key left the inventory and its
+		/// actor stayed on the camera, no longer ours (the user: "the key remains in my hand ... leaves my inventory").
+		/// False: no usable item, or nothing of HN's in reach (the click stays Minecraft's attack).
+		bool item_use(UObject *pc, UObject *pawn)
+		{
+			auto it = g_carried.find(g_heldId);
+			if (it == g_carried.end() || !it->second.confirmed || !it->second.actor || it->second.level != pc)
+				return false;
+			Carried &c = it->second;
+			if (!apply_component(c.actor))
+				return false;
+			UObject *actor = nullptr, *component = nullptr;
+			Vec3f point{};
+			if (!look_hit(pawn, c.actor, 300.0f, actor, component, point) || !class_contains(actor, L"FlatActor"))
+				return false;
+			UObject *target = actor;
+			if (!class_contains(actor, L"Lock") && class_contains(actor, L"Door"))
+			{
+				struct ObjectArray
+				{
+					UObject **data;
+					int32 num, max;
+				};
+				float best = 80.0f;
+				if (const ObjectArray *locks = actor->GetValuePtrByPropertyNameInChain<ObjectArray>(STR("m_Locks")))
+					for (int i = 0; i < locks->num; ++i)
+					{
+						Vec3f at;
+						if (UObject *lock = locks->data[i]; lock && actor_location(lock, at))
+						{
+							const float d = std::hypot(at.x - point.x, at.y - point.y, at.z - point.z);
+							if (d < best)
+								best = d, target = lock;
+						}
+					}
+			}
+			const bool isLock = class_contains(target, L"Lock") && !class_contains(target, L"Lockpick");
+			bool openBefore = false, openAfter = false;
+			const std::wstring before = isLock ? lock_state(target, &openBefore) : L"-";
+			const int modeBefore = flat_mode(c.actor);
+			bool result = false;
+			std::wstring how;
+			const bool applied = native_apply(c.actor, pawn, target, result, how);
+			const std::wstring after = isLock ? lock_state(target, &openAfter) : L"-";
+			log(L"use: " + item_name_w(c.actor) + L" on " + target->GetName() + (target != actor ? L" (on " + actor->GetName() + L")" : L"") + L": " + how +
+				(applied ? std::wstring(result ? L", HN used the item up (a one-off)" : L", the item is kept") : L"") +
+				(isLock ? L"; lock " + before + L" -> " + after + (openAfter && !openBefore ? L": UNLOCKED" : L"") +
+					(key_fits(c.actor, target) ? L" (the key's code is the lock's)" : L" (the key's code isn't the lock's)") : L""));
+			if (!applied)
+				return false; // not HN's to apply: the click stays Minecraft's
+			g_ws.send("{\"t\":\"swing\"}");
+			// the item's fate is HN's: deleted (gone, or its mode FM_Delete) or taken (its mode changed) -> the token goes;
+			// else it stays ours, in the hand
+			Call valid(kismet(), STR("IsValid"));
+			const uint8_t *alive = valid.set<UObject *>(STR("Object"), c.actor).invoke() ? valid.param<uint8_t>(STR("ReturnValue")) : nullptr;
+			const int modeAfter = alive && *alive ? flat_mode(c.actor) : -1;
+			if (alive && *alive && modeAfter == modeBefore)
+				return true;
+			const bool deleted = !alive || !*alive || modeAfter == 1;
+			log(L"use: HN " + std::wstring(deleted ? L"used up " : L"took ") + c.actor->GetName() + L" (its mode " + std::to_wstring(modeBefore) + L" -> " +
+				std::to_wstring(modeAfter) + L"): its token goes");
+			if (!deleted)
+			{
+				// HN has it now: off our camera only if it is still on it, its own size back; HN places it
+				carry_detach(c);
+				set_actor_scale(c.actor, c.scale);
+			}
+			c.attachedTo = nullptr;
+			sendf("{\"t\":\"consume\",\"id\":\"%s\"}", g_heldId.c_str());
+			if (g_shownId == g_heldId)
+				g_shownId.clear();
+			g_carried.erase(it);
+			return true;
+		}
+
 		void carry_start_pickup(UObject *actor, UObject *body)
 		{
 			g_pickup = {actor, body, GetTickCount(), true, electric(actor)};
+			if (g_throwCharge.active)
+			{
+				g_throwCharge.active = false; // never both bars
+				progress("throw", -1.0f);
+			}
+			progress("pickup", 0.0f);
+			notify("Picking up " + item_name(actor));
 			log(L"carry: pickup started on " + actor->GetName() + L" (hold " + std::to_wstring(kPickupHold) + L" ms)");
 		}
 
@@ -3575,6 +4188,7 @@ namespace nc
 			if (g_pickup.active)
 			{
 				notify("");
+				progress("pickup", -1.0f);
 				if (g_pickup.tapActivates)
 				{
 					// a tap on the radio: HN switches it (the same thing under the crosshair: HN's E traces from the eyes)
@@ -3620,22 +4234,23 @@ namespace nc
 				{
 					g_pickup.active = false;
 					notify("");
+					progress("pickup", -1.0f);
 					log(L"carry: pickup cancelled (" + std::wstring(now ? L"looking at another object" : L"target lost or out of reach") + L")");
 				}
 				else if (held >= kPickupHold)
 				{
 					g_pickup.active = false;
 					notify("");
+					progress("pickup", -1.0f);
 					complete_pickup(pc, g_pickup.actor, g_pickup.body);
 				}
 				else
 				{
-					static DWORD nextNote = 0;
-					if (GetTickCount() > nextNote)
+					static DWORD nextBar = 0;
+					if (GetTickCount() > nextBar)
 					{
-						nextNote = GetTickCount() + 100;
-						const int filled = int(10 * held / kPickupHold);
-						notify("Picking up " + object_name(g_pickup.actor) + " [" + std::string(filled, '#') + std::string(10 - filled, '.') + "]");
+						nextBar = GetTickCount() + 50;
+						progress("pickup", float(held) / float(kPickupHold));
 					}
 				}
 			}
@@ -3649,6 +4264,9 @@ namespace nc
 					set_actor_scale(it->second.actor, it->second.scale);
 					set_carried_state(it->second.actor, nullptr, false);
 					Call(it->second.actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
+					it->second.shown = false;
+					suspend_activity(it->second);
+					it->second.life = Carried::Life::Stored;
 				}
 				g_shownId.clear();
 			}
@@ -3671,22 +4289,46 @@ namespace nc
 			}
 			const bool first = g_shownId != g_heldId;
 			g_shownId = g_heldId;
+			if (first)
+			{
+				c->selectedAt = GetTickCount();
+				c->shown = false;
+				if (c->life == Carried::Life::Stored)
+					resume_activity(*c);
+				c->life = Carried::Life::Held;
+			}
 			if (first && c->body) // held at the eye, small: no shadow of it on the room (back with release())
 				Call(c->body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
 			// Its size in the hand: every object brought to one visual size, about twice Minecraft's fist (26 cm in half at
 			// the fist's 1.35 m: 19.3% of its distance), times its grip's scale. It was only ever shrunk (to 18%), never
 			// grown: a mug stayed its own size and looked smaller than the fist (the user). Small things grow up to 3x.
 			// Only the copy in the hand: put down or thrown, the object is its own size again (release()).
-			const bool fistKnown = GetTickCount() - g_handAt < 250;
+			const bool fistKnown = fist_for(g_heldId);
 			constexpr float kHeldHalf = 0.193f;
 			const float target = (fistKnown ? kHeldHalf * 100.0f * g_handDist : 26.0f) * grip_scale(c->actor);
 			const float fit = std::clamp(target / std::max(c->extent, 1.0f), 0.05f, 3.0f);
 			c->fit = fit;
-			Call(c->actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), false).invoke();
-			if (first)
+			// Shown only once Minecraft has drawn the carrying fist for this very object: until then it stays hidden. The
+			// first frame after a pickup used to be shown on a fallback fist in front of the camera (Minecraft hadn't
+			// drawn the arm yet), then jumped onto Minecraft's and rose with its equip motion (the user: "in the wrong
+			// location for a split second"; the 12:43 log: every pickup's first "hand ok" line had "fist default").
+			// Without a fist for 600 ms (third person, or the arm not drawn) it is shown in front after all.
+			const DWORD waited = GetTickCount() - c->selectedAt;
+			if (!fistKnown && waited < 600)
 			{
-				log(L"carry: in the hand: " + c->actor->GetName() + L", scale " + std::to_wstring(fit) +
-					(GetTickCount() - g_handAt < 250 ? L", on Minecraft's fist" : L", Minecraft's fist not reported yet (in front until it is)"));
+				if (c->shown)
+				{
+					Call(c->actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
+					c->shown = false;
+				}
+				return;
+			}
+			if (!c->shown)
+			{
+				c->shown = true;
+				Call(c->actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), false).invoke();
+				log(L"carry: in the hand: " + c->actor->GetName() + L", scale " + std::to_wstring(fit) + L", shown " + std::to_wstring(waited) +
+					(fistKnown ? L" ms after it was selected, on Minecraft's fist for it (hidden until then)" : L" ms after it was selected: no fist from Minecraft, in front"));
 			}
 		}
 
@@ -3877,7 +4519,7 @@ namespace nc
 			const Grip &g = grip_for(c.actor);
 			// the fist (Minecraft's, while it draws the carrying arm; else low right in front), plus the grip's offset,
 			// in the camera's frame (Unreal: x forward, y right, z up; cm)
-			const bool onFist = GetTickCount() - g_handAt < 250;
+			const bool onFist = fist_for(g_shownId);
 			const Vec3f fist = onFist ? Vec3f{g_handLocal.z * 100.0f, g_handLocal.x * 100.0f, g_handLocal.y * 100.0f} : Vec3f{60.0f, 25.0f, -25.0f};
 			// Near the eye, the same picture: everything scaled towards the camera to kNear. At the fist's own distance
 			// (~1.35 m) the object went into walls in front of Steve and vanished; at 25 cm it is inside Steve's own
@@ -4558,6 +5200,18 @@ namespace nc
 		UObject *pawn = pc ? pawn_of(pc) : nullptr;
 		if (pressed(VK_F9))
 			dump(pc, pawn);
+		if (pressed(VK_F6))
+		{
+			g_proxiesShown = !g_proxiesShown;
+			int n = 0;
+			for (auto &[key, actor] : g_shadows)
+				proxy_main_pass(actor, g_proxiesShown), ++n;
+			for (UObject *part : g_steveShadow.parts)
+				if (part)
+					proxy_main_pass(part, g_proxiesShown), ++n;
+			log(L"shadows: F6: " + std::to_wstring(n) + L" stand-ins " + (g_proxiesShown ? L"drawn in the picture too (where they are)" : L"shadow-only again"));
+			notify(g_proxiesShown ? "Shadow stand-ins visible (F6)" : "Shadow stand-ins hidden");
+		}
 
 		if (!g_ws.connected())
 			g_mcReady = false; // a new Minecraft says "ready" again once its world is loaded
@@ -4764,6 +5418,7 @@ namespace nc
 			mesh_path_probe(pawn);
 			light_census(pawn);
 			steve_shadow_tick(pc, pawn);
+			lend_shadows_tick(pc);
 			for (const std::string &id : g_throwRequests)
 				carry_throw(pc, pawn, id, g_heldId == id ? g_heldCls : std::string{});
 		}

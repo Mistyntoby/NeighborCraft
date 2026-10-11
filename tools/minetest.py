@@ -3,8 +3,12 @@ breaks it in ~0.75 s); the host sends the attack key as Hello Neighbor does (dow
 
   tap (0.05 s)            -> the block stays (one swing, no break)
   hold 0.4 s, let go      -> the block stays (breaking stops on release)
-  hold 1.6 s              -> the block breaks (its dirt ends in the inventory)
+  hold 1.6 s              -> the block breaks
   after letting go        -> a second dirt block put there stays
+
+Whether the block is there is asked of the server (execute if block ... run say, read back from Minecraft's log):
+counting its drop in the inventory missed on a second run in the same Minecraft (the block broke, its drop wasn't
+picked up in the time given).
 
     python tools/minetest.py
 
@@ -12,6 +16,7 @@ Start Minecraft first (gradlew runClient in mc/) with Hello Neighbor closed.
 """
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -19,6 +24,7 @@ import time
 import websockets
 
 PORT = 25620
+LOG = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mc", "run", "logs", "latest.log"))
 Y = 140
 OX, OZ = 240, 240
 
@@ -58,6 +64,23 @@ async def main():
                     pass
                 await asyncio.sleep(1 / 60)
 
+        probes = {"n": 0}
+
+        async def block_there():
+            probes["n"] += 1
+            tag = f"minetest-probe-{probes['n']}-{int(time.time())}"
+            at = f"{OX} {Y + 2} {OZ + 2}"
+            await ws.send(json.dumps({"t": "cmd", "c": f"execute if block {at} minecraft:dirt run say {tag} dirt"}))
+            await ws.send(json.dumps({"t": "cmd", "c": f"execute unless block {at} minecraft:dirt run say {tag} gone"}))
+            for _ in range(30):
+                await frames(0.1)
+                text = open(LOG, encoding="utf-8", errors="replace").read()[-20000:]
+                if f"{tag} dirt" in text.split("[CHAT]")[-1] or f"[Server] {tag} dirt" in text:
+                    return True
+                if f"[Server] {tag} gone" in text:
+                    return False
+            return None
+
         async def dirt_count():
             msgs.clear()
             await ws.send(json.dumps({"t": "inv"}))
@@ -82,22 +105,23 @@ async def main():
         ok = True
         await place()
         await attack(0.05)
-        n = await dirt_count()
-        print(f"  tap:             dirt in the inventory {n} (expected 0: the block stays)")
-        ok &= n == 0
+        b = await block_there()
+        print(f"  tap:             block there {b} (expected True: one swing, no break)")
+        ok &= b is True
         await attack(0.4)
-        n = await dirt_count()
-        print(f"  hold 0.4 s:      dirt in the inventory {n} (expected 0: breaking stops on release)")
-        ok &= n == 0
+        b = await block_there()
+        print(f"  hold 0.4 s:      block there {b} (expected True: breaking stops on release)")
+        ok &= b is True
         await attack(1.6)
+        b = await block_there()
         n = await dirt_count()
-        print(f"  hold 1.6 s:      dirt in the inventory {n} (expected 1: broken)")
-        ok &= n == 1
+        print(f"  hold 1.6 s:      block there {b} (expected False: broken); its dirt in the inventory: {n}")
+        ok &= b is False
         await place()
         await frames(1.5)
-        n = await dirt_count()
-        print(f"  after release:   dirt in the inventory {n} (expected 1: the new block isn't mined)")
-        ok &= n == 1
+        b = await block_there()
+        print(f"  after release:   block there {b} (expected True: the new block isn't mined)")
+        ok &= b is True
         print("results:", "OK" if ok else "UNEXPECTED")
 
 

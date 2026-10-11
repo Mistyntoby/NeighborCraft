@@ -487,3 +487,44 @@ of this round is [game] yet.
   shadow-casting primitive, so no render hook is used. No fake darkening, decals or blobs.
 - Tests on the final code: minetest OK, handtest OK, itemtest OK, turntest STEADY (3.9 deg max). HN DLL `f3dd464e...`
   built after the last source edit and installed (md5 of built = installed).
+
+## Keys through HN's native apply, native shadows that show, pickup transition, XP bar, TV, stored items (2026-10-11 evening)
+Evidence kinds: [src] source/binary reading, [test] automated test, [game] seen or logged in Hello Neighbor.
+- Keys (fixed, [game] 17:31 log). Root causes, from the game binary (UE4SS CXX header dump of the native classes;
+  HelloNeighbor-Win64-Shipping.exe disassembled with capstone, scripts in the lab):
+  - FlatActor::OnApplyToMe is a blueprint-only event (no native thunk) and no lock blueprint implements it: calling it
+    did nothing (the lock stayed "locked").
+  - The native unlock is ALockpick's apply method, 0x14051fea0, bound by ALockpick's constructor (0x14050c1c0) as an
+    unreflected native delegate in its ApplyComponent at +0xF0. It compares the key's Code with each of the lock's
+    m_Codes (case-insensitive); on a match it broadcasts to the character (+0x950), frees the lock from its door
+    (attacher, FlatComponent mode free, door's lock list), sets the lock's open byte (+0x440, what IsOpen reads),
+    calls OnChange(true), plays the lock's OpenSound, and deletes the key only if bOneOff (mode FM_Delete). It
+    returns true only then.
+  - The old fallback called OnChange(true) alone (only the lock's look: no sound, HN's state still locked), and the
+    old "HN took it into its world" test treated "not hidden" as taken: a held key is never hidden, so the token
+    was consumed while the actor stayed attached to the camera (key in hand, gone from the inventory).
+  - Now native_apply calls that bound method (after checking the bound object is the item, and the vtable and method
+    are in the game's image), once per click; the item's fate is read back (deleted / mode changed -> token goes,
+    else kept). 17:31: "lock locked -> open: UNLOCKED", key kept; further clicks on the open door and the car: no
+    effect, no error.
+- Native shadows ([game] screenshots 17:4x and 18:0x, ReShade off): the stand-ins were placed right (F6 shows them on
+  the blocks and on Steve) but with SetRenderInMainPass(false) this UE 4.20 build drops them from the sun's shadow
+  too: with F6 (drawn) the shadows appeared, without, none. Now: in the main pass, hidden in game (component
+  bHiddenInGame) + bCastHiddenShadow + movable. With ReShade off (Minecraft's picture gone) the hidden stand-ins cast
+  the blocks' and Steve's shadows on the road and curb. Earlier the stand-ins were static (SetMobility(2) didn't
+  take; now written before FinishSpawning and checked).
+- The "silhouette around blocks" was the compositor's screen-space contact shadow (NeighborCraft.fx ContactShadow
+  0.5): removed.
+- Indoors HN's lights cast no dynamic shadows (census: 120 movable lights, shadows off): the light that lights Steve
+  most is given shadows while he is near it (lend_shadows_tick), given back after.
+- Pickup transition ([src], [test] fist ids): the first frame after a pickup was placed on a fallback fist (the
+  12:43 log: "fist default" on every first line). The fist message now names its token; the object is shown only
+  on its own fist ("shown 109 ms after it was selected, on Minecraft's fist for it" in the 13:28 log).
+- XP bar ([test] carryuitest: values, replacement, run-out, screenshots): pickup progress and throw charge drawn
+  in the experience bar's place with its sprites (CarryBar, HudCarryBarMixin).
+- TV ([game]): carried when HN says it can be taken (m_bPickUp) or is loose; a tap still switches it.
+- Stored items ([game] 13:24 log): sounds paused, effects stopped, tick off; resumed when held or put back. A
+  second store no longer overwrites the remembered tick state.
+- Icons ([test] chair 23% -> 87% of the side): framed on the visible meshes and normalised in Minecraft.
+- Mining test now asks the server whether the block is there (an inventory count missed drops on reruns).
+- ReShade.ini: End toggles effects (KeyEffects=35), for tests with ReShade off.

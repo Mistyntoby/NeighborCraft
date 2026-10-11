@@ -45,9 +45,6 @@ uniform float HazeDistance < ui_type = "drag"; ui_min = 10.0; ui_max = 1000.0; u
 uniform float HazeStrength < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Haze strength"; > = 0.85;
 uniform float EdgeSoftness < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Soften Minecraft's edges";
 	ui_tooltip = "Anti-alias where Minecraft meets Hello Neighbor (Hello Neighbor's own anti-aliasing ran before Minecraft was added)."; > = 1.0;
-uniform float ContactShadow < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Contact shadows";
-	ui_tooltip = "Darken Hello Neighbor's surfaces right next to Minecraft's (under mobs' feet, around blocks)."; > = 0.5;
-uniform float ContactRadius < ui_type = "drag"; ui_min = 0.1; ui_max = 3.0; ui_step = 0.05; ui_label = "Contact shadow size (m)"; > = 0.7;
 uniform float BloomStrength < ui_type = "drag"; ui_min = 0.0; ui_max = 2.0; ui_step = 0.01; ui_label = "Minecraft glow";
 	ui_tooltip = "Bright Minecraft things (lava, fire, the portal) glow over Hello Neighbor's picture, as Hello Neighbor's own lights do."; > = 0.55;
 uniform float BloomThreshold < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Glow threshold"; > = 0.62;
@@ -270,8 +267,8 @@ float4 PS_Bright(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	return float4(c * (cover * saturate((l - BloomThreshold) / max(1.0 - BloomThreshold, 1e-3)) / max(l, 1e-3)), 1.0);
 }
 
-/// The finished picture: the world (shaken as one: Hello Neighbor and Minecraft together), Minecraft's edges softened, contact
-/// shadows on Hello Neighbor's surfaces next to Minecraft's, Minecraft's glow, the portal's warp, and Minecraft's hand and HUD on
+/// The finished picture: the world (shaken as one: Hello Neighbor and Minecraft together), Minecraft's edges softened,
+/// Minecraft's glow, the portal's warp, and Minecraft's hand and HUD on
 /// top (neither shaken nor warped).
 float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
@@ -312,25 +309,9 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 			color = lerp(color, (color * 2.0 + n) / 6.0, edge * EdgeSoftness);
 		}
 	}
-	// contact shadows: Hello Neighbor surface pixels with Minecraft surfaces close by (in depth), mostly above them
-	if (ContactShadow > 0.0 && info.x < 0.5 && info.z < 200.0)
-	{
-		const float zh = info.z;
-		const float r = clamp(ContactRadius / max(zh, 0.5) * BUFFER_HEIGHT / (2.0 * WarpTan.x), 2.0, 48.0);
-		float occ = 0.0, weight = 0.0;
-		[unroll] for (int i = 0; i < 10; ++i)
-		{
-			const float a = i * 2.39996 + 0.6; // golden-angle spiral
-			const float rr = r * sqrt((i + 0.5) / 10.0);
-			const float2 o = float2(cos(a), sin(a)) * rr;
-			const float4 sm = tex2Dlod(sMcInfo, float4(wuv + o * px, 0, 0));
-			const float w = o.y < 0.0 ? 1.0 : 0.35; // things stand on the ground: their shadow is below them
-			weight += w;
-			if (sm.x > 0.5 && abs(sm.y - zh) < ContactRadius * 1.5)
-				occ += w * (1.0 - rr / (r + 1.0));
-		}
-		color *= 1.0 - ContactShadow * saturate(occ / max(weight, 1e-3) * 2.2);
-	}
+	// (no screen-space "contact shadow" any more: it darkened Hello Neighbor's pixels next to Minecraft's in the picture
+	// and showed as a dark silhouette around blocks; shadows are Hello Neighbor's own now, cast by shadow-only
+	// stand-ins in its engine, see bridge.cpp spawn_shadow_box)
 	// Minecraft's glow
 	if (BloomStrength > 0.0)
 	{

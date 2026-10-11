@@ -31,6 +31,13 @@ public final class CarryHand {
 	/** The arm being drawn is the carrying one (set around renderPlayerArm by the mixin). */
 	public static boolean capturing;
 
+	/**
+	 * The token whose arm is being drawn (its id): every fist goes to HN with it. HN shows an object only on a fist
+	 * reported for that object; the first frame after a pickup used to be placed on a fallback fist in front (no fist
+	 * had come for it yet) and then jumped onto Minecraft's (the user: "in the wrong location for a split second").
+	 */
+	public static String drawingId = "";
+
 	private static boolean reported;
 
 	/** The hand projection's vertical FOV this frame (degrees). */
@@ -88,7 +95,7 @@ public final class CarryHand {
 		// and in the camera's own frame (right, up, forward): HN places the object from the camera it renders with
 		double n = Math.sqrt(1.0 + uy * uy + rx * rx);
 		Passthrough.events.accept(String.format(Locale.ROOT,
-			"{\"t\":\"hand\",\"p\":[%.4f,%.4f,%.4f],\"u\":[%.4f,%.4f,%.4f],\"l\":[%.4f,%.4f,%.4f],\"d\":%.4f}",
-			at.x, at.y, at.z, u.x(), u.y(), u.z(), rx / n * distance, uy / n * distance, distance / n, distance));
+			"{\"t\":\"hand\",\"id\":\"%s\",\"p\":[%.4f,%.4f,%.4f],\"u\":[%.4f,%.4f,%.4f],\"l\":[%.4f,%.4f,%.4f],\"d\":%.4f}",
+			drawingId, at.x, at.y, at.z, u.x(), u.y(), u.z(), rx / n * distance, uy / n * distance, distance / n, distance));
 	}
 }
