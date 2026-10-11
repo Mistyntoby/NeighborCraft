@@ -646,18 +646,129 @@ namespace nc
 			return *actor;
 		}
 
+		// ---- shadows of Minecraft's blocks in HN's own lighting -----------------------------------------------------
+		// Minecraft's blocks are a composited picture: HN's lights never saw them, so a placed block cast no shadow on HN's
+		// floor and walls. Each full opaque block gets an invisible stand-in in HN's world: Unreal's own 1 m cube
+		// (/Engine/BasicShapes/Cube, shipped with HN's content), hidden but casting shadows (bCastHiddenShadow), without
+		// collision. HN's lights, shadow maps and shadow filtering then shadow it like any HN object: direction, softness
+		// and intensity are HN's. (SkyCraft, chasmlol/SkyCraft MIT, gets there by drawing Minecraft's blocks into Skyrim's
+		// sun shadow map from a hook, skse/src/WorldRender.cpp DepthVS/SunShadowRenderHook; Unreal does it for any
+		// primitive in the scene.) Glass, slabs, torches (not full opaque cubes) get none.
+
+		std::unordered_map<unsigned long long, UObject *> g_shadows; // block -> its shadow stand-in
+		constexpr size_t kMaxShadows = 1500;
+
+		/// Unreal's 1 m cube: loaded already, else through the asset registry (Blueprint-callable, shipped).
+		UObject *shadow_cube()
+		{
+			if (UObject *cube = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Engine/BasicShapes/Cube.Cube")))
+				return cube;
+			static bool failed = false;
+			if (failed)
+				return nullptr;
+			UObject *helpers = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/AssetRegistry.Default__AssetRegistryHelpers"));
+			auto fail = [&](const wchar_t *why) -> UObject * {
+				failed = true;
+				log(std::wstring(L"shadows: no cube mesh (") + why + L"): Minecraft's blocks cast no shadows in HN");
+				return nullptr;
+			};
+			if (!helpers)
+				return fail(L"no AssetRegistryHelpers");
+			Call reg(helpers, STR("GetAssetRegistry"));
+			UObject *const *registry = reg.invoke() ? reg.param<UObject *>(STR("ReturnValue")) : nullptr; // TScriptInterface: object first
+			if (!registry || !*registry)
+				return fail(L"no asset registry");
+			Call find(*registry, STR("GetAssetByObjectPath"));
+			find.set(STR("ObjectPath"), name_param(STR("/Engine/BasicShapes/Cube.Cube"))).set_bool(STR("bIncludeOnlyOnDiskAssets"), false);
+			FProperty *data = find.property(STR("ReturnValue"));
+			if (!data || !find.invoke())
+				return fail(L"GetAssetByObjectPath");
+			Call get(helpers, STR("GetAsset"));
+			FProperty *in = get.property(STR("InAssetData"));
+			if (!in || in->GetSize() != data->GetSize())
+				return fail(L"GetAsset's parameters");
+			std::memcpy(get.data() + in->GetOffset_Internal(), find.data() + data->GetOffset_Internal(), size_t(data->GetSize()));
+			UObject *const *cube = get.invoke() ? get.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!cube || !*cube)
+				return fail(L"the registry has no such asset");
+			log(L"shadows: loaded " + (*cube)->GetFullName());
+			return *cube;
+		}
+
+		UObject *spawn_shadow(UObject *context, const Vec3f &centre)
+		{
+			static UObject *meshActor = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshActor"));
+			UObject *statics = gameplay_statics(), *cube = shadow_cube();
+			if (!meshActor || !statics || !cube)
+				return nullptr;
+			Transform4 t;
+			t.pos[0] = centre.x, t.pos[1] = centre.y, t.pos[2] = centre.z;
+			t.scale[0] = t.scale[1] = t.scale[2] = 0.98f; // a hair inside the block: no acne where it meets HN's surfaces
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), context).set<UObject *>(STR("ActorClass"), meshActor).set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
+			UObject *const *actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!actor || !*actor)
+				return nullptr;
+			if (UObject **mesh = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); mesh && *mesh)
+			{
+				Call(*mesh, STR("SetMobility")).set<uint8_t>(STR("NewMobility"), 2).invoke(); // movable: dynamic shadows
+				Call(*mesh, STR("SetStaticMesh")).set<UObject *>(STR("NewMesh"), cube).invoke();
+				Call(*mesh, STR("SetCollisionEnabled")).set<uint8_t>(STR("NewType"), 0).invoke(); // no collision
+				set_bool_property(*mesh, STR("bCastHiddenShadow"), true);
+				Call(*mesh, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
+			}
+			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
+			Call(*actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
+			Call(*actor, STR("SetActorEnableCollision")).set_bool(STR("bNewActorEnableCollision"), false).invoke();
+			return *actor;
+		}
+
 		void destroy_colliders(bool alive)
 		{
 			if (alive)
+			{
 				for (auto &[key, actor] : g_colliders)
 					Call(actor, STR("K2_DestroyActor")).invoke();
+				for (auto &[key, actor] : g_shadows)
+					Call(actor, STR("K2_DestroyActor")).invoke();
+			}
 			g_colliders.clear();
+			g_shadows.clear();
 			g_probeIgnore.clear();
 		}
 
 		/// {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...]} from Minecraft: solid blocks placed and removed.
-		void apply_blocks(UObject *context, const std::vector<int> &set, const std::vector<int> &clear)
+		void apply_blocks(UObject *context, const std::vector<int> &set, const std::vector<int> &clear, const std::vector<int> &opaque)
 		{
+			// shadows: gone with the block, or when it is no longer a full opaque cube; made for the opaque ones
+			std::unordered_set<unsigned long long> isOpaque;
+			for (size_t i = 0; i + 2 < opaque.size(); i += 3)
+				isOpaque.insert(cell_key(opaque[i], opaque[i + 1], opaque[i + 2]));
+			auto dropShadow = [&](unsigned long long key) {
+				if (auto it = g_shadows.find(key); it != g_shadows.end())
+				{
+					Call(it->second, STR("K2_DestroyActor")).invoke();
+					g_shadows.erase(it);
+				}
+			};
+			for (size_t i = 0; i + 2 < clear.size(); i += 3)
+				dropShadow(cell_key(clear[i], clear[i + 1], clear[i + 2]));
+			for (size_t i = 0; i + 2 < set.size(); i += 3)
+			{
+				const unsigned long long key = cell_key(set[i], set[i + 1], set[i + 2]);
+				if (!isOpaque.count(key))
+					dropShadow(key);
+				else if (!g_shadows.count(key) && g_shadows.size() < kMaxShadows)
+					if (UObject *a = spawn_shadow(context, to_ue(set[i] + 0.5, set[i + 1] + 0.5, set[i + 2] + 0.5)))
+						g_shadows[key] = a;
+			}
+			static size_t lastCount = size_t(-1);
+			if (g_shadows.size() != lastCount)
+			{
+				lastCount = g_shadows.size();
+				log(L"shadows: " + std::to_wstring(g_shadows.size()) + L" of Minecraft's blocks cast HN shadows");
+			}
 			for (size_t i = 0; i + 2 < clear.size(); i += 3)
 			{
 				auto it = g_colliders.find(cell_key(clear[i], clear[i + 1], clear[i + 2]));
@@ -1455,7 +1566,7 @@ namespace nc
 			}
 		}
 
-		std::vector<int> g_pendingSet, g_pendingClear; // block changes from Minecraft, applied on the next tick
+		std::vector<int> g_pendingSet, g_pendingClear, g_pendingOpaque; // block changes from Minecraft, applied on the next tick
 		std::vector<std::string> g_throwRequests;      // tokens Minecraft dropped: HN throws the objects
 		std::string g_heldId, g_heldCls;               // the HN object in Minecraft's selected slot ("" none)
 		bool g_handEmpty = true;                       // Minecraft's main hand holds nothing (only then HN's objects are picked up)
@@ -1512,6 +1623,9 @@ namespace nc
 			{
 				json_ints(m, "set", g_pendingSet);
 				json_ints(m, "clear", g_pendingClear);
+				std::vector<int> opaque;
+				json_ints(m, "opaque", opaque);
+				g_pendingOpaque.insert(g_pendingOpaque.end(), opaque.begin(), opaque.end());
 			}
 			else if (m.find("\"t\":\"mcpos\"") != std::string::npos)
 			{
@@ -2051,6 +2165,7 @@ namespace nc
 		}
 
 		bool g_rightClickHN = false; // the held right click went to HN (its E)
+		DWORD g_hnActionAt = 0;      // when it did: 0.6 s later, what HN holds is logged (a prop its action took)
 		bool g_rightClickCarry = false; // the held right click is a pickup or a placement
 
 
@@ -2104,6 +2219,7 @@ namespace nc
 				g_rightClickHN = g_controlsPawn && looking_at_interactive(g_controlsPawn);
 				if (g_rightClickHN)
 				{
+					g_hnActionAt = GetTickCount(); // what HN ends up holding is checked (carry_tick)
 					++g_injectedE;
 					PostMessageW(g_hnWindow, WM_KEYDOWN, 'E', 0x00120001);
 					g_ws.send("{\"t\":\"swing\"}");
@@ -2706,6 +2822,35 @@ namespace nc
 			return {-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch)};
 		}
 
+		/// What a prop is made of: whether its root may move, how many primitive components it has, its half size (cm).
+		struct PropShape
+		{
+			bool movable = false;
+			int parts = 0;
+			float extent = 0.0f;
+		};
+
+		PropShape prop_shape(UObject *actor, UObject *root)
+		{
+			PropShape out;
+			if (const uint8_t *mobility = root->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility")))
+				out.movable = *mobility == 2; // EComponentMobility::Movable
+			static UObject *primitive = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.PrimitiveComponent"));
+			Call list(actor, STR("GetComponentsByClass"));
+			list.set<UObject *>(STR("ComponentClass"), primitive);
+			struct ObjectArray
+			{
+				UObject **data;
+				int32 num, max;
+			};
+			if (const ObjectArray *a = list.invoke() ? list.param<ObjectArray>(STR("ReturnValue")) : nullptr)
+				out.parts = a->num;
+			Vec3f o, e;
+			if (actor_bounds(actor, o, e))
+				out.extent = std::max({e.x, e.y, e.z});
+			return out;
+		}
+
 		/// The loose object under the crosshair, if it can be carried (else nullptr).
 		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut)
 		{
@@ -2751,21 +2896,21 @@ namespace nc
 			UObject *const *r = root.param<UObject *>(STR("ReturnValue"));
 			if (!r || !*r)
 				return refuse(L"no root component");
-			Call simulating(*r, STR("IsSimulatingPhysics"));
-			simulating.set(STR("BoneName"), NameParam{}).invoke();
-			const uint8_t *loose = simulating.param<uint8_t>(STR("ReturnValue"));
-			if (!loose || !*loose)
-			{
-				Call part(*component, STR("IsSimulatingPhysics"));
-				part.set(STR("BoneName"), NameParam{}).invoke();
-				const uint8_t *partLoose = part.param<uint8_t>(STR("ReturnValue"));
-				return refuse(partLoose && *partLoose ? L"its physics body isn't its root (a loose part of a fixed object)" : L"not a physics object");
-			}
+			// The rule, in this order (each step names why in the log):
+			//  1. a part of a fixed object (a door leaf, a drawer, a switch's lever): HN's action;
+			//  2. a TV or lamp: neither carried nor grabbed (HN's action on it is HN's grab);
+			//  3. one of HN's inventory items (InteractiveComponent + a class chain naming an item or key): HN's pickup;
+			//  4. a loose physics body: ours;
+			//  5. a prop HN would take into its own hotbar: ours. HN keeps many props asleep, not simulating, until they
+			//     are touched, and the TV, BP_Picture_set and BP_Trashcan were refused as "not a physics object" without a
+			//     word, so HN's action took them into HN's hotbar (the 22:57-23:01 session). Such a prop: HN says its
+			//     action applies to it as a whole (OnIsActionComponent yes on its root), its root is movable, it is one
+			//     mesh and at most 70 cm in half size (a sink or a stove has parts or is bigger, and keeps HN's action);
+			//  6. anything else: HN's action.
 			if (hinged_part(*r) || hinged_part(*component))
 				return refuse(L"a door or drawer");
-			// HN's InteractiveComponent is on its story items (keys...: HN's inventory, the story needs them) and on the
-			// props HN's own grab picks up (BP_Radio_apartments: refused for it on 22:22:21, and HN's grab took the
-			// radio). A loose prop with it is ours; one whose class chain names an item is HN's.
+			if (class_contains(*actor, L"TV") || class_contains(*actor, L"Lamp"))
+				return refuse(kNotCarriedNotGrabbed);
 			if (interactive_actor(*actor))
 			{
 				static std::unordered_set<UObject *> logged;
@@ -2780,12 +2925,16 @@ namespace nc
 					class_contains(*actor, L"Key"))
 					return refuse(L"one of HN's inventory items (its class chain names an item or key): HN's pickup");
 			}
-			// TVs, switches and lamps are used, not carried (Act 1's TV is a loose physics object). Not decided by HN's
-			// OnIsActionComponent: it says yes for its loose props too (BP_Video_Recorder, BP_Dining_chair: there its
-			// "action" is its own grab), and excluding those handed every pickup to HN's grab (the 21:31 session).
-			if (class_contains(*actor, L"TV") || class_contains(*actor, L"Switch") || class_contains(*actor, L"Tumbler") ||
-				class_contains(*actor, L"Lamp"))
-				return refuse(kNotCarriedNotGrabbed);
+			Call simulating(*r, STR("IsSimulatingPhysics"));
+			simulating.set(STR("BoneName"), NameParam{}).invoke();
+			const uint8_t *loose = simulating.param<uint8_t>(STR("ReturnValue"));
+			if (!loose || !*loose)
+			{
+				const PropShape shape = prop_shape(*actor, *r);
+				if (!(*component == *r && shape.movable && shape.parts == 1 && shape.extent > 0.0f && shape.extent <= 70.0f &&
+						flat_actionable(*actor, *component) == 1))
+					return refuse(L"not a physics object");
+			}
 			if (bodyOut)
 				*bodyOut = *r;
 			return *actor;
@@ -3200,8 +3349,26 @@ namespace nc
 		}
 
 		/// Every tick while Minecraft drives: the pickup in progress, and the carried object in the hand.
+		float grip_scale(UObject *actor);
+
 		void carry_tick(UObject *pc, UObject *pawn)
 		{
+			// HN's action, 0.6 s on: if HN holds something now, its action took an object into HN's hands or hotbar, which
+			// is what NeighborCraft's pickup should have done: logged with what the eligibility rule looks at
+			if (g_hnActionAt && GetTickCount() - g_hnActionAt > 600)
+			{
+				g_hnActionAt = 0;
+				Call h(pawn, STR("GetHoldingItem"));
+				if (UObject *const *item = h.invoke() ? h.param<UObject *>(STR("ReturnValue")) : nullptr; item && *item)
+				{
+					Call rr(*item, STR("K2_GetRootComponent"));
+					rr.invoke();
+					UObject *const *root = rr.param<UObject *>(STR("ReturnValue"));
+					const PropShape shape = root && *root ? prop_shape(*item, *root) : PropShape{};
+					log(L"carry: HN took " + (*item)->GetName() + L" into its hands after its action (movable " + std::to_wstring(shape.movable) +
+						L", " + std::to_wstring(shape.parts) + L" parts, " + std::to_wstring(int(shape.extent)) + L" cm): NeighborCraft didn't take it");
+				}
+			}
 			// a level change took the hidden objects with it
 			for (auto it = g_carried.begin(); it != g_carried.end();)
 				it = it->second.level != pc ? g_carried.erase(it) : std::next(it);
@@ -3267,10 +3434,14 @@ namespace nc
 			g_shownId = g_heldId;
 			if (first && c->body) // held at the eye, small: no shadow of it on the room (back with release())
 				Call(c->body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
-			// its size fitted to the hand: at most ~18% of the fist's distance across in half (24 cm at Minecraft's
-			// 1.35 blocks, an object Steve's big fist can hold); in front of the camera without the fist, 17 cm
+			// Its size in the hand: every object brought to one visual size, about twice Minecraft's fist (26 cm in half at
+			// the fist's 1.35 m: 19.3% of its distance), times its grip's scale. It was only ever shrunk (to 18%), never
+			// grown: a mug stayed its own size and looked smaller than the fist (the user). Small things grow up to 3x.
+			// Only the copy in the hand: put down or thrown, the object is its own size again (release()).
 			const bool fistKnown = GetTickCount() - g_handAt < 250;
-			const float fit = std::min(1.0f, (fistKnown ? 18.0f * g_handDist : 17.0f) / c->extent);
+			constexpr float kHeldHalf = 0.193f;
+			const float target = (fistKnown ? kHeldHalf * 100.0f * g_handDist : 26.0f) * grip_scale(c->actor);
+			const float fit = std::clamp(target / std::max(c->extent, 1.0f), 0.05f, 3.0f);
 			c->fit = fit;
 			Call(c->actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), false).invoke();
 			if (first)
@@ -3287,6 +3458,7 @@ namespace nc
 		{
 			std::wstring match;
 			float fwd = 0.0f, right = 0.0f, up = 0.0f, pitch = 0.0f, yaw = 0.0f, roll = 0.0f;
+			float scale = 1.0f; // times the common held size
 		};
 
 		const std::vector<Grip> &grips()
@@ -3306,6 +3478,8 @@ namespace nc
 					Grip g;
 					if (in >> g.match >> g.fwd >> g.right >> g.up >> g.pitch >> g.yaw >> g.roll)
 					{
+						if (float sc; in >> sc && sc > 0.05f)
+							g.scale = sc;
 						if (g.match == L"*")
 							g.match.clear();
 						list.push_back(g);
@@ -3324,6 +3498,11 @@ namespace nc
 				if (g.match.empty() || class_contains(actor, g.match.c_str()))
 					return g;
 			return grips().back();
+		}
+
+		float grip_scale(UObject *actor)
+		{
+			return grip_for(actor).scale;
 		}
 
 		// Unreal's rotator <-> quaternion (x, y, z, w), degrees
@@ -4212,9 +4391,10 @@ namespace nc
 		}
 		if (!g_pendingSet.empty() || !g_pendingClear.empty())
 		{
-			apply_blocks(pawn, g_pendingSet, g_pendingClear);
+			apply_blocks(pawn, g_pendingSet, g_pendingClear, g_pendingOpaque);
 			g_pendingSet.clear();
 			g_pendingClear.clear();
+			g_pendingOpaque.clear();
 		}
 
 		Vec3f p;

@@ -411,3 +411,37 @@ Evidence: the 22:41 session (`UE4SS.log`: `carry: 360 check` x4 "continuous", 12
   holds whatever Skyrim surface is behind the block") - done now in host_light_near; (3) blocks drawn in the host's
   own frame with its depth, normals and motion vectors (Skyrim's TAA and post see them as its own) - for HN the native
   route is ProceduralMeshComponent with an HN material, which the probe prepares. Nothing copied.
+
+## Held size, props into HN's hotbar, shadows of Minecraft's blocks (2026-10-11)
+Evidence: the 22:57-23:01 session (`UE4SS.log`: `mesh path:` lines, `right click: BP_TV_apartments3 / BP_Picture_set_36 /
+BP_Trashcan9 ... HN's action`, no `class chain` lines; ReShade.log: NeighborCraft.fx compiled), tests below.
+- Props into HN's own hotbar: the TV, BP_Picture_set_36 and BP_Trashcan9 went to HN's action (HN's take into its
+  hotbar). None reached the class-chain or TV rules: they were refused first, silently, as "not a physics object",
+  because HN keeps many props asleep (not simulating) until they are touched. pickup_target's order now: (1) part of a
+  fixed object -> HN's action; (2) TV/lamp class -> nothing (no carry, no HN action); (3) HN's inventory item ->
+  HN's pickup; (4) a simulating body -> ours; (5) a prop HN would take: OnIsActionComponent yes on its root, root
+  movable, one primitive component, <= 70 cm half size -> ours (a sink or stove has parts or is bigger: HN's action);
+  (6) else HN's action. After every HN action, `carry: HN took <actor> into its hands ...` (0.6 s later, with
+  movable/parts/size) names any prop the rule still misses. **Not run in game yet.**
+- Held size: objects were only ever shrunk to 18% of the fist's distance in half size, never grown: a mug stayed
+  smaller than Minecraft's fist (12.5 cm in half at that distance). Now every object is brought to one visual size,
+  19.3% of the fist's distance in half (26 cm at 1.35 m, about twice the fist), times the grip's new `scale` column
+  (NeighborCraft_grips.txt), growing small things up to 3x. Scaled before its grip point is placed (it stays on the
+  fist), only the copy in the hand (release() restores its scale; collision and mass untouched). Near the eye that is
+  ~5 cm in half at 25 cm: its near side stays ~20 cm from the eye, well outside HN's ~10 cm near plane.
+- Shadows of Minecraft's blocks in HN's lighting: each full opaque block Minecraft reports (`blocks` now has
+  `opaque`: isSolidRender && isCollisionShapeFullBlock) gets a hidden stand-in in HN: a StaticMeshActor with
+  Unreal's 1 m cube (/Engine/BasicShapes/Cube, shipped unpacked with HN; found loaded or through the asset registry:
+  AssetRegistryHelpers.GetAssetRegistry -> GetAssetByObjectPath -> GetAsset), 98% size, movable, no collision,
+  hidden with bCastHiddenShadow: HN's lights and shadow maps shadow it as their own, so direction, softness and
+  intensity are HN's. Destroyed with the block or when it stops being opaque, and with the colliders on a level
+  change. Held objects cast none (off while held); placed/thrown HN objects have their own. Not shadowed this way:
+  glass, slabs, leaves, torches (not full opaque cubes), Minecraft entities and dropped items (only the compositor's
+  screen-space contact shadow), and Minecraft blocks *receiving* HN's shadows (they are a picture: only relit).
+  Minecraft side tested (`opaque` = stone and bricks; not glass, slab, leaves, torch); **HN side not run in game**.
+- SkyCraft (chasmlol/SkyCraft, MIT) for shadows, read: skse/src/WorldRender.cpp DepthVS / ShadowPS (Minecraft's blocks
+  drawn depth-only into Skyrim's sun shadow map, cutout texels discarded), SunShadowRenderHook (the vtable hook on
+  Skyrim's sun shadow rendering), SkyrimSunShadow (blocks receiving Skyrim's cascades). Same goal, engine-native way
+  here: Unreal puts any hidden-shadow-casting primitive into every light's shadow pass, no render hook needed.
+- Tests: handtest OK, itemtest OK, turntest STEADY (3.1 deg max; one run had 0 positions because the test switched
+  slot and picked up in the same instant, leaving the token in another slot: a test sequencing artefact).

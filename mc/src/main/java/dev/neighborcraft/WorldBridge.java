@@ -24,8 +24,8 @@ public final class WorldBridge {
 	private static volatile MinecraftServer server;
 	/** Barriers we placed (so a reset only removes ours, never the player's builds). */
 	private static final Set<BlockPos> barriers = ConcurrentHashMap.newKeySet();
-	/** Block changes this tick (server thread only): true = now solid, false = gone. Sent at the end of the tick. */
-	private static final Map<BlockPos, Boolean> changes = new LinkedHashMap<>();
+	/** Block changes this tick (server thread only): 0 gone, 1 solid, 2 solid full opaque cube. Sent at the end of the tick. */
+	private static final Map<BlockPos, Integer> changes = new LinkedHashMap<>();
 	/** While placing or removing the host's own collision: those changes aren't news to the host (server thread only). */
 	private static boolean placingGround;
 
@@ -288,11 +288,12 @@ public final class WorldBridge {
 		}
 
 		if (!placingGround) {
-			changes.put(pos.immutable(), solidForHost(level, pos, state));
+			// 0 nothing for HN, 1 solid (HN's NPCs collide with it), 2 solid and a full opaque cube (it also casts HN's shadow)
+			changes.put(pos.immutable(), !solidForHost(level, pos, state) ? 0 : state.isSolidRender() && state.isCollisionShapeFullBlock(level, pos) ? 2 : 1);
 		}
 	}
 
-	/** End of each server tick: {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...]}. */
+	/** End of each server tick: {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...],"opaque":[x,y,z,...]} (opaque: the set ones that are full opaque cubes). */
 	static void flush(final MinecraftServer s) {
 		if (changes.isEmpty()) {
 			return;
@@ -300,14 +301,16 @@ public final class WorldBridge {
 
 		StringBuilder set = new StringBuilder();
 		StringBuilder clear = new StringBuilder();
-		for (Map.Entry<BlockPos, Boolean> e : changes.entrySet()) {
-			StringBuilder b = e.getValue() ? set : clear;
+		StringBuilder opaque = new StringBuilder();
+		for (Map.Entry<BlockPos, Integer> e : changes.entrySet()) {
 			BlockPos p = e.getKey();
-			b.append(b.isEmpty() ? "" : ",").append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ());
+			for (StringBuilder b : e.getValue() == 0 ? new StringBuilder[] {clear} : e.getValue() == 2 ? new StringBuilder[] {set, opaque} : new StringBuilder[] {set}) {
+				b.append(b.isEmpty() ? "" : ",").append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ());
+			}
 		}
 
 		changes.clear();
-		Passthrough.events.accept("{\"t\":\"blocks\",\"set\":[" + set + "],\"clear\":[" + clear + "]}");
+		Passthrough.events.accept("{\"t\":\"blocks\",\"set\":[" + set + "],\"clear\":[" + clear + "],\"opaque\":[" + opaque + "]}");
 	}
 
 	/** Every solid block within `radius` of the player, as one "blocks" message (the host's colliders start from this). */
@@ -337,7 +340,7 @@ public final class WorldBridge {
 
 						BlockState state = level.getBlockState(p);
 						if (solidForHost(level, p, state)) {
-							changes.put(p.immutable(), true);
+							changes.put(p.immutable(), state.isSolidRender() && state.isCollisionShapeFullBlock(level, p) ? 2 : 1);
 							found++;
 						}
 					}

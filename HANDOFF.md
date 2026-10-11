@@ -217,6 +217,12 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+00000. **Play-test 2026-10-11** (P0): right click/hold the trash can, picture frames, TV, a sink, the stove, doors,
+       switches: props ours (NeighborCraft hotbar icon), TV nothing, fixtures HN's action; any `carry: HN took ...`
+       line names a prop the rule misses (with its movable/parts/size). Held items about twice the fist (tune the
+       `scale` column). Place stone/brick blocks near a lamp or window: `shadows: loaded /Engine/BasicShapes/Cube...`
+       and `shadows: N of Minecraft's blocks cast HN shadows`, and visible shadows on HN's floor and walls.
+
 0000. **Play-test night 5** (P0): ReShade.log must say NeighborCraft.fx compiled; hold objects and turn full circles,
       look up/down (`carry: hand ok ... fist Minecraft's (~115 ~66 ~-28 cm)`, never "default" for long, never FAR);
       right click the TV (nothing happens: no grab), doors/cabinets/switches (HN's action), props (ours); blocks in
@@ -339,6 +345,8 @@ The working tree was clean at the time of writing. Nothing is running.
 5. Remaining P3 items, then rendering work.
 
 ## 12. Verification status of this handoff
+2026-10-11: opaque classification, handtest, itemtest, turntest pass; HN DLL `a5f38254...` and grips installed; pickup rule, held size and shadow proxies not run in game.
+
 Night 5: turntest STEADY, relight_check, handtest/itemtest unchanged; HN DLL + shader installed (md5 checked); nothing of night 5 run in game.
 
 Night 4: rendertest before/after, itemtest, handtest, real-icon hotbar screenshot, drive tests pass; HN DLL md5 `baaea859...` installed; held-object attachment, 360 check and radio rule not run in game.
@@ -397,3 +405,11 @@ Earlier:
   vertex cutout/translucent) and its block atlas (PNG); HN loads the atlas (ImportFileAsTexture2D), makes a dynamic
   instance with it, and builds ProceduralMeshComponent sections at the blocks' places (HN's depth, lighting, shadows
   and TAA then apply natively; the picture path stays for the hand, GUI and entities).
+
+## 16. 2026-10-11: files changed
+- `hn/NeighborCraftMod/src/bridge.cpp`: pickup_target rule order + PropShape/prop_shape; `carry: HN took ...`
+  diagnostic; held size (kHeldHalf, grip scale); shadow stand-ins (shadow_cube, spawn_shadow, g_shadows,
+  apply_blocks with `opaque`, destroy_colliders).
+- `hn/NeighborCraft_grips.txt`: `scale` column.
+- `mc/src/main/java/dev/neighborcraft/WorldBridge.java`: block changes 0/1/2, `opaque` list.
+- MODLOG, this file.
