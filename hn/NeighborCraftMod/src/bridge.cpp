@@ -1149,7 +1149,7 @@ namespace nc
 			FWeakObjectPtr component;   // its CaptureComponent2D
 			FWeakObjectPtr target;      // its TextureRenderTarget2D
 			bool hidden = false;        // the cube is in the player controller's HiddenActors
-			DWORD nextLog = 0, nextExport = 0;
+			DWORD nextLog = 0, nextExport = 0, nextRead = 0;
 		} g_cap;
 		constexpr int kCapW = 480, kCapH = 270; // a size nothing else in HN uses: the compositor could find it by it
 
@@ -1173,6 +1173,20 @@ namespace nc
 
 		bool capture_test_on()
 		{
+			// read again every 5 s: "show" and "hide" switch live (A/B in one session)
+			if (g_cap.checked && g_cap.on && GetTickCount() > g_cap.nextRead)
+			{
+				g_cap.nextRead = GetTickCount() + 5000;
+				std::ifstream f(module_dir() + L"neighborcraft_capture_test.txt");
+				std::string word;
+				if (f)
+					f >> word;
+				if ((word == "hide") != g_cap.hide)
+				{
+					g_cap.hide = word == "hide";
+					log(std::wstring(L"capture test: now ") + (g_cap.hide ? L"hiding" : L"showing") + L" the test cube");
+				}
+			}
 			if (!g_cap.checked)
 			{
 				g_cap.checked = true;
@@ -1218,11 +1232,32 @@ namespace nc
 
 		void capture_test_cube(UObject *a)
 		{
-			if (capture_test_on() && !g_cap.cube.Get())
+			// the newest block placed (the first one spawned was an old block synced in at load, far off)
+			if (capture_test_on())
 			{
 				g_cap.cube = a;
+				g_cap.hidden = false;
 				log(L"capture test: the test cube is " + a->GetName());
 			}
+		}
+
+		/// Takes `actor` out of the controller's HiddenActors again.
+		void unhide_from_player(UObject *pc, UObject *actor)
+		{
+			struct RawArray
+			{
+				UObject **data;
+				int32_t num, max;
+			};
+			auto *a = pc->GetValuePtrByPropertyNameInChain<RawArray>(STR("HiddenActors"));
+			if (!a)
+				return;
+			for (int32_t i = 0; i < a->num; ++i)
+				if (a->data[i] == actor)
+				{
+					a->data[i] = a->data[--a->num];
+					return;
+				}
 		}
 
 		void capture_test_tick(UObject *pc, UObject *pawn)
@@ -1231,8 +1266,10 @@ namespace nc
 				return;
 			if (g_cap.level != level_key(pc))
 			{
+				const FWeakObjectPtr cube = g_cap.cube; // a block placed before the first tick here is still the test cube
 				g_cap = CaptureTest{true, true, g_cap.hide};
 				g_cap.level = level_key(pc);
+				g_cap.cube = cube;
 			}
 			UObject *cube = g_cap.cube.Get();
 			if (!cube)
@@ -1262,7 +1299,7 @@ namespace nc
 				Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
 				UObject **component = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("CaptureComponent2D"));
 				Call make(rendering, STR("CreateRenderTarget2D"));
-				make.set<UObject *>(STR("WorldContextObject"), pawn).set<int32_t>(STR("Width"), kCapW).set<int32_t>(STR("Height"), kCapH).set<uint8_t>(STR("Format"), 2); // RTF_RGBA8
+				make.set<UObject *>(STR("WorldContextObject"), pawn).set<int32_t>(STR("Width"), kCapW).set<int32_t>(STR("Height"), kCapH).set<uint8_t>(STR("Format"), 5); // RTF_RGBA16f (4.20 exports float targets only)
 				UObject *const *target = make.invoke() ? make.param<UObject *>(STR("ReturnValue")) : nullptr;
 				if (!component || !*component || !target || !*target)
 				{
@@ -1297,6 +1334,12 @@ namespace nc
 				g_cap.hidden = hide_from_player(pc, cube);
 				log(std::wstring(L"capture test: the test cube ") + (g_cap.hidden ? L"is in the player controller's HiddenActors" : L"couldn't be hidden"));
 			}
+			else if (!g_cap.hide && g_cap.hidden)
+			{
+				unhide_from_player(pc, cube);
+				g_cap.hidden = false;
+				log(L"capture test: the test cube is shown to the player again");
+			}
 			// the capture follows the camera HN renders with
 			Camera cam;
 			if (!read_camera(pc, cam))
@@ -1309,8 +1352,10 @@ namespace nc
 			if (GetTickCount() > g_cap.nextLog)
 			{
 				g_cap.nextLog = GetTickCount() + 2000;
-				Call where(cube, STR("K2_GetActorLocation"));
-				const Vec3f *c = where.invoke() ? where.param<Vec3f>(STR("ReturnValue")) : nullptr;
+				Vec3f at;
+				const Vec3f *c = actor_location(cube, at) ? &at : nullptr;
+				if (!c)
+					log(L"capture test: the test cube's position couldn't be read");
 				if (c)
 				{
 					const float d2r = 3.14159265f / 180.0f, cp = std::cos(cam.rot.pitch * d2r), sp = std::sin(cam.rot.pitch * d2r);
@@ -1341,9 +1386,9 @@ namespace nc
 				g_cap.nextExport = GetTickCount() + 30000;
 				static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
 				static int n = 0;
-				const std::wstring name = L"capture_" + std::to_wstring(n++);
+				const std::wstring name = L"capture_" + std::to_wstring(n++) + L".hdr";
 				Call(rendering, STR("ExportRenderTarget")).set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("TextureRenderTarget"), target)
-					.set(STR("FilePath"), FString(module_dir().c_str())).set(STR("Filename"), FString(name.c_str())).invoke();
+					.set(STR("FilePath"), FString(module_dir().c_str())).set(STR("FileName"), FString(name.c_str())).invoke(); // "FileName", as the icon export
 				log(L"capture test: exported " + module_dir() + name);
 			}
 		}
