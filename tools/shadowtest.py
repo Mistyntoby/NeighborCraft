@@ -112,6 +112,16 @@ async def main():
         bare = len(near_steve(boxes()[0]))
         print(f"5. a held sword: {with_sword - bare} boxes for it ({with_sword} at Steve, {bare} bare-handed)")
         ok &= with_sword - bare >= 4
+        # 6. the model's boxes carry the skin's colours (HN draws them in those): one per box, the model's set, several
+        #    different ones (hair, shirt, trousers)
+        m = state["last"] or {}
+        kinds, colours = m.get("k", []), m.get("c", [])
+        model = [c for k, c in zip(kinds, colours) if k in (1, 2)]
+        coloured = [c for c in model if c >= 0]
+        empty = [c for c in model if c == -2]  # outer layers the skin leaves transparent: not drawn by HN
+        print(f"6. skin colours: {len(colours)} for {len(kinds)} boxes; model boxes {len(model)}, coloured {len(coloured)}, distinct "
+              f"{len(set(coloured))}, empty layers {len(empty)}: {', '.join(f'#{c:06x}' for c in sorted(set(coloured))[:8])}")
+        ok &= len(colours) == len(kinds) and len(model) > 0 and len(coloured) + len(empty) == len(model) and len(coloured) > 0 and len(set(coloured)) >= 3
         task.cancel()
         print()
         print("results:", "OK" if ok else "UNEXPECTED")

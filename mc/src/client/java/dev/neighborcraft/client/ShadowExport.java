@@ -80,7 +80,8 @@ public final class ShadowExport {
 	private static final class Out {
 		final StringBuilder b = new StringBuilder(16384);
 		final StringBuilder kinds = new StringBuilder(512);
-		/** Per box: its colour (0xRRGGBB, a model cube's average over its part of the skin), or -1 (none: HN's grey). */
+		/** Per box: its colour (0xRRGGBB, a model cube's average over its part of the skin), -1 (none: HN's grey), or -2
+		 * (a cube the skin leaves fully transparent: Minecraft draws nothing there, HN mustn't either). */
 		final StringBuilder colours = new StringBuilder(512);
 		/** The skin of the model being exported (null: none readable), and the colour of the next box. */
 		NativeImage skin;
@@ -341,7 +342,9 @@ public final class ShadowExport {
 				}
 			}
 
-			return n == 0 ? -1 : (int) (r / n) << 16 | (int) (g / n) << 8 | (int) (b / n);
+			// no opaque pixel: an outer layer (hat, jacket, sleeves, trousers) this skin leaves empty: its stand-in was a
+			// grey shell around the body, bigger than Steve as Minecraft draws him
+			return n == 0 ? -2 : (int) (r / n) << 16 | (int) (g / n) << 8 | (int) (b / n);
 		});
 	}
 

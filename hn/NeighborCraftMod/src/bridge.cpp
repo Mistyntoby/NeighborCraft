@@ -1415,7 +1415,9 @@ namespace nc
 				// person Minecraft doesn't draw him, and HN's grey boxes would be what one sees looking down
 				const int kind = i < g_shadowKinds.size() ? g_shadowKinds[i] : 0;
 				const int colour = i < g_shadowColours.size() ? g_shadowColours[i] : -1;
-				const bool draw = (kind == 1 || (kind == 2 && !g_mcFirstPerson)) && receiver_material(pawn);
+				// -2: a cube the skin leaves transparent (an empty outer layer): Minecraft draws nothing there, so HN
+				// doesn't draw its stand-in either (it still casts)
+				const bool draw = (kind == 1 || (kind == 2 && !g_mcFirstPerson)) && colour != -2 && receiver_material(pawn);
 				const int receive = draw ? 1 + (colour >= 0 ? (colour & 0xFFFFFF) : 0x1000000) : 0;
 				if (P.receiving[used] != receive)
 				{

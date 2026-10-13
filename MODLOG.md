@@ -660,3 +660,7 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   tell"): ShadowExport sends "c", per box the average of the opaque skin pixels its cube's faces use (skin read once
   from the resources; a downloaded skin stays grey); HN draws each model box's receiver in that colour at the grey's
   brightness (receiver_material(context, rgb), as the blocks). Builds; not yet run.
+- [test] shadowtest check 6 (new): 13 colours for 13 boxes; Steve's 12 model boxes: 8 coloured (6 distinct: teal
+  shirt #06b4b4, trousers #3f3680, hair #513621, ...), 4 cubes the skin leaves fully transparent (empty outer
+  layers). Those had been drawn by HN as grey shells around Steve, bigger than him as Minecraft draws him: now sent as
+  -2 and not drawn (they still cast). shadowtest: all 6 OK. Installed; not yet run in game.
