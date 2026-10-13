@@ -1153,6 +1153,24 @@ namespace nc
 		} g_cap;
 		constexpr int kCapW = 480, kCapH = 270; // a size nothing else in HN uses: the compositor could find it by it
 
+		/// A field of the capture component: by name, else at its offset in this build (CXXHeaderDump, Engine.hpp
+		/// USceneCaptureComponent(2D)): the name lookup came back empty for FOVAngle in game, and writing through it
+		/// crashed HN (19:20:57, bridge.cpp capture_test_tick).
+		template <typename T>
+		T *capture_field(UObject *component, const TCHAR *name, size_t offset)
+		{
+			if (!component)
+				return nullptr;
+			if (T *p = component->GetValuePtrByPropertyNameInChain<T>(name))
+				return p;
+			if (!is_a(component, L"SceneCaptureComponent2D"))
+				return nullptr;
+			static std::unordered_set<std::wstring> logged;
+			if (logged.insert(name).second)
+				log(std::wstring(L"capture test: ") + name + L" not found by name: at its offset " + std::to_wstring(offset));
+			return reinterpret_cast<T *>(reinterpret_cast<uint8_t *>(component) + offset);
+		}
+
 		bool capture_test_on()
 		{
 			if (!g_cap.checked)
@@ -1252,9 +1270,18 @@ namespace nc
 					g_cap.on = false;
 					return;
 				}
-				*(*component)->GetValuePtrByPropertyNameInChain<UObject *>(STR("TextureTarget")) = *target;
-				*(*component)->GetValuePtrByPropertyNameInChain<uint8_t>(STR("CaptureSource")) = 2; // SCS_FinalColorLDR: as the screen
-				*(*component)->GetValuePtrByPropertyNameInChain<bool>(STR("bCaptureEveryFrame")) = true;
+				UObject **texture = capture_field<UObject *>(*component, STR("TextureTarget"), 0x2E0);
+				uint8_t *source = capture_field<uint8_t>(*component, STR("CaptureSource"), 0x2E8);
+				bool *everyFrame = capture_field<bool>(*component, STR("bCaptureEveryFrame"), 0x280);
+				if (!texture || !source || !everyFrame)
+				{
+					log(L"capture test: the capture component's fields weren't found: off");
+					g_cap.on = false;
+					return;
+				}
+				*texture = *target;
+				*source = 2; // SCS_FinalColorLDR: as the screen
+				*everyFrame = true;
 				g_cap.actor = *actor;
 				g_cap.component = *component;
 				g_cap.target = *target;
@@ -1276,7 +1303,8 @@ namespace nc
 				return;
 			Call(actor, STR("K2_SetActorLocationAndRotation")).set(STR("NewLocation"), cam.loc).set(STR("NewRotation"), cam.rot)
 				.set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
-			*component->GetValuePtrByPropertyNameInChain<float>(STR("FOVAngle")) = cam.hfov;
+			if (float *fov = capture_field<float>(component, STR("FOVAngle"), 0x2D4))
+				*fov = cam.hfov;
 			// diagnostics: the capture's pixel at the cube's centre, every 2 s; the whole capture as a file every 30 s
 			if (GetTickCount() > g_cap.nextLog)
 			{
