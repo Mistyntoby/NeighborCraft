@@ -217,6 +217,11 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+00000000. **Play-test 2026-10-13** (P0): blocks and Steve in a dark room (the nightmare corridor) should no longer be
+         daylight bright (shader surround_cap, MODLOG 2026-10-13); check blocks in shade on dark ground aren't too dark.
+         Next: the user's seven-task list (doors, held-item use + Act 1 car keys, performance, lamp, torch light,
+         block tops).
+
 0000000. **Open (2026-10-11 night)**:
         1. Shadows on NeighborCraft's own blocks (receiving): blocks are Minecraft's picture; HN's shadows fall on
            HN's surfaces only. The compositor's local light strength already darkens blocks in HN's shade.
