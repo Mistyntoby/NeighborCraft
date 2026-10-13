@@ -613,3 +613,7 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   from the measurements: outdoor shade cap ~1.2 (no change, gain 0.71), the corridor ~0.2 (cobblestone ~0.1, was 0.31).
 - [game] ReShade compiled it live (ReShade.log 18:17:45), composite running. Not yet seen in a dark room.
   Possible side effect: a block in shade on very dark ground could come out darker than before.
+- Same day, the user: "out in the sunlight im so dark" (screenshot: Steve's back ~1/4 of its brightness on a sunlit
+  road, his long shadow beside him). The average of the surroundings took in his own shadow; now the brightest
+  surrounding HN surface sets the limit (SurroundReference 0.3): one lit surface near means light is there. Compiled
+  live (ReShade.log 18:21:33); not yet seen in game.

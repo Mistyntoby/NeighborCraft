@@ -91,7 +91,7 @@ uniform float ReceiverReference < ui_type = "drag"; ui_min = 0.05; ui_max = 1.0;
 uniform float SunContrast < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Sun on Minecraft's faces";
 	ui_tooltip = "How much brighter Minecraft's faces turned to Hello Neighbor's sun are than those turned away."; > = 0.75;
 uniform float SurroundReference < ui_type = "drag"; ui_min = 0.05; ui_max = 1.0; ui_step = 0.01; ui_label = "Surroundings brightness = full light";
-	ui_tooltip = "Minecraft's light is never more than HN's own surfaces around it allow: their brightness / this (0 = off)."; > = 0.25;
+	ui_tooltip = "Minecraft's light is never more than HN's own surfaces around it allow: the brightest one / this (0 = off)."; > = 0.3;
 
 // The composited world (Hello Neighbor + Minecraft, no overlay) and, per pixel: Minecraft's coverage, its depth and Hello Neighbor's.
 texture CompositeTex { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA8; };
@@ -160,7 +160,10 @@ float surround_cap(float2 uv, float zm)
 	if (zm < 0.0 || SurroundReference <= 0.0)
 		return 1e3;
 	const float r = clamp(1.2 / (max(zm, 0.3) * 2.0 * WarpTan.x), 0.02, 0.35);
-	float lit = 0.0, seen = 0.0;
+	// the brightest of them, not their average: Steve's (or a block's) own shadow covers much of the ground beside him in a
+	// low sun, and the average put him in the dark in full sunlight (the user, 2026-10-13); one lit surface near means
+	// light is there, and only where everything around is dark does the limit bite
+	float brightest = 0.0, seen = 0.0;
 	[unroll] for (int i = 0; i < 12; ++i)
 	{
 		const float a = i * 2.39996 + 0.7;
@@ -168,11 +171,12 @@ float surround_cap(float2 uv, float zm)
 		const float2 t = uv + float2(cos(a) * BUFFER_HEIGHT * BUFFER_RCP_WIDTH, sin(a)) * rr;
 		const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 0)).x);
 		const float w = exp(-abs(zt - zm) / (0.5 + 0.1 * zm));
-		const float2 s = tex2Dlod(sHostSurround, float4(t, 0, 1.0)).xy;
-		lit += s.x * w;
+		const float2 s = tex2Dlod(sHostSurround, float4(t, 0, 2.0)).xy;
+		if (s.y > 0.25)
+			brightest = max(brightest, s.x / s.y * saturate(w * 2.0));
 		seen += s.y * w;
 	}
-	const float cap = lit / max(seen, 1e-4) / SurroundReference;
+	const float cap = brightest / SurroundReference;
 	return lerp(1e3, cap, saturate(seen / 2.0));
 }
 
