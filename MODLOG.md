@@ -664,3 +664,13 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   shirt #06b4b4, trousers #3f3680, hair #513621, ...), 4 cubes the skin leaves fully transparent (empty outer
   layers). Those had been drawn by HN as grey shells around Steve, bigger than him as Minecraft draws him: now sent as
   -2 and not drawn (they still cast). shadowtest: all 6 OK. Installed; not yet run in game.
+- Steve's trail on camera turns (the user) and "make sure fps is fixed": Minecraft rendered at 120 fps (framerateLimit
+  120, vsync off) against HN's steady 60 (frames: 16.7 ms average), so two Minecraft frames per HN frame; the log
+  ("newest boxes of Minecraft frame N, the picture shown is frame M") showed the stand-in poses 2-3 Minecraft frames
+  ahead of the picture. Now: HN reports its rate every 5 s ("hostfps"), Minecraft sets its limit to it (60 here);
+  the stand-ins are posed from the frame the next present will show (last shown + Minecraft frames per HN frame),
+  not the last shown (the earlier attempt, two Minecraft frames behind: the "clone"). Builds; not yet run.
+- Verified in game while driving (19:20-19:37): the heartbeat (HN crashed 19:20:57 in the capture prototype; Minecraft
+  paused 19:20:59 and quit 19:21:37, no java left), the picture kept under the pause menu (blocks visible behind it),
+  "levels: 6 loaded" (the level list for the nightmare-crash fix is readable). The scene capture (480x270, every
+  frame) cost nothing measurable: 16.7 ms average with and without it.

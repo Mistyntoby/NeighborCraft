@@ -196,6 +196,15 @@ final class ClientInput {
 						message -> dev.neighborcraft.Passthrough.LOG.info("screenshot: {}", message.getString()));
 				}
 			}
+			case "hostfps" -> {
+				// Minecraft renders at Hello Neighbor's rate (rounded up to the option's steps of 10): faster, it drew frames
+				// HN never showed, and the picture HN showed was several of its frames behind (Steve's trail on turns)
+				int want = Math.clamp((int) Math.ceil(m.get("v").getAsDouble() / 10.0) * 10, 30, 240);
+				if (minecraft.options.framerateLimit().get() != want) {
+					dev.neighborcraft.Passthrough.LOG.info("frame rate limit {} -> {} (Hello Neighbor's rate)", minecraft.options.framerateLimit().get(), want);
+					minecraft.options.framerateLimit().set(want);
+				}
+			}
 			case "swing" -> {
 				// the player used one of HN's objects (a door): the hand swings as when using a block in Minecraft
 				if (player != null) {

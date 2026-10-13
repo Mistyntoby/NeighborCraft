@@ -616,20 +616,38 @@ namespace nc
 		{
 			if (g_shadowFrames.empty())
 				return;
-			// the newest, as before: posing from the shown frame's message (by frame number) made it worse in game (the
-			// user: "a clone of me in white copying my exact moves"); how far the newest runs ahead of the picture is
-			// logged to find out why before trying again
+			// the frame the picture will show at the next present: the one shown last plus Minecraft's frames per HN frame.
+			// The first attempt took the one shown last, which with Minecraft at 120 fps against HN's 60 was two of its
+			// frames old by the present (the user: "a clone of me in white copying my exact moves"); the newest instead
+			// ran 2-3 frames ahead of the picture (log: "most ahead 3"; Steve's trail on turns)
 			const ShadowFrame *pick = &g_shadowFrames.back();
 			static DWORD nextLog = 0;
-			static long long most = 0;
+			static long long most = 0, lastNewest = -1;
+			static double perHnFrame = 1.0;
 			const long long shown = compositor::shown_frame();
+			if (pick->frame >= 0)
+			{
+				if (lastNewest >= 0 && pick->frame >= lastNewest && pick->frame - lastNewest < 10)
+					perHnFrame += (double(pick->frame - lastNewest) - perHnFrame) * 0.05;
+				lastNewest = pick->frame;
+			}
 			if (shown >= 0 && pick->frame >= 0)
+			{
 				most = std::max(most, pick->frame - shown);
+				const long long target = shown + std::max(1LL, (long long)std::llround(perHnFrame));
+				for (auto it = g_shadowFrames.rbegin(); it != g_shadowFrames.rend(); ++it)
+				{
+					pick = &*it;
+					if (it->frame <= target)
+						break;
+				}
+			}
 			if (GetTickCount() > nextLog)
 			{
 				nextLog = GetTickCount() + 5000;
-				log(L"shadows: newest boxes of Minecraft frame " + std::to_wstring(pick->frame) + L", the picture shown is frame " +
-					std::to_wstring(shown) + L" (most ahead in 5 s: " + std::to_wstring(most) + L")");
+				log(L"shadows: posed from Minecraft frame " + std::to_wstring(pick->frame) + L", newest " + std::to_wstring(g_shadowFrames.back().frame) +
+					L", the picture shown is frame " + std::to_wstring(shown) + L" (most ahead in 5 s: " + std::to_wstring(most) + L"; " +
+					std::to_wstring(perHnFrame).substr(0, 4) + L" Minecraft frames per HN frame)");
 				most = 0;
 			}
 			g_shadowBoxes = pick->boxes;
@@ -6136,6 +6154,9 @@ namespace nc
 				swprintf(text, 256, L"frames: %d in 5 s, average %.1f ms, worst %.1f ms, %d over 50 ms; world probe average %.2f ms, worst %.1f ms",
 					f.frames, f.frameSum / f.frames, f.frameMax, f.hitches, f.probeSum / f.frames, f.probeMax);
 				log(text);
+				// Minecraft renders at HN's rate (PassthroughClient): at 120 against HN's 60 it drew two frames per HN frame,
+				// and the picture HN showed was 2-3 of its frames behind the newest stand-in poses (Steve's trail on turns)
+				sendf("{\"t\":\"hostfps\",\"v\":%.1f}", 1000.0 / (f.frameSum / f.frames));
 			}
 			const auto next = now + std::chrono::seconds(5);
 			f = FrameStats{};

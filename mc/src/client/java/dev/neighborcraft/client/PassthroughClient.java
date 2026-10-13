@@ -192,8 +192,8 @@ public class PassthroughClient implements ClientModInitializer {
 		options.getSoundSourceOptionInstance(SoundSource.MUSIC).set(0.0);
 		// vanilla: no auto-jump (HN's stairs arrive at their real heights, Minecraft's 0.6 step-up climbs them)
 		options.autoJump().set(false);
-		// the host shows ~60-120 fps: rendering faster only competes with it for the GPU
-		options.framerateLimit().set(120);
+		// until Hello Neighbor reports its rate ("hostfps", ClientInput): then that
+		options.framerateLimit().set(60);
 		// Minecraft draws only the player's own blocks here (HN's world is invisible host blocks), and every chunk in
 		// view is made after HN moves its player far (a level's start): at 16, ~1100 chunks kept the server seconds
 		// behind while HN's world was due under Steve. 8 chunks (128 blocks) is ~290.
