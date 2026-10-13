@@ -21,6 +21,7 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/FString.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
+#include <Unreal/UObjectArray.hpp>
 #include <Unreal/FMemory.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -227,6 +228,27 @@ namespace nc
 					out.push_back(o);
 			return out;
 		}
+
+		/// An engine object that may be destroyed (a streamed level's light, a stand-in): the pointer and its slot in the
+		/// global object array; Get() gives it only while that slot still holds this very object. In game UE4SS's
+		/// FWeakObjectPtr gave objects calls failed on (the capture prototype's test cube, 2026-10-13: "position couldn't
+		/// be read"), so this checks the slot itself (the object array is what UE4SS's FindAllOf walks, and that works).
+		struct WeakRef
+		{
+			UObject *ptr = nullptr;
+			int32_t index = -1;
+			WeakRef() = default;
+			WeakRef(UObject *o) : ptr(o), index(o ? o->GetInternalIndex() : -1) {}
+			UObject *Get() const
+			{
+				if (!ptr || index < 0)
+					return nullptr;
+				FUObjectItem *item = UObjectArray::IndexToObject(index);
+				if (!item || item->GetUObject() != ptr || item->IsUnreachable())
+					return nullptr;
+				return ptr;
+			}
+		};
 
 		/// What the per-level caches (doors, interactive parts, the lent light, the sun) are keyed by: the controller AND the
 		/// levels the world has loaded. A nightmare is a streamed level: it comes and goes under the same controller, and
@@ -1162,10 +1184,10 @@ namespace nc
 		{
 			bool checked = false, on = false, hide = false;
 			UObject *level = nullptr;   // level_key
-			FWeakObjectPtr cube;        // the test receiver (the first block stand-in placed while on)
-			FWeakObjectPtr actor;       // the SceneCapture2D
-			FWeakObjectPtr component;   // its CaptureComponent2D
-			FWeakObjectPtr target;      // its TextureRenderTarget2D
+			WeakRef cube;        // the test receiver (the first block stand-in placed while on)
+			WeakRef actor;       // the SceneCapture2D
+			WeakRef component;   // its CaptureComponent2D
+			WeakRef target;      // its TextureRenderTarget2D
 			bool hidden = false;        // the cube is in the player controller's HiddenActors
 			DWORD nextLog = 0, nextExport = 0, nextRead = 0;
 		} g_cap;
@@ -1255,7 +1277,11 @@ namespace nc
 			{
 				g_cap.cube = a;
 				g_cap.hidden = false;
-				log(L"capture test: the test cube is " + a->GetName());
+				// evidence for the weak pointers: does UE4SS's agree with the object array's slot?
+				const FWeakObjectPtr theirs(a);
+				log(L"capture test: the test cube is " + a->GetName() + L" (UE4SS's weak pointer: " +
+					(theirs.Get() == a ? L"the same object" : theirs.Get() ? L"A DIFFERENT OBJECT" : L"null") + L"; the slot check: " +
+					(g_cap.cube.Get() == a ? L"the same object" : L"null") + L")");
 			}
 		}
 
@@ -1284,7 +1310,7 @@ namespace nc
 				return;
 			if (g_cap.level != level_key(pc))
 			{
-				const FWeakObjectPtr cube = g_cap.cube; // a block placed before the first tick here is still the test cube
+				const WeakRef cube = g_cap.cube; // a block placed before the first tick here is still the test cube
 				g_cap = CaptureTest{true, true, g_cap.hide};
 				g_cap.level = level_key(pc);
 				g_cap.cube = cube;
@@ -1489,8 +1515,8 @@ namespace nc
 		struct LentLight
 		{
 			UObject *level = nullptr;                // level_key
-			std::vector<FWeakObjectPtr> lights;      // this level's point and spot lights (weak: a nightmare's go with it)
-			FWeakObjectPtr lent;                     // the light given shadows (it had none)
+			std::vector<WeakRef> lights;      // this level's point and spot lights (weak: a nightmare's go with it)
+			WeakRef lent;                     // the light given shadows (it had none)
 			float score = 0.0f;
 			DWORD next = 0;
 		} g_lent;
@@ -1518,7 +1544,7 @@ namespace nc
 			UObject *best = nullptr;
 			float bestScore = 0.0f, bestDist = 0.0f;
 			UObject *const lent = L.lent.Get(); // nullptr once destroyed
-			for (const FWeakObjectPtr &weak : L.lights)
+			for (const WeakRef &weak : L.lights)
 			{
 				UObject *l = weak.Get();
 				if (!l)
