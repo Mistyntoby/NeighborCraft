@@ -70,6 +70,10 @@ uniform float3 WarpT = float3(0.0, 0.0, 0.0);
 // Hello Neighbor's picture at quarter size with mips: its blurred levels stand in for the light around each pixel.
 texture HostLightTex { Width = BUFFER_WIDTH / 4; Height = BUFFER_HEIGHT / 4; Format = RGBA8; MipLevels = 7; };
 sampler sHostLight { Texture = HostLightTex; AddressU = CLAMP; AddressV = CLAMP; };
+// The same picture's brightness without the stand-ins (x: luma where HN's own surface is, y: 1 there, 0 on a stand-in):
+// how bright HN's real surfaces around a block are (surround_cap).
+texture HostSurroundTex { Width = BUFFER_WIDTH / 4; Height = BUFFER_HEIGHT / 4; Format = RG16F; MipLevels = 7; };
+sampler sHostSurround { Texture = HostSurroundTex; AddressU = CLAMP; AddressV = CLAMP; };
 
 // Set by the add-on: the colour of Hello Neighbor's sun (its directional light's LightColor), which tints Minecraft's
 // surfaces. It used to be estimated from the picture, which is mostly the surfaces' own colours: blocks went green
@@ -86,6 +90,8 @@ uniform float ReceiverReference < ui_type = "drag"; ui_min = 0.05; ui_max = 1.0;
 	ui_tooltip = "How bright the grey stand-in looks where Minecraft should keep its own brightness (measured: ~0.88 in sun, ~0.5 in shade)."; > = 0.8;
 uniform float SunContrast < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.01; ui_label = "Sun on Minecraft's faces";
 	ui_tooltip = "How much brighter Minecraft's faces turned to Hello Neighbor's sun are than those turned away."; > = 0.75;
+uniform float SurroundReference < ui_type = "drag"; ui_min = 0.05; ui_max = 1.0; ui_step = 0.01; ui_label = "Surroundings brightness = full light";
+	ui_tooltip = "Minecraft's light is never more than HN's own surfaces around it allow: their brightness / this (0 = off)."; > = 0.25;
 
 // The composited world (Hello Neighbor + Minecraft, no overlay) and, per pixel: Minecraft's coverage, its depth and Hello Neighbor's.
 texture CompositeTex { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = RGBA8; };
@@ -99,11 +105,6 @@ sampler sMcBright { Texture = McBrightTex; AddressU = CLAMP; AddressV = CLAMP; }
 float luma(float3 c)
 {
 	return dot(c, float3(0.2126, 0.7152, 0.0722));
-}
-
-float4 PS_Light(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
-{
-	return float4(tex2D(ReShade::BackBuffer, uv).rgb, 1.0);
 }
 
 /// The light's colour, normalised to luma 1 (Hello Neighbor's sun; white until the add-on sets it).
@@ -129,6 +130,50 @@ float host_linear(float d)
 	else
 		z = d < 1.0 ? n * f / (f - d * (f - n)) : 1e9;
 	return z * HostDepthScale;
+}
+
+/// Hello Neighbor's picture for the light estimates, and its brightness with the stand-ins left out: a stand-in is where
+/// HN's depth is Minecraft's (the frame as Minecraft drew it; a pixel of camera lag at an edge only blurs the average).
+void PS_Light(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 light : SV_Target0, out float2 surround : SV_Target1)
+{
+	const float3 c = tex2D(ReShade::BackBuffer, uv).rgb;
+	light = float4(c, 1.0);
+	float own = 1.0;
+	if (McActive)
+	{
+		const float2 ouv = float2(uv.x, 1.0 - uv.y);
+		const float zm = mc_linear(tex2Dlod(sDepth, float4(ouv, 0, 0)).r);
+		const float zh = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(uv, 0, 0)).x);
+		if (tex2Dlod(sWorld, float4(ouv, 0, 0)).a > 0.0 && abs(zh - zm) < 0.1 + 0.02 * zm)
+			own = 0.0;
+	}
+	surround = float2(luma(c) * own, own);
+}
+
+/// The most light Minecraft's surface may take at this point: what HN's own surfaces within ~1.2 m of it (near in depth,
+/// stand-ins left out) show, over SurroundReference; 1e3 (no limit) where too few of them are seen. Unreal lights the
+/// movable stand-ins from its coarse indirect-light grid, which in a dark corridor still holds the light of the rooms
+/// around it: in the user's nightmare corridor the stand-in read ~0.39 (outdoor shade: 0.46) while HN's walls and floor
+/// there read 0.03-0.08, and blocks and Steve came out lit as if in daylight (outofplace.png).
+float surround_cap(float2 uv, float zm)
+{
+	if (zm < 0.0 || SurroundReference <= 0.0)
+		return 1e3;
+	const float r = clamp(1.2 / (max(zm, 0.3) * 2.0 * WarpTan.x), 0.02, 0.35);
+	float lit = 0.0, seen = 0.0;
+	[unroll] for (int i = 0; i < 12; ++i)
+	{
+		const float a = i * 2.39996 + 0.7;
+		const float rr = r * sqrt((i + 0.5) / 12.0);
+		const float2 t = uv + float2(cos(a) * BUFFER_HEIGHT * BUFFER_RCP_WIDTH, sin(a)) * rr;
+		const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 0)).x);
+		const float w = exp(-abs(zt - zm) / (0.5 + 0.1 * zm));
+		const float2 s = tex2Dlod(sHostSurround, float4(t, 0, 1.0)).xy;
+		lit += s.x * w;
+		seen += s.y * w;
+	}
+	const float cap = lit / max(seen, 1e-4) / SurroundReference;
+	return lerp(1e3, cap, saturate(seen / 2.0));
 }
 
 /// Hello Neighbor's light where a Minecraft surface is: from Hello Neighbor's surfaces near it in depth (the floor a block
@@ -177,6 +222,7 @@ float3 relight(float3 c, float2 uv, float zm, float ndl)
 		const float sunlit = SunStrength * saturate((lum / LightReference - 0.55) / 0.45);
 		gain *= lerp(1.0, lerp(1.0 - 0.35 * SunContrast, 1.0 + 0.25 * SunContrast, saturate(ndl)), sunlit);
 	}
+	gain = min(gain, surround_cap(uv, zm)); // never brighter than HN's own surfaces around it allow
 	// the light's colour: the whole picture's grey surfaces (a sunset's orange, a night's blue), never the surfaces
 	// around the block. Around a block, the colour is mostly theirs (a lawn's green, a red house's red), and taken as
 	// the light's it painted blocks with their surroundings (the user's cobblestone: green below, pink above); a local
@@ -324,7 +370,10 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 		const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
 		// compressed (^0.6): the grey stand-in under dim indoor light came out much darker than HN's own bright-textured
 		// walls beside it (the user: Steve too dark in a lit room); edges keep their contrast, dim light lifts
-		const float3 received = world.rgb * tint * clamp(pow(max(luma(host) / ReceiverReference, 0.0), 0.6), 0.2, 1.35);
+		// and never more than HN's own surfaces around it show (surround_cap: the stand-in's light can be the indirect
+		// grid's, brighter than the room)
+		const float g = min(clamp(pow(max(luma(host) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
+		const float3 received = world.rgb * tint * g;
 		const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
 		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch);
 	}
@@ -435,7 +484,8 @@ technique NeighborCraft < ui_tooltip = "Minecraft passthrough: enabled automatic
 	{
 		VertexShader = PostProcessVS;
 		PixelShader = PS_Light;
-		RenderTarget = HostLightTex;
+		RenderTarget0 = HostLightTex;
+		RenderTarget1 = HostSurroundTex;
 	}
 	pass Composite
 	{

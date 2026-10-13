@@ -597,3 +597,19 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - First-time stutter: the shadow-box pool grows ahead (4 a tick to 240), the receiver material is made at level start.
 - Steam showed the game "Stopping" after the crash: the Gradle daemon started by start_minecraft.bat outlived it;
   now --no-daemon.
+
+## Blocks and Steve too bright in dark rooms (2026-10-13)
+- The user (outofplace.png, the nightmare corridor, 2026-10-11 19:27): cobblestone and Steve lit as if in daylight.
+  The receivers were active (UE4SS.log 19:26:09); the blocks came out at ~65% of daylight while HN's walls and floor
+  beside them read 0.03-0.08.
+- [game] measurement 2026-10-13 (ReShade on/off, Act 1, the kid's house's shade): the bare stand-in reads 0.46,
+  cobblestone composites to 0.35, the dirt and wall beside it 0.22 and 0.59 (looks right). Worked back from the
+  corridor screenshot, the stand-in read ~0.39 there: Unreal lights the movable stand-ins from its coarse indirect
+  grid, which in the corridor still carries near-outdoor ambient; HN's baked walls don't get it. (The ^0.6 lift added
+  for "Steve too dark in a lit room" adds a little on top; kept.)
+- Fix (NeighborCraft.fx): PS_Light also writes HostSurroundTex, HN's brightness with the stand-ins left out (a pixel
+  whose HN depth is Minecraft's); surround_cap() averages it over ~1.2 m around a Minecraft surface (near in depth)
+  and limits the light to that / SurroundReference (0.25). Both paths: receivers and the fallback relight. Calibration
+  from the measurements: outdoor shade cap ~1.2 (no change, gain 0.71), the corridor ~0.2 (cobblestone ~0.1, was 0.31).
+- [game] ReShade compiled it live (ReShade.log 18:17:45), composite running. Not yet seen in a dark room.
+  Possible side effect: a block in shade on very dark ground could come out darker than before.
