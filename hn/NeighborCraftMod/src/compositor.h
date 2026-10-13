@@ -12,6 +12,8 @@ namespace compositor
 	void set_active(bool active);
 	/// HN's pause menu is up: Minecraft's world stays composited, its overlay (its own pause screen) and hand don't.
 	void set_paused(bool paused);
+	/// Minecraft's frame number (FrameExporter's) of the picture last uploaded; -1 before the first.
+	long long shown_frame();
 	/// The host camera's clip planes in metres (Unreal: near only, the far plane is infinite).
 	void set_host_planes(float near_clip, float far_clip);
 	/// The host's current camera in Minecraft's convention (rotation in degrees, vertical fov, position in Minecraft

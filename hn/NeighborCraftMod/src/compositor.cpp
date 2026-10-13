@@ -23,6 +23,7 @@ namespace
 	std::atomic<bool> g_registered{false};
 	std::atomic<bool> g_active{false};
 	std::atomic<bool> g_paused{false};
+	std::atomic<long long> g_shownFrame{-1};
 	std::atomic<float> g_hostNear{0.15f};
 	std::atomic<float> g_hostFar{10000.0f};
 	std::atomic<uint32_t> g_bbWidth{0}, g_bbHeight{0};
@@ -153,6 +154,7 @@ namespace
 		const uint32_t w = read<uint32_t>(desc + 24), h = read<uint32_t>(desc + 28);
 		if (w == 0 || h == 0)
 			return;
+		const int64_t frame = read<int64_t>(desc + 8);
 		device *dev = runtime->get_device();
 		if (w != g_width || h != g_height)
 		{
@@ -188,6 +190,7 @@ namespace
 		g_mcNear = read<float>(desc + 32);
 		g_mcFar = read<float>(desc + 36);
 		g_mcFlags = read<int32_t>(desc + 44);
+		g_shownFrame = frame;
 		g_mcPose.fov = read<float>(desc + 40);
 		g_mcPose.yaw = read<float>(desc + 72);
 		g_mcPose.pitch = read<float>(desc + 76);
@@ -506,7 +509,10 @@ namespace
 		Pose host, prev;
 		{
 			std::lock_guard<std::mutex> lock(g_poseLock);
-			const unsigned lag = unsigned(std::clamp(g_poseLag.load(), 0, 2));
+			// paused: no new poses come, and the camera stands still: the newest pose as it is (a pose back, and the
+			// prediction from the last motion, left Minecraft's picture shifted off the stand-ins for the whole pause
+			// when it began on the move: the user saw Steve's stand-in split from him)
+			const unsigned lag = g_paused ? 0u : unsigned(std::clamp(g_poseLag.load(), 0, 2));
 			if (g_hostPoseCount > lag)
 				host = g_hostPoses[(g_hostPoseCount - 1 - lag) & 3];
 			if (g_hostPoseCount > lag + 1)
@@ -515,6 +521,8 @@ namespace
 		float predict = 0.0f;
 		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "PosePrediction"); v.handle != 0)
 			runtime->get_uniform_value_float(v, &predict, 1);
+		if (g_paused)
+			predict = 0.0f;
 		const bool warp = host.valid && g_mcPose.valid && !g_cameraLocked;
 		if (warp && prev.valid && predict != 0.0f)
 		{
@@ -608,6 +616,11 @@ namespace compositor
 	void set_paused(bool paused)
 	{
 		g_paused = paused;
+	}
+
+	long long shown_frame()
+	{
+		return g_shownFrame.load();
 	}
 
 	void set_active(bool active)

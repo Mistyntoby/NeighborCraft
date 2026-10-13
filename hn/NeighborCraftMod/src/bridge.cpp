@@ -593,6 +593,47 @@ namespace nc
 		double g_heldBoxHalf = 0.0;    // the held HN object's half size in Steve's hand (blocks), 0: none shown
 		bool g_heldCasting = false;    // the held HN object's own mesh casts (third person)
 		DWORD g_hand3pAt = 0;
+		/// The recent "shadows" messages by Minecraft's frame number: the stand-ins are posed from the one of the frame the
+		/// compositor shows, not the newest. The picture reaches HN a frame or more after its shadow message (a GPU
+		/// readback, more when Minecraft stutters), so the newest boxes ran ahead of the picture: Steve's stand-in showed
+		/// beside him while running (the user, 2026-10-13).
+		struct ShadowFrame
+		{
+			long long frame = -1;
+			std::vector<double> boxes;
+			std::vector<int> kinds;
+			double hand[12] = {};
+			bool hasHand = false;
+			DWORD at = 0;
+		};
+		std::deque<ShadowFrame> g_shadowFrames;
+
+		/// Puts the matching message's boxes in g_shadowBoxes / g_shadowKinds / g_hand3p (game thread, every tick).
+		void select_shadow_frame()
+		{
+			if (g_shadowFrames.empty())
+				return;
+			const long long shown = compositor::shown_frame();
+			const ShadowFrame *pick = &g_shadowFrames.back();
+			if (shown >= 0 && pick->frame >= 0)
+				for (auto it = g_shadowFrames.rbegin(); it != g_shadowFrames.rend(); ++it)
+					if (it->frame <= shown)
+					{
+						pick = &*it;
+						break;
+					}
+					else
+						pick = &*it; // older than everything kept: the oldest
+			g_shadowBoxes = pick->boxes;
+			g_shadowKinds = pick->kinds;
+			g_shadowBoxesAt = pick->at;
+			if (pick->hasHand)
+			{
+				std::copy(pick->hand, pick->hand + 12, g_hand3p);
+				g_hand3pAt = pick->at;
+			}
+		}
+
 		bool shadow_boxes_fresh()
 		{
 			return GetTickCount() - g_shadowBoxesAt < 500;
@@ -2507,12 +2548,20 @@ namespace nc
 			}
 			else if (m.find("\"t\":\"shadows\"") != std::string::npos)
 			{
-				json_doubles(m, "b", g_shadowBoxes);
-				g_shadowKinds.clear();
-				json_ints(m, "k", g_shadowKinds);
-				g_shadowBoxesAt = GetTickCount();
-				if (json_numbers(m, "hand", g_hand3p, 12))
-					g_hand3pAt = GetTickCount();
+				ShadowFrame f;
+				json_doubles(m, "b", f.boxes);
+				json_ints(m, "k", f.kinds);
+				f.hasHand = json_numbers(m, "hand", f.hand, 12);
+				f.at = GetTickCount();
+				double frame = -1.0;
+				if (json_number(m, "f", frame))
+					f.frame = (long long)frame;
+				// the first message of a frame is the one sent with its picture (later ones of the same number are
+				// frames Minecraft didn't export)
+				if (f.frame < 0 || g_shadowFrames.empty() || g_shadowFrames.back().frame != f.frame)
+					g_shadowFrames.push_back(std::move(f));
+				while (g_shadowFrames.size() > 12)
+					g_shadowFrames.pop_front();
 			}
 			else if (m.find("\"t\":\"blocks\"") != std::string::npos)
 			{
@@ -6079,6 +6128,7 @@ namespace nc
 			notify(g_gridPhysics ? "Minecraft physics: blocky collision" : "HN collision, Minecraft movement");
 		}
 		refresh_probe_ignore(pawn);
+		select_shadow_frame();
 		doors_tick(pc, pawn);
 		if (g_driving)
 		{

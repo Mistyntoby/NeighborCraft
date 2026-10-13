@@ -164,6 +164,8 @@ public final class ShadowExport {
 
 			particles(minecraft, partial, out);
 			StringBuilder msg = new StringBuilder(out.b.length() + 200).append("{\"t\":\"shadows\",\"b\":[").append(out.b).append("],\"k\":[").append(out.kinds).append(']');
+			// the frame these boxes belong to: HN poses its stand-ins from the frame its compositor shows
+			msg.append(",\"f\":").append(FrameExporter.lastCaptured());
 			if (hand != null) {
 				msg.append(",\"hand\":[");
 				for (int i = 0; i < hand.length; i++) {

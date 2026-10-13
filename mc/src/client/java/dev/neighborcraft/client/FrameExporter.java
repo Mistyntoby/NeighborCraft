@@ -63,6 +63,12 @@ public final class FrameExporter {
 	private static int ringNext;
 	private static int slotNext;
 	private static long frameCounter;
+	/** The number of the last world frame captured (what the host will show; ShadowExport tags its boxes with it). */
+	private static volatile long lastCaptured = -1;
+
+	public static long lastCaptured() {
+		return lastCaptured;
+	}
 	private static long publishCounter;
 	private static Capture current;
 
@@ -196,6 +202,7 @@ public final class FrameExporter {
 		c.camFov = HostState.renderedFov();
 		c.far = far;
 		c.frame = ++frameCounter;
+		lastCaptured = c.frame;
 		c.captureNanos = now;
 		CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
 		encoder.copyTextureToBuffer(target.getColorTexture(), c.color, 0L, () -> {}, 0);

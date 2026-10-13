@@ -646,3 +646,10 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - Under HN's pause menu the compositor was off, so the stand-ins showed bare (plain coloured boxes; the user took them
   for wrongly textured blocks and Steve). Minecraft's last picture now stays under the pause menu (McPaused: its own
   pause screen and hand left out); not in cutscenes. Built; not yet run.
+- Steve's stand-in split from him under the pause menu, and showed beside him while running when Minecraft stuttered
+  (the user). Pause: the compositor used the pose a frame back and predicted from the last motion; with no new poses
+  under the pause menu that offset stayed for the whole pause. Now no lag and no prediction while paused. Running:
+  the stand-ins took the newest "shadows" message, but the picture reaches HN a frame or more later (GPU readback,
+  more in a stutter). Shadows messages now carry the exported frame's number ("f", FrameExporter.lastCaptured); HN
+  keeps the last 12 and poses from the one of the frame the compositor last uploaded (select_shadow_frame,
+  compositor::shown_frame). Builds; not yet run.
