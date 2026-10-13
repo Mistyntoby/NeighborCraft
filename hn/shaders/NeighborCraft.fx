@@ -435,7 +435,11 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 				const float a = k * 0.785398;
 				const float2 o = float2(cos(a), sin(a)) * r * px;
 				const float4 n = tex2Dlod(sMcInfo, float4(wuv + o, 0, 0));
-				if (info.x < 0.5 && n.x > 0.5 && abs(n.y - info.z) < 0.05 + 0.01 * info.z)
+				// from at the Minecraft surface to one block behind it: a stand-in's top face seen nearly edge-on recedes up
+				// to a block behind the front face beside it, and the old +-5 cm left it as a pale line along the
+				// top edge (the user, 2026-10-13)
+				const float dz = info.z - n.y;
+				if (info.x < 0.5 && n.x > 0.5 && dz > -0.05 - 0.01 * info.z && dz < 1.05 + 0.02 * info.z)
 				{
 					color = tex2Dlod(sComposite, float4(wuv + o, 0, 0)).rgb;
 					info.x = 1.0;

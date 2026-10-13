@@ -617,3 +617,6 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   road, his long shadow beside him). The average of the surroundings took in his own shadow; now the brightest
   surrounding HN surface sets the limit (SurroundReference 0.3): one lit surface near means light is there. Compiled
   live (ReShade.log 18:21:33); not yet seen in game.
+- Same day, the user: a pale line along the top edge of plank blocks seen at eye level (the stand-in's top face). The
+  edge fill in PS_Final only took stand-in pixels within +-5 cm of the Minecraft surface beside them; a top face seen
+  nearly edge-on recedes up to a block. Now from the surface to 1.05 block behind it. Compiled live (18:24:20).
