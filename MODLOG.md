@@ -620,3 +620,10 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - Same day, the user: a pale line along the top edge of plank blocks seen at eye level (the stand-in's top face). The
   edge fill in PS_Final only took stand-in pixels within +-5 cm of the Minecraft surface beside them; a top face seen
   nearly edge-on recedes up to a block. Now from the surface to 1.05 block behind it. Compiled live (18:24:20).
+- Same day, the user: keep the receivers, but make what peeks through look like the block. Each full opaque block's
+  receiver is now drawn in its block's colour (Minecraft's map colour, sent as "col" with "opaque" in the blocks
+  message; WorldBridge.kind), scaled so its luma as the compositor measures it equals the grey's (sRGB 128: the light
+  reading and ReceiverReference are unchanged). One material per colour (bridge.cpp receiver_material(context, rgb),
+  a 4x4 PNG written by solid_png, imported), each kept alive by its own keeper stand-in, all forgotten on level change
+  like the grey one. Steve's boxes stay grey. [test] Python port: the PNG decodes; planks -> (151,126,77), grass
+  (102,144,44), stone/black/white grey, all at luma 0.502. Built; not yet installed or run in game.

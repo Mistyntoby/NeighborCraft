@@ -759,19 +759,17 @@ namespace nc
 		UObject *g_receiverTexture = nullptr;
 		bool g_receiverTried = false;
 		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot);
-		UObject *receiver_material(UObject *context)
+		/// HN's base_m with a texture of one colour (a PNG the mod writes, imported), kept alive by a keeper stand-in
+		/// (hidden, far below) that always uses it: nothing else of the engine's held such a material, and the garbage
+		/// collector freed it; the next SetMaterial read a freed material and the game crashed (19:11 and 19:2x on
+		/// 2026-10-11, on F5, when Steve's boxes start being drawn). UE4SS's SetRootSet didn't keep it in this build. The
+		/// keeper dies with its level; the pool's level change makes new materials (shadow_boxes_tick).
+		UObject *new_receiver_material(UObject *context, const std::wstring &file, const std::string &png)
 		{
-			if (g_receiverTried)
-				return g_receiverMaterial;
-			g_receiverTried = true;
-			UObject *&material = g_receiverMaterial;
-			material = nullptr;
-			static const unsigned char png[] = {0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x04,0x08,0x02,0x00,0x00,0x00,0x26,0x93,0x09,0x29,0x00,0x00,0x00,0x13,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0x6c,0x68,0x68,0x60,0x80,0x01,0x26,0x38,0x0b,0x2f,0x07,0x00,0x4c,0x04,0x01,0x88,0xc6,0xef,0x54,0x68,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,0xae,0x42,0x60,0x82};
-			const std::wstring file = module_dir() + L"neighborcraft_grey.png";
 			if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
 				if (FILE *f = _wfopen(file.c_str(), L"wb"))
 				{
-					fwrite(png, 1, sizeof(png), f);
+					fwrite(png.data(), 1, png.size(), f);
 					fclose(f);
 				}
 			static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
@@ -786,41 +784,153 @@ namespace nc
 			import.set<UObject *>(STR("WorldContextObject"), context).set(STR("Filename"), FString(file.c_str()));
 			UObject *const *texture = import.invoke() ? import.param<UObject *>(STR("ReturnValue")) : nullptr;
 			Call make(matLib, STR("CreateDynamicMaterialInstance"));
-			// its outer: the material library's default object (permanent), not a level's actor: kept alive (below), it
-			// would keep its outer, and with it an old level, alive
+			// its outer: the material library's default object (permanent), not a level's actor (it would keep its outer,
+			// and with it an old level, alive)
 			make.set<UObject *>(STR("WorldContextObject"), matLib).set<UObject *>(STR("Parent"), parent).set(STR("OptionalName"), NameParam{});
 			UObject *const *mid = make.invoke() ? make.param<UObject *>(STR("ReturnValue")) : nullptr;
 			if (!texture || !*texture || !mid || !*mid)
 			{
-				log(L"receivers: the grey texture or the material couldn't be made: stand-ins stay shadow-only");
+				log(L"receivers: the texture or the material couldn't be made (" + file + L")");
 				return nullptr;
 			}
 			Call(*mid, STR("SetTextureParameterValue")).set(STR("ParameterName"), name_param(STR("Diffuse"))).set<UObject *>(STR("Value"), *texture).invoke();
-			// kept alive by the engine's own reference: a keeper stand-in (hidden, far below) always uses the material, and
-			// the material holds the texture. Nothing of the engine's held them, and the garbage collector freed them: the
-			// next SetMaterial read a freed material and the game crashed (19:11 and 19:2x, on F5, when Steve's boxes
-			// start being drawn). UE4SS's SetRootSet didn't keep them in this build. The keeper dies with its level;
-			// the pool's level change makes a new material (shadow_boxes_tick)
-			material = *mid;
-			g_receiverTexture = *texture;
 			if (UObject *keeper = spawn_shadow_box(context, Vec3f{g_eye.x, g_eye.y, g_eye.z - 100000.0f}, Vec3f{0.01f, 0.01f, 0.01f}, Rot3f{}))
 				if (UObject **km = keeper->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); km && *km)
 				{
-					Call(*km, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), material).invoke();
+					Call(*km, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), *mid).invoke();
 					Call(*km, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
 				}
-			log(L"receivers: HN's base_m with a flat grey texture: stand-ins of blocks and models are drawn by HN to light them");
-			return material;
+			return *mid;
+		}
+
+		/// A 4x4 PNG of one colour (stored deflate blocks: no compressor needed).
+		std::string solid_png(uint8_t r, uint8_t g, uint8_t b)
+		{
+			static uint32_t table[256];
+			if (!table[1])
+				for (uint32_t n = 0; n < 256; ++n)
+				{
+					uint32_t c = n;
+					for (int k = 0; k < 8; ++k)
+						c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+					table[n] = c;
+				}
+			auto crc = [&](const std::string &d) {
+				uint32_t c = 0xFFFFFFFFu;
+				for (unsigned char ch : d)
+					c = table[(c ^ ch) & 0xFF] ^ (c >> 8);
+				return c ^ 0xFFFFFFFFu;
+			};
+			auto be32 = [](std::string &o, uint32_t v) {
+				for (int k = 3; k >= 0; --k)
+					o += char((v >> (k * 8)) & 0xFF);
+			};
+			auto chunk = [&](std::string &o, const char *type, const std::string &data) {
+				be32(o, uint32_t(data.size()));
+				const std::string body = std::string(type, 4) + data;
+				o += body;
+				be32(o, crc(body));
+			};
+			std::string raw;
+			for (int y = 0; y < 4; ++y)
+			{
+				raw += char(0);
+				for (int x = 0; x < 4; ++x)
+					raw += char(r), raw += char(g), raw += char(b);
+			}
+			uint32_t a = 1, bsum = 0;
+			for (unsigned char ch : raw)
+				a = (a + ch) % 65521, bsum = (bsum + a) % 65521;
+			const uint16_t len = uint16_t(raw.size());
+			std::string z;
+			z += char(0x78), z += char(0x01), z += char(0x01); // zlib header, one final stored block
+			z += char(len & 0xFF), z += char(len >> 8), z += char(~len & 0xFF), z += char((~len >> 8) & 0xFF);
+			z += raw;
+			be32(z, (bsum << 16) | a);
+			std::string ihdr;
+			be32(ihdr, 4), be32(ihdr, 4);
+			ihdr += char(8), ihdr += char(2), ihdr += char(0), ihdr += char(0), ihdr += char(0); // 8-bit RGB
+			std::string png("\x89PNG\r\n\x1a\n", 8);
+			chunk(png, "IHDR", ihdr);
+			chunk(png, "IDAT", z);
+			chunk(png, "IEND", std::string());
+			return png;
+		}
+
+		/// The grey receiver (Steve's boxes, blocks without a colour).
+		UObject *receiver_material(UObject *context)
+		{
+			if (g_receiverTried)
+				return g_receiverMaterial;
+			g_receiverTried = true;
+			g_receiverMaterial = new_receiver_material(context, module_dir() + L"neighborcraft_grey.png", solid_png(128, 128, 128));
+			if (g_receiverMaterial)
+				log(L"receivers: HN's base_m with a flat grey texture: stand-ins of blocks and models are drawn by HN to light them");
+			return g_receiverMaterial;
+		}
+
+		/// A block's colour for its receiver: the block's hue at the grey's brightness. The compositor reads the receiver's
+		/// brightness as the light on the block (NeighborCraft.fx; ReceiverReference is the grey's), so the colour is scaled
+		/// until its luma (as the compositor measures it, on sRGB values) is the grey's; what peeks past Minecraft's picture
+		/// at an edge then has the block's colour, not a pale grey line (the user: "make them look very similar").
+		uint32_t receiver_colour(uint32_t rgb)
+		{
+			auto lin = [](double c) { return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); };
+			auto enc = [](double c) { c = std::clamp(c, 0.0, 1.0); return c <= 0.0031308 ? c * 12.92 : 1.055 * std::pow(c, 1.0 / 2.4) - 0.055; };
+			const double l[3] = {lin(((rgb >> 16) & 0xFF) / 255.0), lin(((rgb >> 8) & 0xFF) / 255.0), lin((rgb & 0xFF) / 255.0)};
+			const double target = 128.0 / 255.0, grey = lin(target);
+			auto luma_at = [&](double k, double mix, double out[3]) {
+				for (int i = 0; i < 3; ++i)
+					out[i] = enc((l[i] * (1.0 - mix) + grey * mix) * k);
+				return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2];
+			};
+			double out[3];
+			// towards the grey until the colour can reach the grey's brightness without clipping (a very dark or very
+			// saturated colour), then the scale that matches it
+			for (double mix = 0.0; mix <= 1.0; mix += 0.125)
+			{
+				if (luma_at(64.0, mix, out) < target)
+					continue;
+				double lo = 0.0, hi = 64.0;
+				for (int it = 0; it < 40; ++it)
+				{
+					const double k = (lo + hi) * 0.5;
+					(luma_at(k, mix, out) < target ? lo : hi) = k;
+				}
+				luma_at(hi, mix, out);
+				auto byte = [](double c) { return uint32_t(std::lround(c * 255.0)); };
+				return byte(out[0]) << 16 | byte(out[1]) << 8 | byte(out[2]);
+			}
+			return 0x808080;
+		}
+
+		std::unordered_map<uint32_t, UObject *> g_colourMaterials; // this level's, by colour (shadow_extras_reset forgets them)
+
+		/// The receiver material in a block's colour (0xRRGGBB, Minecraft's map colour; anything above 24 bits: grey).
+		UObject *receiver_material(UObject *context, uint32_t rgb)
+		{
+			if (rgb > 0xFFFFFF || !receiver_material(context))
+				return receiver_material(context);
+			const uint32_t c = receiver_colour(rgb);
+			if (auto it = g_colourMaterials.find(c); it != g_colourMaterials.end())
+				return it->second ? it->second : g_receiverMaterial;
+			wchar_t name[64];
+			swprintf(name, 64, L"neighborcraft_rgb_%06x.png", c);
+			UObject *m = new_receiver_material(context, module_dir() + name, solid_png(uint8_t(c >> 16), uint8_t(c >> 8), uint8_t(c)));
+			g_colourMaterials[c] = m;
+			if (m)
+				log(L"receivers: a material in " + std::wstring(name) + L" (Minecraft's colour " + std::to_wstring(rgb) + L")");
+			return m ? m : g_receiverMaterial;
 		}
 
 		/// A stand-in drawn by HN (receiver: its grey material, visible) or only casting (hidden).
-		void stand_in_receives(UObject *actor, bool receive)
+		void stand_in_receives(UObject *actor, bool receive, uint32_t rgb = 0xFFFFFFFFu)
 		{
 			UObject **mesh = actor ? actor->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")) : nullptr;
 			if (!mesh || !*mesh)
 				return;
 			if (receive)
-				Call(*mesh, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), receiver_material(actor)).invoke();
+				Call(*mesh, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), receiver_material(actor, rgb)).invoke();
 			Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), !receive && !g_proxiesShown).set_bool(STR("bPropagateToChildren"), false).invoke();
 		}
 
@@ -898,6 +1008,7 @@ namespace nc
 		{
 			UObject *actor;
 			DWORD at;
+			uint32_t rgb;
 		};
 		std::vector<PendingReceiver> g_pendingReceivers;
 
@@ -915,14 +1026,14 @@ namespace nc
 				for (auto &[key, actor] : g_shadows)
 					if (actor == it->actor)
 					{
-						stand_in_receives(actor, true);
+						stand_in_receives(actor, true, it->rgb);
 						break;
 					}
 				it = g_pendingReceivers.erase(it);
 			}
 		}
 
-		UObject *spawn_shadow(UObject *context, const Vec3f &centre)
+		UObject *spawn_shadow(UObject *context, const Vec3f &centre, uint32_t rgb)
 		{
 			// exactly a block: flush with its neighbours (a 0.99 stand-in left 1 cm gaps, through which the compositor read
 			// the ground's light: seams across walls, the user)
@@ -930,7 +1041,7 @@ namespace nc
 			// drawn (a receiver) only once Minecraft's picture has the block: a new block reaches Minecraft's picture a few
 			// frames after HN hears of it, and the grey stand-in showed in between (the user)
 			if (a && receiver_material(context))
-				g_pendingReceivers.push_back({a, GetTickCount() + 100});
+				g_pendingReceivers.push_back({a, GetTickCount() + 100, rgb});
 			return a;
 		}
 
@@ -1176,6 +1287,7 @@ namespace nc
 				// a new level: a new material and keeper (the old ones went with the old level)
 				g_receiverMaterial = g_receiverTexture = nullptr;
 				g_receiverTried = false;
+				g_colourMaterials.clear();
 				receiver_material(pawn); // made now, not at the first block placed (an import and a material: a hitch)
 			}
 			std::vector<double> boxes = shadow_boxes_fresh() ? g_shadowBoxes : std::vector<double>{};
@@ -1407,6 +1519,7 @@ namespace nc
 			g_lent = LentLight{};
 			g_receiverMaterial = g_receiverTexture = nullptr;
 			g_receiverTried = false;
+			g_colourMaterials.clear();
 			g_pendingReceivers.clear();
 		}
 
@@ -1426,12 +1539,13 @@ namespace nc
 		}
 
 		/// {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...]} from Minecraft: solid blocks placed and removed.
-		void apply_blocks(UObject *context, const std::vector<int> &set, const std::vector<int> &clear, const std::vector<int> &opaque)
+		void apply_blocks(UObject *context, const std::vector<int> &set, const std::vector<int> &clear, const std::vector<int> &opaque, const std::vector<int> &colours)
 		{
-			// shadows: gone with the block, or when it is no longer a full opaque cube; made for the opaque ones
-			std::unordered_set<unsigned long long> isOpaque;
+			// shadows: gone with the block, or when it is no longer a full opaque cube; made for the opaque ones (drawn in
+			// their colour: one per opaque block)
+			std::unordered_map<unsigned long long, uint32_t> isOpaque;
 			for (size_t i = 0; i + 2 < opaque.size(); i += 3)
-				isOpaque.insert(cell_key(opaque[i], opaque[i + 1], opaque[i + 2]));
+				isOpaque[cell_key(opaque[i], opaque[i + 1], opaque[i + 2])] = i / 3 < colours.size() ? uint32_t(colours[i / 3]) : 0xFFFFFFFFu;
 			auto dropShadow = [&](unsigned long long key) {
 				if (auto it = g_shadows.find(key); it != g_shadows.end())
 				{
@@ -1447,7 +1561,7 @@ namespace nc
 				if (!isOpaque.count(key))
 					dropShadow(key);
 				else if (!g_shadows.count(key) && g_shadows.size() < kMaxShadows)
-					if (UObject *a = spawn_shadow(context, to_ue(set[i] + 0.5, set[i + 1] + 0.5, set[i + 2] + 0.5)))
+					if (UObject *a = spawn_shadow(context, to_ue(set[i] + 0.5, set[i + 1] + 0.5, set[i + 2] + 0.5), isOpaque[key]))
 						g_shadows[key] = a;
 			}
 			static size_t lastCount = size_t(-1);
@@ -2272,7 +2386,7 @@ namespace nc
 			}
 		}
 
-		std::vector<int> g_pendingSet, g_pendingClear, g_pendingOpaque; // block changes from Minecraft, applied on the next tick
+		std::vector<int> g_pendingSet, g_pendingClear, g_pendingOpaque, g_pendingColours; // block changes from Minecraft, applied on the next tick
 		std::vector<std::string> g_throwRequests;      // tokens Minecraft dropped: HN throws the objects
 		std::string g_heldId, g_heldCls;               // the HN object in Minecraft's selected slot ("" none)
 		bool g_handEmpty = true;                       // Minecraft's main hand holds nothing (only then HN's objects are picked up)
@@ -2366,6 +2480,10 @@ namespace nc
 				std::vector<int> opaque;
 				json_ints(m, "opaque", opaque);
 				g_pendingOpaque.insert(g_pendingOpaque.end(), opaque.begin(), opaque.end());
+				std::vector<int> colours;
+				json_ints(m, "col", colours);
+				colours.resize(opaque.size() / 3, -1); // none sent: grey
+				g_pendingColours.insert(g_pendingColours.end(), colours.begin(), colours.end());
 			}
 			else if (m.find("\"t\":\"mcpos\"") != std::string::npos)
 			{
@@ -5777,10 +5895,11 @@ namespace nc
 		}
 		if (!g_pendingSet.empty() || !g_pendingClear.empty())
 		{
-			apply_blocks(pawn, g_pendingSet, g_pendingClear, g_pendingOpaque);
+			apply_blocks(pawn, g_pendingSet, g_pendingClear, g_pendingOpaque, g_pendingColours);
 			g_pendingSet.clear();
 			g_pendingClear.clear();
 			g_pendingOpaque.clear();
+			g_pendingColours.clear();
 		}
 
 		Vec3f p;

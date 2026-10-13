@@ -24,7 +24,8 @@ public final class WorldBridge {
 	private static volatile MinecraftServer server;
 	/** Barriers we placed (so a reset only removes ours, never the player's builds). */
 	private static final Set<BlockPos> barriers = ConcurrentHashMap.newKeySet();
-	/** Block changes this tick (server thread only): 0 gone, 1 solid, 2 solid full opaque cube. Sent at the end of the tick. */
+	/** Block changes this tick (server thread only): 0 gone, 1 solid, 2 solid full opaque cube (with its colour above the
+	 * low two bits, see kind). Sent at the end of the tick. */
 	private static final Map<BlockPos, Integer> changes = new LinkedHashMap<>();
 	/** While placing or removing the host's own collision: those changes aren't news to the host (server thread only). */
 	private static boolean placingGround;
@@ -276,6 +277,21 @@ public final class WorldBridge {
 		return !state.isAir() && !state.is(Blocks.BARRIER) && !state.is(Passthrough.HOST) && !state.getCollisionShape(level, pos).isEmpty();
 	}
 
+	/** What HN hears of a block: 0 nothing, 1 solid (HN's NPCs collide with it), 2 solid and a full opaque cube (it also casts
+	 * HN's shadow and is drawn by HN as a receiver, in its map colour: bits 2-25, 0xRRGGBB; what of the receiver
+	 * peeks past Minecraft's picture then has the block's colour, not grey). */
+	private static int kind(final ServerLevel level, final BlockPos pos, final BlockState state) {
+		if (!solidForHost(level, pos, state)) {
+			return 0;
+		}
+
+		if (!(state.isSolidRender() && state.isCollisionShapeFullBlock(level, pos))) {
+			return 1;
+		}
+
+		return 2 | (state.getMapColor(level, pos).col & 0xFFFFFF) << 2;
+	}
+
 	/** Every server tick: send the block changes. */
 	static void tick(final MinecraftServer s) {
 		flush(s);
@@ -288,12 +304,12 @@ public final class WorldBridge {
 		}
 
 		if (!placingGround) {
-			// 0 nothing for HN, 1 solid (HN's NPCs collide with it), 2 solid and a full opaque cube (it also casts HN's shadow)
-			changes.put(pos.immutable(), !solidForHost(level, pos, state) ? 0 : state.isSolidRender() && state.isCollisionShapeFullBlock(level, pos) ? 2 : 1);
+			changes.put(pos.immutable(), kind(level, pos, state));
 		}
 	}
 
-	/** End of each server tick: {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...],"opaque":[x,y,z,...]} (opaque: the set ones that are full opaque cubes). */
+	/** End of each server tick: {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...],"opaque":[x,y,z,...],"col":[rgb,...]} (opaque: the set
+	 * ones that are full opaque cubes; col: their colours, one per opaque block). */
 	static void flush(final MinecraftServer s) {
 		if (changes.isEmpty()) {
 			return;
@@ -302,15 +318,21 @@ public final class WorldBridge {
 		StringBuilder set = new StringBuilder();
 		StringBuilder clear = new StringBuilder();
 		StringBuilder opaque = new StringBuilder();
+		StringBuilder colours = new StringBuilder();
 		for (Map.Entry<BlockPos, Integer> e : changes.entrySet()) {
 			BlockPos p = e.getKey();
-			for (StringBuilder b : e.getValue() == 0 ? new StringBuilder[] {clear} : e.getValue() == 2 ? new StringBuilder[] {set, opaque} : new StringBuilder[] {set}) {
+			int kind = e.getValue() & 3;
+			for (StringBuilder b : kind == 0 ? new StringBuilder[] {clear} : kind == 2 ? new StringBuilder[] {set, opaque} : new StringBuilder[] {set}) {
 				b.append(b.isEmpty() ? "" : ",").append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ());
+			}
+
+			if (kind == 2) {
+				colours.append(colours.isEmpty() ? "" : ",").append(e.getValue() >>> 2);
 			}
 		}
 
 		changes.clear();
-		Passthrough.events.accept("{\"t\":\"blocks\",\"set\":[" + set + "],\"clear\":[" + clear + "],\"opaque\":[" + opaque + "]}");
+		Passthrough.events.accept("{\"t\":\"blocks\",\"set\":[" + set + "],\"clear\":[" + clear + "],\"opaque\":[" + opaque + "],\"col\":[" + colours + "]}");
 	}
 
 	/** Every solid block within `radius` of the player, as one "blocks" message (the host's colliders start from this). */
@@ -340,7 +362,7 @@ public final class WorldBridge {
 
 						BlockState state = level.getBlockState(p);
 						if (solidForHost(level, p, state)) {
-							changes.put(p.immutable(), state.isSolidRender() && state.isCollisionShapeFullBlock(level, p) ? 2 : 1);
+							changes.put(p.immutable(), kind(level, p, state));
 							found++;
 						}
 					}
