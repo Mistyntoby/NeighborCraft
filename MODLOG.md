@@ -653,3 +653,10 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   more in a stutter). Shadows messages now carry the exported frame's number ("f", FrameExporter.lastCaptured); HN
   keeps the last 12 and poses from the one of the frame the compositor last uploaded (select_shadow_frame,
   compositor::shown_frame). Builds; not yet run.
+- The frame matching made it worse (the user: "a clone of me in white copying my exact moves"): back to the newest
+  boxes; HN now logs every 5 s how far the newest boxes run ahead of the picture shown ("shadows: newest boxes of
+  Minecraft frame N, the picture shown is frame M (most ahead in 5 s: K)") to find out why before another attempt.
+- Model stand-ins in the skin's colours (the user: "change it to match the player skin so if it lags you cannot
+  tell"): ShadowExport sends "c", per box the average of the opaque skin pixels its cube's faces use (skin read once
+  from the resources; a downloaded skin stays grey); HN draws each model box's receiver in that colour at the grey's
+  brightness (receiver_material(context, rgb), as the blocks). Builds; not yet run.

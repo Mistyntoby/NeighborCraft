@@ -587,6 +587,7 @@ namespace nc
 		/// FTransform in UE 4.20 (floats): rotation quaternion, translation, scale, each 16-byte aligned.
 		// Minecraft's drawn things as boxes (ShadowExport.java): per box its centre and three half-axes (blocks, world)
 		std::vector<double> g_shadowBoxes;
+		std::vector<int> g_shadowColours;   // per box: its colour (0xRRGGBB, a model cube's skin average) or -1 (grey)
 		std::vector<int> g_shadowKinds;     // per box: 1 a model's real surface (drawn by HN: receives its light)
 		DWORD g_shadowBoxesAt = 0;
 		double g_hand3p[12] = {};      // Steve's main-hand item frame: origin, then unit x, y, z axes (Minecraft world)
@@ -602,6 +603,7 @@ namespace nc
 			long long frame = -1;
 			std::vector<double> boxes;
 			std::vector<int> kinds;
+			std::vector<int> colours;
 			double hand[12] = {};
 			bool hasHand = false;
 			DWORD at = 0;
@@ -613,19 +615,25 @@ namespace nc
 		{
 			if (g_shadowFrames.empty())
 				return;
-			const long long shown = compositor::shown_frame();
+			// the newest, as before: posing from the shown frame's message (by frame number) made it worse in game (the
+			// user: "a clone of me in white copying my exact moves"); how far the newest runs ahead of the picture is
+			// logged to find out why before trying again
 			const ShadowFrame *pick = &g_shadowFrames.back();
+			static DWORD nextLog = 0;
+			static long long most = 0;
+			const long long shown = compositor::shown_frame();
 			if (shown >= 0 && pick->frame >= 0)
-				for (auto it = g_shadowFrames.rbegin(); it != g_shadowFrames.rend(); ++it)
-					if (it->frame <= shown)
-					{
-						pick = &*it;
-						break;
-					}
-					else
-						pick = &*it; // older than everything kept: the oldest
+				most = std::max(most, pick->frame - shown);
+			if (GetTickCount() > nextLog)
+			{
+				nextLog = GetTickCount() + 5000;
+				log(L"shadows: newest boxes of Minecraft frame " + std::to_wstring(pick->frame) + L", the picture shown is frame " +
+					std::to_wstring(shown) + L" (most ahead in 5 s: " + std::to_wstring(most) + L")");
+				most = 0;
+			}
 			g_shadowBoxes = pick->boxes;
 			g_shadowKinds = pick->kinds;
+			g_shadowColours = pick->colours;
 			g_shadowBoxesAt = pick->at;
 			if (pick->hasHand)
 			{
@@ -1290,7 +1298,7 @@ namespace nc
 			UObject *level = nullptr;
 			std::vector<UObject *> boxes;
 			std::vector<bool> casting;
-			std::vector<int> receiving; // -1 unknown, 0 hidden, 1 drawn
+			std::vector<int> receiving; // -1 unknown, 0 hidden, else drawn: 1 + its colour (0x1000000: grey)
 			size_t used = 0;
 		} g_pool;
 		constexpr size_t kMaxPool = 420;
@@ -1406,18 +1414,21 @@ namespace nc
 				// a model's surface is drawn (lit by HN for the compositor); the local player's only in third person: in first
 				// person Minecraft doesn't draw him, and HN's grey boxes would be what one sees looking down
 				const int kind = i < g_shadowKinds.size() ? g_shadowKinds[i] : 0;
-				const int receive = (kind == 1 || (kind == 2 && !g_mcFirstPerson)) && receiver_material(pawn) ? 1 : 0;
+				const int colour = i < g_shadowColours.size() ? g_shadowColours[i] : -1;
+				const bool draw = (kind == 1 || (kind == 2 && !g_mcFirstPerson)) && receiver_material(pawn);
+				const int receive = draw ? 1 + (colour >= 0 ? (colour & 0xFFFFFF) : 0x1000000) : 0;
 				if (P.receiving[used] != receive)
 				{
 					P.receiving[used] = receive;
-					stand_in_receives(P.boxes[used], receive == 1);
+					// in the model's skin colour (at the grey's brightness): a stand-in a frame off Steve looks like him
+					stand_in_receives(P.boxes[used], draw, colour >= 0 ? uint32_t(colour) : 0xFFFFFFFFu);
 				}
 				++used;
 			}
 			for (size_t i = used; i < P.boxes.size(); ++i)
 			{
 				pool_cast(i, false);
-				if (P.receiving[i] == 1)
+				if (P.receiving[i] > 0)
 				{
 					P.receiving[i] = 0;
 					stand_in_receives(P.boxes[i], false);
@@ -2551,6 +2562,7 @@ namespace nc
 				ShadowFrame f;
 				json_doubles(m, "b", f.boxes);
 				json_ints(m, "k", f.kinds);
+				json_ints(m, "c", f.colours);
 				f.hasHand = json_numbers(m, "hand", f.hand, 12);
 				f.at = GetTickCount();
 				double frame = -1.0;

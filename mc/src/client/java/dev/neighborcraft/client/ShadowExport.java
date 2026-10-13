@@ -38,6 +38,12 @@ import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import com.mojang.blaze3d.platform.NativeImage;
+import net.minecraft.resources.Identifier;
+import java.io.InputStream;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 
@@ -74,6 +80,12 @@ public final class ShadowExport {
 	private static final class Out {
 		final StringBuilder b = new StringBuilder(16384);
 		final StringBuilder kinds = new StringBuilder(512);
+		/** Per box: its colour (0xRRGGBB, a model cube's average over its part of the skin), or -1 (none: HN's grey). */
+		final StringBuilder colours = new StringBuilder(512);
+		/** The skin of the model being exported (null: none readable), and the colour of the next box. */
+		NativeImage skin;
+		Identifier skinId;
+		int colour = -1;
 		int boxes;
 		/**
 		 * What the next boxes are: 0 shadow only (items, particles, other entities' boxes), 1 a model's real surface
@@ -114,6 +126,7 @@ public final class ShadowExport {
 			num(w.y).append(',');
 			num(w.z);
 			kinds.append(boxes > 0 ? "," : "").append(surface);
+			colours.append(boxes > 0 ? "," : "").append(colour);
 			boxes++;
 		}
 
@@ -166,6 +179,7 @@ public final class ShadowExport {
 			StringBuilder msg = new StringBuilder(out.b.length() + 200).append("{\"t\":\"shadows\",\"b\":[").append(out.b).append("],\"k\":[").append(out.kinds).append(']');
 			// the frame these boxes belong to: HN poses its stand-ins from the frame its compositor shows
 			msg.append(",\"f\":").append(FrameExporter.lastCaptured());
+			msg.append(",\"c\":[").append(out.colours).append(']');
 			if (hand != null) {
 				msg.append(",\"hand\":[");
 				for (int i = 0; i < hand.length; i++) {
@@ -212,8 +226,14 @@ public final class ShadowExport {
 			EntityModel model = living.getModel();
 			model.setupAnim(s);
 			out.surface = e == minecraft.player ? 2 : 1;
+			@SuppressWarnings("unchecked")
+			Identifier texture = ((LivingEntityRenderer<?, LivingEntityRenderState, ?>) living).getTextureLocation(s);
+			out.skinId = texture;
+			out.skin = skin(minecraft, texture);
 			part(model.root(), "", pose, out);
 			out.surface = 0;
+			out.skin = null;
+			out.colour = -1;
 			float[] hand = null;
 			if (model instanceof ArmedModel armed && s instanceof ArmedEntityRenderState armedState) {
 				for (HumanoidArm arm : HumanoidArm.values()) {
@@ -265,6 +285,66 @@ public final class ShadowExport {
 		return null;
 	}
 
+	/** Skins read once (null: not a resource, e.g. a downloaded skin: those boxes stay HN's grey). */
+	private static final Map<Identifier, NativeImage> SKINS = new HashMap<>();
+	private static final Map<Identifier, Map<ModelPart.Cube, Integer>> CUBE_COLOURS = new HashMap<>();
+
+	private static NativeImage skin(final Minecraft minecraft, final Identifier id) {
+		if (id == null) {
+			return null;
+		}
+
+		return SKINS.computeIfAbsent(id, key -> {
+			try (InputStream in = minecraft.getResourceManager().open(key)) {
+				return NativeImage.read(in);
+			} catch (Exception ex) {
+				Passthrough.LOG.info("shadows: skin {} not readable ({}): its stand-ins stay grey", key, ex.toString());
+				return null;
+			}
+		});
+	}
+
+	/**
+	 * A cube's colour: the average of the opaque skin pixels its faces use. HN draws the model's stand-ins (receivers)
+	 * in it, so a stand-in a frame behind Steve, or peeking past him, looks like him rather than a white clone (the user,
+	 * 2026-10-13).
+	 */
+	private static int cubeColour(final Identifier id, final NativeImage skin, final ModelPart.Cube cube) {
+		if (skin == null) {
+			return -1;
+		}
+
+		return CUBE_COLOURS.computeIfAbsent(id, key -> new IdentityHashMap<>()).computeIfAbsent(cube, c -> {
+			long r = 0, g = 0, b = 0, n = 0;
+			int w = skin.getWidth(), h = skin.getHeight();
+			for (ModelPart.Polygon p : c.polygons) {
+				float u0 = 1, v0 = 1, u1 = 0, v1 = 0;
+				for (ModelPart.Vertex v : p.vertices()) {
+					u0 = Math.min(u0, v.u());
+					v0 = Math.min(v0, v.v());
+					u1 = Math.max(u1, v.u());
+					v1 = Math.max(v1, v.v());
+				}
+
+				for (int y = Math.max(0, (int) (v0 * h)); y < Math.min(h, (int) Math.ceil(v1 * h)); y++) {
+					for (int x = Math.max(0, (int) (u0 * w)); x < Math.min(w, (int) Math.ceil(u1 * w)); x++) {
+						int argb = skin.getPixel(x, y);
+						if ((argb >>> 24) < 128) {
+							continue;
+						}
+
+						r += argb >> 16 & 0xFF;
+						g += argb >> 8 & 0xFF;
+						b += argb & 0xFF;
+						n++;
+					}
+				}
+			}
+
+			return n == 0 ? -1 : (int) (r / n) << 16 | (int) (g / n) << 8 | (int) (b / n);
+		});
+	}
+
 	/** A model part's cubes and its children's, as drawn (visible ones only: the skin's outer layers as the skin has them). */
 	private static void part(final ModelPart p, final String name, final PoseStack pose, final Out out) {
 		if (!p.visible) {
@@ -277,6 +357,7 @@ public final class ShadowExport {
 		if (!p.skipDraw) {
 			Matrix4f m = pose.last().pose();
 			for (ModelPart.Cube c : access.passthrough$cubes()) {
+				out.colour = cubeColour(out.skinId, out.skin, c);
 				out.box(m, (c.minX + c.maxX) / 32.0F, (c.minY + c.maxY) / 32.0F, (c.minZ + c.maxZ) / 32.0F, (c.maxX - c.minX) / 32.0F, (c.maxY - c.minY) / 32.0F,
 					(c.maxZ - c.minZ) / 32.0F);
 			}
