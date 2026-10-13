@@ -22,6 +22,8 @@ uniform float2 HostPlanes = float2(0.1, 10000000.0);
 
 // Set true by the add-on only while it has uploaded a Minecraft frame; until then Hello Neighbor passes through untouched.
 uniform bool McActive = false;
+// Set by the add-on: HN's pause menu is up: Minecraft's world stays, its overlay (its own pause screen) and hand don't.
+uniform bool McPaused = false;
 
 uniform bool HostReversedZ < ui_label = "Host depth is reversed (UE4: yes)"; > = true;
 uniform float DepthBias < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.005; ui_label = "Depth bias (m)";
@@ -70,9 +72,10 @@ uniform float3 WarpT = float3(0.0, 0.0, 0.0);
 // Hello Neighbor's picture at quarter size with mips: its blurred levels stand in for the light around each pixel.
 texture HostLightTex { Width = BUFFER_WIDTH / 4; Height = BUFFER_HEIGHT / 4; Format = RGBA8; MipLevels = 7; };
 sampler sHostLight { Texture = HostLightTex; AddressU = CLAMP; AddressV = CLAMP; };
-// The same picture's brightness without the stand-ins (x: luma where HN's own surface is, y: 1 there, 0 on a stand-in):
-// how bright HN's real surfaces around a block are (surround_cap).
-texture HostSurroundTex { Width = BUFFER_WIDTH / 4; Height = BUFFER_HEIGHT / 4; Format = RG16F; MipLevels = 7; };
+// The same picture's brightness split by what it is (x: luma where HN's own surface is, y: 1 there; z: luma where a
+// stand-in is, w: 1 there): how bright HN's real surfaces around a block are (surround_cap, hand_light) and the
+// stand-ins' light, blurred over stand-ins only (received_luma).
+texture HostSurroundTex { Width = BUFFER_WIDTH / 4; Height = BUFFER_HEIGHT / 4; Format = RGBA16F; MipLevels = 7; };
 sampler sHostSurround { Texture = HostSurroundTex; AddressU = CLAMP; AddressV = CLAMP; };
 
 // Set by the add-on: the colour of Hello Neighbor's sun (its directional light's LightColor), which tints Minecraft's
@@ -134,7 +137,7 @@ float host_linear(float d)
 
 /// Hello Neighbor's picture for the light estimates, and its brightness with the stand-ins left out: a stand-in is where
 /// HN's depth is Minecraft's (the frame as Minecraft drew it; a pixel of camera lag at an edge only blurs the average).
-void PS_Light(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 light : SV_Target0, out float2 surround : SV_Target1)
+void PS_Light(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 light : SV_Target0, out float4 surround : SV_Target1)
 {
 	const float3 c = tex2D(ReShade::BackBuffer, uv).rgb;
 	light = float4(c, 1.0);
@@ -147,7 +150,7 @@ void PS_Light(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 light :
 		if (tex2Dlod(sWorld, float4(ouv, 0, 0)).a > 0.0 && abs(zh - zm) < 0.1 + 0.02 * zm)
 			own = 0.0;
 	}
-	surround = float2(luma(c) * own, own);
+	surround = float4(luma(c) * own, own, luma(c) * (1.0 - own), 1.0 - own);
 }
 
 /// The most light Minecraft's surface may take at this point: what HN's own surfaces within ~1.2 m of it (near in depth,
@@ -162,22 +165,57 @@ float surround_cap(float2 uv, float zm)
 	const float r = clamp(1.2 / (max(zm, 0.3) * 2.0 * WarpTan.x), 0.02, 0.35);
 	// the brightest of them, not their average: Steve's (or a block's) own shadow covers much of the ground beside him in a
 	// low sun, and the average put him in the dark in full sunlight (the user, 2026-10-13); one lit surface near means
-	// light is there, and only where everything around is dark does the limit bite
-	float brightest = 0.0, seen = 0.0;
+	// light is there, and only where everything around is dark does the limit bite. A soft brightest (the 4th-power
+	// mean), over coarse samples: the plain brightest of 12 points jumped from pixel to pixel as a bright spot came into
+	// or left a pixel's points, a blotchy ("warbled") darkness over Steve in a dark room (the user, warbleddarkness2.png)
+	float sum4 = 0.0, weight = 0.0, seen = 0.0;
 	[unroll] for (int i = 0; i < 12; ++i)
 	{
 		const float a = i * 2.39996 + 0.7;
 		const float rr = r * sqrt((i + 0.5) / 12.0);
 		const float2 t = uv + float2(cos(a) * BUFFER_HEIGHT * BUFFER_RCP_WIDTH, sin(a)) * rr;
-		const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 0)).x);
+		const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 2.0)).x);
 		const float w = exp(-abs(zt - zm) / (0.5 + 0.1 * zm));
-		const float2 s = tex2Dlod(sHostSurround, float4(t, 0, 2.0)).xy;
-		if (s.y > 0.25)
-			brightest = max(brightest, s.x / s.y * saturate(w * 2.0));
+		const float2 s = tex2Dlod(sHostSurround, float4(t, 0, 3.0)).xy;
+		const float l = s.x / max(s.y, 1e-3);
+		sum4 += l * l * l * l * s.y * w;
+		weight += s.y * w;
 		seen += s.y * w;
 	}
-	const float cap = brightest / SurroundReference;
+	const float cap = sqrt(sqrt(sum4 / max(weight, 1e-4))) / SurroundReference;
 	return lerp(1e3, cap, saturate(seen / 2.0));
+}
+
+/// The light of the room around the camera, for Minecraft's first-person hand (nothing of HN's is beside it on screen):
+/// HN's own surfaces within a few metres of the camera, over the whole picture, the soft brightest of them (as
+/// surround_cap) over SurroundReference; 1e3 (no limit) when nothing of HN's is that near (outdoors, open ground far).
+/// The hand used to take neutral light everywhere: full brightness in a dark room (the user, 2026-10-13).
+float hand_light()
+{
+	if (SurroundReference <= 0.0)
+		return 1e3;
+	float sum4 = 0.0, weight = 0.0;
+	[unroll] for (int i = 0; i < 6; ++i)
+		[unroll] for (int j = 0; j < 4; ++j)
+		{
+			const float2 t = float2(0.08 + 0.168 * i, 0.12 + 0.25 * j);
+			const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 3.0)).x);
+			const float w = saturate((6.0 - zt) / 3.0); // 0-3 m: fully, out to 6 m: less
+			const float2 s = tex2Dlod(sHostSurround, float4(t, 0, 4.0)).xy;
+			const float l = s.x / max(s.y, 1e-3);
+			sum4 += l * l * l * l * s.y * w;
+			weight += s.y * w;
+		}
+	const float cap = sqrt(sqrt(sum4 / max(weight, 1e-4))) / SurroundReference;
+	return lerp(1e3, cap, saturate(weight / 3.0));
+}
+
+/// The stand-in's brightness here, blurred a little over stand-in pixels only: Unreal's shadow maps speckle on Steve's
+/// small boxes, and a single pixel's reading passed that on; where too little of a stand-in is around, the pixel itself.
+float received_luma(float2 uv, float3 host)
+{
+	const float2 s = tex2Dlod(sHostSurround, float4(uv, 0, 1.0)).zw;
+	return lerp(luma(host), s.x / max(s.y, 1e-3), saturate(s.y * 2.0 - 0.4));
 }
 
 /// Hello Neighbor's light where a Minecraft surface is: from Hello Neighbor's surfaces near it in depth (the floor a block
@@ -226,7 +264,7 @@ float3 relight(float3 c, float2 uv, float zm, float ndl)
 		const float sunlit = SunStrength * saturate((lum / LightReference - 0.55) / 0.45);
 		gain *= lerp(1.0, lerp(1.0 - 0.35 * SunContrast, 1.0 + 0.25 * SunContrast, saturate(ndl)), sunlit);
 	}
-	gain = min(gain, surround_cap(uv, zm)); // never brighter than HN's own surfaces around it allow
+	gain = min(gain, zm < 0.0 ? max(hand_light(), 0.12) : surround_cap(uv, zm)); // never brighter than HN's own surfaces around it allow
 	// the light's colour: the whole picture's grey surfaces (a sunset's orange, a night's blue), never the surfaces
 	// around the block. Around a block, the colour is mostly theirs (a lawn's green, a red house's red), and taken as
 	// the light's it painted blocks with their surroundings (the user's cobblestone: green below, pink above); a local
@@ -376,7 +414,7 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 		// walls beside it (the user: Steve too dark in a lit room); edges keep their contrast, dim light lifts
 		// and never more than HN's own surfaces around it show (surround_cap: the stand-in's light can be the indirect
 		// grid's, brighter than the room)
-		const float g = min(clamp(pow(max(luma(host) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
+		const float g = min(clamp(pow(max(received_luma(uv, host) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
 		const float3 received = world.rgb * tint * g;
 		const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
 		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch);
@@ -479,10 +517,10 @@ float3 PS_Final(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 	}
 	// the first-person hand: lit like Minecraft's world in the scene (the host's light around it, its colour grade),
 	// so it darkens indoors and takes the room's colour; its own layer, so the GUI above stays as it is
-	const float4 hand = tex2D(sHand, float2(uv.x, 1.0 - uv.y));
+	const float4 hand = McPaused ? 0.0 : tex2D(sHand, float2(uv.x, 1.0 - uv.y));
 	if (hand.a > 0.0)
 		color = relight(hand.rgb, uv, -1.0, -2.0) + saturate(color) * (1.0 - hand.a);
-	const float4 overlay = tex2D(sOverlay, float2(uv.x, 1.0 - uv.y)); // HUD and screens are screen-space: never shaken
+	const float4 overlay = McPaused ? 0.0 : tex2D(sOverlay, float2(uv.x, 1.0 - uv.y)); // HUD and screens are screen-space: never shaken
 	return overlay.rgb + saturate(color) * (1.0 - overlay.a);
 }
 

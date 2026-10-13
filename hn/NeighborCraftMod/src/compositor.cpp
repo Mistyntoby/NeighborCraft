@@ -22,6 +22,7 @@ namespace
 
 	std::atomic<bool> g_registered{false};
 	std::atomic<bool> g_active{false};
+	std::atomic<bool> g_paused{false};
 	std::atomic<float> g_hostNear{0.15f};
 	std::atomic<float> g_hostFar{10000.0f};
 	std::atomic<uint32_t> g_bbWidth{0}, g_bbHeight{0};
@@ -468,6 +469,8 @@ namespace
 			runtime->set_uniform_value_bool(v, on);
 		if (!on)
 			return;
+		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "McPaused"); v.handle != 0)
+			runtime->set_uniform_value_bool(v, g_paused.load());
 		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "McPlanes"); v.handle != 0)
 			runtime->set_uniform_value_float(v, g_mcNear, g_mcFar, float(g_mcFlags));
 		// a scene's look overrides the preset's light matching and depth bias; the preset's values come back after
@@ -600,6 +603,11 @@ namespace compositor
 	{
 		if (g_registered.exchange(false))
 			reshade::unregister_addon(module);
+	}
+
+	void set_paused(bool paused)
+	{
+		g_paused = paused;
 	}
 
 	void set_active(bool active)

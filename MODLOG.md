@@ -627,3 +627,22 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   a 4x4 PNG written by solid_png, imported), each kept alive by its own keeper stand-in, all forgotten on level change
   like the grey one. Steve's boxes stay grey. [test] Python port: the PNG decodes; planks -> (151,126,77), grass
   (102,144,44), stone/black/white grey, all at luma 0.502. Built; not yet installed or run in game.
+
+## Nightmare crash, Minecraft left running, blotchy Steve, the hand's light, the bare pause screen (2026-10-13 evening)
+- Crash 18:34 (UE crash report; symbolized: bridge.cpp lend_shadows_tick, K2_GetComponentLocation on a light): right
+  after a nightmare ended. Its lights (Act1Nightmares/...) died with its streamed level, but the light list was keyed
+  by the player controller, which a streamed level doesn't change. Now: level_key(pc) (the controller and the world's
+  loaded Levels) keys the light list, the sun, the doors and the interactive parts (rebuilt when a level streams in or
+  out; logged "levels: N loaded"), and the lights are FWeakObjectPtr (a destroyed one is skipped). Not yet run in game.
+- Minecraft played on after the crash (Steve fell into the void): the crash reporter keeps HN's process and its
+  connection open, and Minecraft only quit on a closed connection. HN now sends {"t":"beat"} once a second from the
+  game thread (menus too); Minecraft pauses after 2 s without one ("Hello Neighbor has stopped answering") and quits
+  after 20 s more. Compiles; not yet run.
+- Blotchy ("warbled") darkness over Steve in a dark room (warbleddarkness2.png): the light limit took the plain
+  brightest of 12 points, which jumped between pixels; now a 4th-power mean over coarser samples, and the received
+  light is read slightly blurred over stand-in pixels only (received_luma). Live in the shader (18:40:54).
+- The first-person hand took neutral light everywhere; now limited by the room's light (hand_light: HN's surfaces
+  within ~3-6 m of the camera, the same soft brightest). Live in the shader.
+- Under HN's pause menu the compositor was off, so the stand-ins showed bare (plain coloured boxes; the user took them
+  for wrongly textured blocks and Steve). Minecraft's last picture now stays under the pause menu (McPaused: its own
+  pause screen and hand left out); not in cutscenes. Built; not yet run.

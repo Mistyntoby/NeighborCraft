@@ -75,6 +75,10 @@ public class PassthroughClient implements ClientModInitializer {
 	private static final long HOST_GONE_NANOS = 20_000_000_000L;
 	private static long hostLastSeen = System.nanoTime();
 	private static boolean hostEverSeen;
+	/** The host's heartbeat stopped this long ago: it crashed or froze (its connection stays open while Unreal's crash
+	 * reporter holds its process): Minecraft pauses, so Steve doesn't play on alone (he fell into the void, 2026-10-13). */
+	private static final long HOST_SILENT_NANOS = 2_000_000_000L;
+	private static boolean pausedForSilence;
 	private static boolean screenWasOpen;
 
 	@Override
@@ -134,8 +138,24 @@ public class PassthroughClient implements ClientModInitializer {
 			Passthrough.events.accept("{\"t\":\"screen\",\"open\":" + screenOpen + "}");
 		}
 
-		if (HostLink.connected()) {
-			hostLastSeen = System.nanoTime();
+		long now = System.nanoTime();
+		long beat = HostLink.lastBeat();
+		boolean silent = HostLink.connected() && beat != 0 && now - beat > HOST_SILENT_NANOS;
+		if (silent && !pausedForSilence && minecraft.gui.screen() == null) {
+			pausedForSilence = true;
+			Passthrough.LOG.info("Hello Neighbor has stopped answering: paused");
+			minecraft.pauseGame(false);
+		} else if (!silent && pausedForSilence) {
+			pausedForSilence = false;
+			Passthrough.LOG.info("Hello Neighbor answers again");
+			if (minecraft.gui.screen() instanceof PauseScreen) {
+				minecraft.gui.setScreen(null);
+			}
+		}
+
+		// gone: disconnected, or connected but silent as long (a crashed HN whose crash reporter holds the connection)
+		if (HostLink.connected() && !(beat != 0 && now - beat > HOST_GONE_NANOS)) {
+			hostLastSeen = now;
 			hostEverSeen = true;
 		} else if (EXIT_WITH_HOST && hostEverSeen && System.nanoTime() - hostLastSeen > HOST_GONE_NANOS) {
 			Passthrough.LOG.info("Hello Neighbor is gone: quitting");

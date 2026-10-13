@@ -20,6 +20,7 @@
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/FString.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
@@ -224,6 +225,40 @@ namespace nc
 				if (o && !is_default(o) && is_a(o, class_name))
 					out.push_back(o);
 			return out;
+		}
+
+		/// What the per-level caches (doors, interactive parts, the lent light, the sun) are keyed by: the controller AND the
+		/// levels the world has loaded. A nightmare is a streamed level: it comes and goes under the same controller, and
+		/// caches keyed by the controller alone kept its objects after it unloaded: the game crashed calling a destroyed
+		/// light (2026-10-13 18:34, bridge.cpp lend_shadows_tick, after a nightmare ended). Only ever compared, never
+		/// dereferenced: a new value whenever either changes.
+		UObject *level_key(UObject *pc)
+		{
+			struct RawArray
+			{
+				UObject **data;
+				int32_t num, max;
+			};
+			UObject *level = pc ? pc->GetOuterPrivate() : nullptr;
+			UObject *world = level ? level->GetOuterPrivate() : nullptr;
+			const RawArray *levels = world ? world->GetValuePtrByPropertyNameInChain<RawArray>(STR("Levels")) : nullptr;
+			uint64_t sig = reinterpret_cast<uintptr_t>(pc);
+			if (levels && levels->num >= 0 && levels->num < 4096)
+			{
+				sig = sig * 1099511628211ull ^ uint64_t(levels->num);
+				for (int32_t i = 0; i < levels->num; ++i)
+					sig = sig * 1099511628211ull ^ reinterpret_cast<uintptr_t>(levels->data[i]);
+			}
+			static uint64_t last = 0;
+			static uintptr_t key = 0;
+			if (sig != last)
+			{
+				last = sig;
+				++key;
+				log(L"levels: " + (levels ? std::to_wstring(levels->num) + L" loaded" : std::wstring(L"the world's level list unreadable")) +
+					L": per-level caches start over");
+			}
+			return reinterpret_cast<UObject *>(key);
 		}
 
 		UObject *pawn_of(UObject *pc)
@@ -1122,9 +1157,9 @@ namespace nc
 		/// Steve's and the blocks' stand-ins included. One light at a time (a point light's shadow is six views).
 		struct LentLight
 		{
-			UObject *level = nullptr;
-			std::vector<UObject *> lights;  // this level's point and spot lights
-			UObject *lent = nullptr;        // the light given shadows (it had none)
+			UObject *level = nullptr;                // level_key
+			std::vector<FWeakObjectPtr> lights;      // this level's point and spot lights (weak: a nightmare's go with it)
+			FWeakObjectPtr lent;                     // the light given shadows (it had none)
 			float score = 0.0f;
 			DWORD next = 0;
 		} g_lent;
@@ -1135,13 +1170,15 @@ namespace nc
 			LentLight &L = g_lent;
 			if (!kLendShadows || !g_haveFeet)
 				return;
-			if (L.level != pc)
+			if (L.level != level_key(pc))
 			{
+				if (UObject *was = L.lent.Get())
+					Call(was, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
 				L = LentLight{};
-				L.level = pc;
+				L.level = level_key(pc);
 				for (const wchar_t *kind : {L"PointLightComponent", L"SpotLightComponent"})
 					for (UObject *l : find_all(kind))
-						L.lights.push_back(l);
+						L.lights.emplace_back(l);
 			}
 			if (GetTickCount() < L.next)
 				return;
@@ -1149,8 +1186,12 @@ namespace nc
 			const Vec3f at{g_feet.x, g_feet.y, g_feet.z + g_steveHeight * 0.5f};
 			UObject *best = nullptr;
 			float bestScore = 0.0f, bestDist = 0.0f;
-			for (UObject *l : L.lights)
+			UObject *const lent = L.lent.Get(); // nullptr once destroyed
+			for (const FWeakObjectPtr &weak : L.lights)
 			{
+				UObject *l = weak.Get();
+				if (!l)
+					continue; // destroyed (its level unloaded)
 				bool visible = false, cast = false;
 				get_bool_property(l, STR("bVisible"), visible);
 				const float *intensity = l->GetValuePtrByPropertyNameInChain<float>(STR("Intensity"));
@@ -1158,7 +1199,7 @@ namespace nc
 				if (!visible || !intensity || *intensity <= 0.0f || !radius || *radius <= 0.0f)
 					continue;
 				get_bool_property(l, STR("CastShadows"), cast);
-				if (cast && l != L.lent)
+				if (cast && l != lent)
 					continue; // it casts already (HN's own): nothing to lend
 				Call w(l, STR("K2_GetComponentLocation"));
 				const Vec3f *p = w.invoke() ? w.param<Vec3f>(STR("ReturnValue")) : nullptr;
@@ -1172,17 +1213,17 @@ namespace nc
 				if (score > bestScore)
 					best = l, bestScore = score, bestDist = d;
 			}
-			if (best == L.lent)
+			if (best == lent)
 			{
 				L.score = bestScore;
 				return;
 			}
-			if (L.lent && best && bestScore < L.score * 1.3f)
+			if (lent && best && bestScore < L.score * 1.3f)
 				return; // not clearly brighter: no flicker between two lights
-			if (L.lent)
+			if (lent)
 			{
-				Call(L.lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
-				log(L"shadows: " + L.lent->GetName() + L" has no shadows again (as HN made it)");
+				Call(lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
+				log(L"shadows: " + lent->GetName() + L" has no shadows again (as HN made it)");
 			}
 			L.lent = best;
 			L.score = bestScore;
@@ -1360,9 +1401,9 @@ namespace nc
 		{
 			static UObject *level = nullptr, *sun = nullptr;
 			static DWORD next = 0;
-			if (level != pc)
+			if (level != level_key(pc)) // the sun is in a streamed level (Act1_Day)
 			{
-				level = pc;
+				level = level_key(pc);
 				sun = nullptr;
 				for (UObject *l : find_all(L"DirectionalLightComponent"))
 				{
@@ -1508,8 +1549,8 @@ namespace nc
 				for (UObject *part : g_steveShadow.parts)
 					if (part)
 						Call(part, STR("K2_DestroyActor")).invoke();
-				if (g_lent.lent)
-					Call(g_lent.lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
+				if (UObject *lent = g_lent.lent.Get())
+					Call(lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
 			}
 			if (alive)
 				for (UObject *box : g_pool.boxes)
@@ -2574,8 +2615,11 @@ namespace nc
 		}
 
 		/// Actual gameplay: not HN's main menu (the Start map) and not paused. Minecraft shows only then.
+		bool g_inPauseMenu = false; // HN's pause menu (or the engine's pause) is up in a level (in_gameplay)
+
 		bool in_gameplay(UObject *pc)
 		{
+			g_inPauseMenu = false;
 			static UObject *lastPc = nullptr;
 			static bool menu = false;
 			static UObject *pauseMenu = nullptr;
@@ -2592,7 +2636,7 @@ namespace nc
 			Call paused(pc, STR("IsPaused"));
 			if (paused.invoke())
 				if (const uint8_t *p = paused.param<uint8_t>(STR("ReturnValue")); p && *p)
-					return false;
+					return !(g_inPauseMenu = true);
 			// HN's own pause menu (BPW_MenuPause): HN doesn't use the engine's pause for it; paused while it shows
 			if (!pauseMenu && GetTickCount() > nextFind)
 			{
@@ -2607,7 +2651,7 @@ namespace nc
 				Call shown(pauseMenu, STR("IsInViewport"));
 				if (shown.invoke())
 					if (const uint8_t *v = shown.param<uint8_t>(STR("ReturnValue")); v && *v)
-						return false;
+						return !(g_inPauseMenu = true);
 			}
 			// HN's cutscenes (Act 1 opens with one): not gameplay. Minecraft counted it as play: its HUD and hand
 			// showed over the cutscene, its starter kit filled the hotbar item by item there, and it took over moving
@@ -5233,9 +5277,9 @@ namespace nc
 
 		void doors_tick(UObject *pc, UObject *pawn)
 		{
-			if (pc != g_doorsLevel)
+			if (level_key(pc) != g_doorsLevel)
 			{
-				g_doorsLevel = pc;
+				g_doorsLevel = level_key(pc);
 				g_doors = find_all(L"Door");
 				g_doorBounds.clear();
 				log(L"doors: " + std::to_wstring(g_doors.size()) + L" in this level");
@@ -5391,9 +5435,9 @@ namespace nc
 		/// level (the arrays the engine returns are kept: one small allocation per actor and level).
 		void watch_interactives(UObject *pc)
 		{
-			if (pc == g_watchedLevel)
+			if (level_key(pc) == g_watchedLevel)
 				return;
-			g_watchedLevel = pc;
+			g_watchedLevel = level_key(pc);
 			g_watched.clear();
 			static UObject *meshClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshComponent"));
 			std::unordered_set<UObject *> actors;
@@ -5789,6 +5833,15 @@ namespace nc
 			g_nextHide = GetTickCount() + 2000;
 			hide_minecraft_window();
 		}
+		// alive, once a second from the game thread, in menus too: a crashed (or frozen) HN keeps the connection open
+		// while Unreal's crash reporter holds its process, so only silence tells Minecraft it is gone (the user,
+		// 2026-10-13: HN crashed, Minecraft played on and Steve fell into the void)
+		static DWORD nextBeat = 0;
+		if (g_ws.connected() && GetTickCount() > nextBeat)
+		{
+			nextBeat = GetTickCount() + 1000;
+			sendf("{\"t\":\"beat\"}");
+		}
 
 		if (pressed(VK_F12))
 		{
@@ -5856,8 +5909,15 @@ namespace nc
 					L" (something in HN changes the camera's FOV)");
 			}
 		}
-		compositor::set_active(live);
-		set_player_hidden(pawn, live);
+		// under HN's pause menu Minecraft's last picture stays (the camera doesn't move): without it the stand-ins showed
+		// bare behind the menu, plain coloured boxes (the user took them for Steve and the blocks with wrong textures);
+		// Minecraft's own pause screen and hand are left out meanwhile. Not in cutscenes: their camera moves.
+		static bool shownBefore = false;
+		const bool shown = live || (shownBefore && g_inPauseMenu && g_enabled && g_ws.connected());
+		shownBefore = shown;
+		compositor::set_active(shown);
+		compositor::set_paused(shown && !live);
+		set_player_hidden(pawn, shown);
 		g_minecraftInput = live;
 		if (pc)
 			minecraft_screen_mode(pc, live && g_minecraftScreen);

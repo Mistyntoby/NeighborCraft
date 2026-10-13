@@ -46,6 +46,13 @@ public final class HostLink extends WebSocketServer {
 		this.setDaemon(true);
 	}
 
+	/** When the host's last heartbeat came (System.nanoTime; 0: none yet: a tool, or an older host). */
+	private static volatile long lastBeat;
+
+	static long lastBeat() {
+		return lastBeat;
+	}
+
 	/** Whether a host (or a tool) is connected right now. */
 	static boolean connected() {
 		return instance != null && !instance.getConnections().isEmpty();
@@ -113,6 +120,7 @@ public final class HostLink extends WebSocketServer {
 				case "surface" -> Passthrough.surface = BuiltInRegistries.BLOCK.getOptional(Identifier.parse(m.get("b").getAsString()))
 					.map(Block::defaultBlockState).orElse(null);
 				case "debug" -> CollisionRecorder.setOn(m.get("on").getAsBoolean());
+				case "beat" -> lastBeat = System.nanoTime();
 				default -> {
 					Minecraft minecraft = Minecraft.getInstance();
 					minecraft.execute(() -> ClientInput.handle(minecraft, m));
