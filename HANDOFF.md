@@ -217,7 +217,7 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
-0000000000. **IN PROGRESS (2026-10-13 late): receivers hidden from the player, light read from the capture.** Done and
+0000000000. **BUILT and running (2026-10-13 21:54, MODLOG "Receivers seen only by a scene capture"): steps 1-3 done; [game] logs confirm the texture found and the receivers hidden. Left: the visual check (no trailing clone; blocks/Steve lit and shadowed; brightness vs before), GPU cost. Earlier plan:** Done and
            built (inactive until step 3): compositor.cpp finds the capture texture by size (compositor::kReceiverW/H =
            482x271, RGBA16F) at init_resource, binds it as HNRECV, sets RecvActive when set_receivers_captured(true);
            NeighborCraft.fx capture_received() (capture depth in A, cm, = Minecraft's depth; HDR -> screen by HN's own

@@ -680,3 +680,16 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   dropped whenever level_key changes (a streamed level leaves World.Levels when it unloads, so its lights are dropped
   on the next tick, before any call); the lent light is forgotten on that change, not called. Nothing may rely on
   the object array (weak pointers, root set) in this build.
+
+## Receivers seen only by a scene capture (2026-10-13 night)
+- Why: Steve's stand-in trailed him ("a clone of myself chasing my player"): two renderers are never in step, so any
+  receiver the player can see shows beside its Minecraft surface when they differ.
+- bridge.cpp ReceiverCapture: a SceneCapture2D (482x271 RGBA16F, SCS_SceneColorSceneDepth, player's pawn hidden from
+  it) follows HN's camera; once the add-on has the texture, every receiver is in the player controller's HiddenActors
+  (rewritten at the end of each tick, emptied before stand-ins are destroyed). compositor.cpp finds the texture at
+  init_resource by its size, binds HNRECV, sets RecvActive; NeighborCraft.fx capture_received (capture depth = Minecraft's;
+  HDR -> screen by HN's own surfaces in both pictures). Fallback: dlls/neighborcraft_receivers_visible.txt.
+- [game] 21:54:40: "scene capture SceneCapture2D_0 -> TextureRenderTarget2D_0", ReShade.log "the receivers' capture
+  texture found (482x271, RGBA16F)", "receivers: hidden from the player, their light read from the scene capture".
+  Not yet seen: the picture itself (no clone, blocks and Steve still lit/shadowed), the GPU cost. The user needs the
+  foreground: the visual check is theirs.
