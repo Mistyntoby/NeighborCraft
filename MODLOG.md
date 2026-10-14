@@ -733,3 +733,9 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - Steve's judder: Minecraft at exactly HN's 60 fps let the two clocks drift (a frame shown twice or skipped); now twice
   HN's rate (120 here), the stand-ins still posed from the frame HN will show.
 - Built (HN, MC compiles, shader); the shader and DLL go in together at the next close.
+
+## Native rendering phase 2 (2026-10-13 night)
+- First launch: Minecraft crashed at start ("Mixin transformation of SectionCompiler failed ... Redirector ... Scanned 0
+  target(s)"): the redirect of tesselateBlock's call in SectionCompiler.compile found nothing in game. Now an inject at
+  the head of ModelBlockRenderer.tesselateBlock (cancelled for native blocks), require = 0: a failing hook leaves
+  Minecraft running with all blocks its own.
