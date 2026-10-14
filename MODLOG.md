@@ -699,3 +699,10 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   so the ratio jumped at every edge the points crossed. Now one exposure per frame (RecvExposure pass: screen and
   capture brightness where both see the same HN surface, mipped to one value), and the capture's colour read with
   filtering. Live 21:58:33. compositor.cpp also keeps the first matching texture only (built, needs a restart).
+- [game] the user: light on blocks and Steve shimmering and smudging, Steve stuttering and slightly pixelated. Research:
+  quarter-size lighting buffers are upsampled depth-aware (joint bilateral / nearest-depth: Kopf et al.; the NVIDIA
+  nearest-depth filter); UE4 scene captures have no working TAA (forum threads, UE-26778), so their shadow edges crawl.
+  Now: capture_received weighs the capture texels around a pixel by depth match and distance (no background through
+  an edge, no squares), returns how sure it is and the composite fades by it (no flip between two lights where Steve's
+  picture and boxes are a frame apart); the exposure is a log-average, eased over ~12 frames (RecvExpSmooth/Store).
+  Live 22:02:45. Not yet seen. Left if it still shimmers: a larger capture (cost) or temporal smoothing of the light.

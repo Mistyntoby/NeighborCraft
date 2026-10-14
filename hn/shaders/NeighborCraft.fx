@@ -32,8 +32,13 @@ sampler sRecv { Texture = HNRecvTex; MinFilter = POINT; MagFilter = POINT; Addre
 sampler sRecvSmooth { Texture = HNRecvTex; AddressU = CLAMP; AddressV = CLAMP; };
 // HN's exposure for the capture's HDR, for the whole frame: where the capture and the screen see the same HN surface,
 // x: the screen's brightness, y: the capture's (mipped down to one value per frame, RecvExposure)
-texture RecvRatioTex { Width = 128; Height = 72; Format = RG32F; MipLevels = 8; };
+texture RecvRatioTex { Width = 128; Height = 72; Format = RGBA32F; MipLevels = 8; };
 sampler sRecvRatio { Texture = RecvRatioTex; AddressU = CLAMP; AddressV = CLAMP; };
+// the exposure (log of screen over capture), smoothed over frames: this frame's (A) and last frame's (B)
+texture RecvExpATex { Width = 1; Height = 1; Format = R32F; };
+sampler sRecvExpA { Texture = RecvExpATex; MinFilter = POINT; MagFilter = POINT; };
+texture RecvExpBTex { Width = 1; Height = 1; Format = R32F; };
+sampler sRecvExpB { Texture = RecvExpBTex; MinFilter = POINT; MagFilter = POINT; };
 
 uniform bool HostReversedZ < ui_label = "Host depth is reversed (UE4: yes)"; > = true;
 uniform float DepthBias < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.005; ui_label = "Depth bias (m)";
@@ -228,11 +233,11 @@ float received_luma(float2 uv, float3 host)
 	return lerp(luma(host), s.x / max(s.y, 1e-3), saturate(s.y * 2.0 - 0.4));
 }
 
-/// One frame's exposure for the capture: the screen's and the capture's brightness where both see the same HN surface
-/// (the capture's depth is the screen's). A per-pixel estimate from points around each block imprinted the edges of
-/// what was around it (a house's window and roof inside a cobblestone block: the user's verybroken.png): exposure is the
-/// same for the whole frame, so it is measured once for the whole frame.
-float2 PS_RecvExposure(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+/// The exposure for the capture's HDR: the screen's and the capture's brightness where both see the same HN surface (the
+/// capture's depth is the screen's), as logarithms (exposure is a factor: a log-average isn't ruled by the brightest
+/// surfaces), mipped to one value per frame. A per-pixel estimate from points around each block imprinted the edges
+/// around it (a house's window and roof inside a cobblestone block: the user's verybroken.png).
+float4 PS_RecvExposure(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
 	if (!RecvActive)
 		return 0.0;
@@ -240,22 +245,56 @@ float2 PS_RecvExposure(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targ
 	const float zh = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(uv, 0, 0)).x);
 	if (zh > 200.0 || abs(c.a * 0.01 - zh) > 0.05 + 0.01 * zh)
 		return 0.0;
-	return float2(luma(tex2Dlod(ReShade::BackBuffer, float4(uv, 0, 0)).rgb), luma(c.rgb));
+	const float ls = luma(tex2Dlod(ReShade::BackBuffer, float4(uv, 0, 0)).rgb), lh = luma(c.rgb);
+	if (ls < 0.02 || ls > 0.98 || lh <= 1e-6)
+		return 0.0; // black or clipped on screen: says nothing about the exposure
+	return float4(log(ls), log(lh), 1.0, 0.0);
 }
 
-/// The light on a receiver from HN's scene capture of them (RecvActive), as the screen's brightness, or -1 where the
-/// capture has no receiver at Minecraft's surface. The capture is the same view (HN's camera, its field of view) in HDR
-/// (RGB) with its depth in centimetres (A): a receiver is where that depth is Minecraft's. Its colour read smoothly (the
-/// capture is a quarter of the screen's size: read point by point it came out in 4-pixel squares).
-float capture_received(float2 uv, float zm)
+/// This frame's exposure, eased in over ~12 frames: the whole-frame value still moves as the view does, and the
+/// light on blocks pumped with it (the user: "shimmering").
+float PS_RecvExpSmooth(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 {
-	const float depth = tex2Dlod(sRecv, float4(uv, 0, 0)).a;
-	if (abs(depth * 0.01 - zm) > 0.06 + 0.01 * zm)
-		return -1.0;
-	const float2 e = tex2Dlod(sRecvRatio, float4(0.5, 0.5, 0, 7)).xy;
-	if (e.y <= 1e-6)
-		return -1.0;
-	return luma(tex2Dlod(sRecvSmooth, float4(uv, 0, 0)).rgb) * e.x / e.y;
+	const float prev = tex2Dlod(sRecvExpB, float4(0.5, 0.5, 0, 0)).x;
+	const float4 m = tex2Dlod(sRecvRatio, float4(0.5, 0.5, 0, 7));
+	if (m.z < 1e-4)
+		return prev;
+	const float now = (m.x - m.y) / m.z;
+	return prev == 0.0 ? now : lerp(prev, now, 0.08);
+}
+
+float PS_RecvExpStore(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+	return tex2Dlod(sRecvExpA, float4(0.5, 0.5, 0, 0)).x;
+}
+
+/// The light on a receiver from HN's scene capture of them (RecvActive), as the screen's brightness (x), and how sure
+/// (y, 0..1). The capture is the same view (HN's camera and field of view) at a quarter of the size, HDR colour with
+/// its depth in centimetres (A). Depth-aware upsampling (joint bilateral / nearest-depth, as for quarter-size lighting
+/// buffers): of the 3x3 capture texels around this pixel, each counts by how near its depth is to Minecraft's surface
+/// here, so the light of the background behind a block's edge never mixes in (read bilinearly it smudged, read point
+/// by point it came out in squares). How sure fades the capture's light in and out (where Steve's picture and his
+/// stand-ins are a frame apart, the plain depth test flipped pixels between two lights: his "visual stutter").
+float2 capture_received(float2 uv, float zm)
+{
+	const float2 size = tex2Dsize(sRecv, 0);
+	const float2 base = (floor(uv * size - 0.5) + 0.5) / size;
+	const float tol = 0.04 + 0.01 * zm;
+	float light = 0.0, weight = 0.0;
+	[unroll] for (int y = -1; y <= 2; ++y)
+		[unroll] for (int x = -1; x <= 2; ++x)
+		{
+			const float2 t = base + float2(x, y) / size;
+			const float4 c = tex2Dlod(sRecv, float4(t, 0, 0));
+			const float2 d = abs(t - uv) * size; // texels from this pixel
+			const float w = exp(-abs(c.a * 0.01 - zm) / tol) * saturate(1.5 - d.x) * saturate(1.5 - d.y);
+			light += luma(c.rgb) * w;
+			weight += w;
+		}
+	const float e = tex2Dlod(sRecvExpA, float4(0.5, 0.5, 0, 0)).x;
+	if (weight < 1e-4 || e == 0.0)
+		return 0.0;
+	return float2(light / weight * exp(e), saturate(weight / 0.8));
 }
 
 /// Hello Neighbor's light where a Minecraft surface is: from Hello Neighbor's surfaces near it in depth (the floor a block
@@ -449,18 +488,18 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 	// with a coloured HN surface: a block sunk level with the grass); the colour stays the sun's
 	// the receiver's light: from HN's scene capture when the receivers are drawn only there, else from the screen where
 	// HN's surface is at Minecraft's depth (the receiver drawn in the player's view)
-	const float captured = RecvActive && cover > 0.0 ? capture_received(uv, zm) : -1.0;
-	if (cover > 0.0 && ReceiverMatch > 0.0 && (captured >= 0.0 || (!RecvActive && abs(zh - zm) < 0.06 + 0.01 * zm)))
+	const float2 captured = RecvActive && cover > 0.0 ? capture_received(uv, zm) : 0.0;
+	if (cover > 0.0 && ReceiverMatch > 0.0 && (captured.y > 0.0 || (!RecvActive && abs(zh - zm) < 0.06 + 0.01 * zm)))
 	{
 		const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
 		// compressed (^0.6): the grey stand-in under dim indoor light came out much darker than HN's own bright-textured
 		// walls beside it (the user: Steve too dark in a lit room); edges keep their contrast, dim light lifts
 		// and never more than HN's own surfaces around it show (surround_cap: the stand-in's light can be the indirect
 		// grid's, brighter than the room)
-		const float g = min(clamp(pow(max((captured >= 0.0 ? captured : received_luma(uv, host)) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
+		const float g = min(clamp(pow(max((RecvActive ? captured.x : received_luma(uv, host)) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
 		const float3 received = world.rgb * tint * g;
 		const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
-		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch);
+		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch * (RecvActive ? captured.y : 1.0));
 	}
 	outColor = float4(lit * visible + host * (1.0 - cover), 1.0);
 	outInfo = float4(cover, cover > 0.0 ? zm : 0.0, zh, 0.0);
@@ -581,6 +620,18 @@ technique NeighborCraft < ui_tooltip = "Minecraft passthrough: enabled automatic
 		VertexShader = PostProcessVS;
 		PixelShader = PS_RecvExposure;
 		RenderTarget = RecvRatioTex;
+	}
+	pass RecvExpSmooth
+	{
+		VertexShader = PostProcessVS;
+		PixelShader = PS_RecvExpSmooth;
+		RenderTarget = RecvExpATex;
+	}
+	pass RecvExpStore
+	{
+		VertexShader = PostProcessVS;
+		PixelShader = PS_RecvExpStore;
+		RenderTarget = RecvExpBTex;
 	}
 	pass Composite
 	{
