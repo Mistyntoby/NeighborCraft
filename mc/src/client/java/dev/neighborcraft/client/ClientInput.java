@@ -200,7 +200,10 @@ final class ClientInput {
 				// Minecraft renders at Hello Neighbor's rate (to the option's nearest step of 10: rounded up, HN's 60.2 gave 70):
 				// faster, it drew frames HN never showed, and the picture HN showed was several of its frames behind (Steve's
 				// trail on turns)
-				int want = Math.clamp((int) Math.round(m.get("v").getAsDouble() / 10.0) * 10, 30, 240);
+				// twice HN's rate: at exactly HN's rate the two clocks drifted against each other and a frame now and then
+				// showed twice or was skipped (Steve juddered as he moved, the user); at twice it there is always a fresh one,
+				// and the stand-ins are posed from the frame HN will show (HN select_shadow_frame)
+				int want = Math.clamp((int) Math.round(m.get("v").getAsDouble() / 10.0) * 20, 30, 260);
 				if (minecraft.options.framerateLimit().get() != want) {
 					dev.neighborcraft.Passthrough.LOG.info("frame rate limit {} -> {} (Hello Neighbor's rate)", minecraft.options.framerateLimit().get(), want);
 					minecraft.options.framerateLimit().set(want);

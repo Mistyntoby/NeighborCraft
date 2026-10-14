@@ -721,3 +721,15 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   same block has nearly that depth, so its light bled onto a face turning edge-on (mostly edge). Now plane-aware: each
   texel is compared with this face's plane at the texel's place (the depth slope per pixel from Minecraft's depth, the
   same samples as the face normal), and the tolerance grows with the slope. Live 22:31:45.
+
+## Roles swapped: receivers in the player's view, the capture shows what is behind them (2026-10-13 night)
+- The user: faces still brightening, Steve stuttering, "how was this not a problem earlier?". Earlier the receiver's
+  light was read from the very pixel on screen (full size, anti-aliased, same frame); with the receivers only in the
+  capture it came from a quarter-size picture without anti-aliasing, a frame apart: every artifact since followed.
+- Now: receivers drawn for the player again (light pixel-exact, as before); the capture component's own HiddenActors
+  (offset 0x250) leaves them out, so the capture shows what is behind them; NeighborCraft.fx paints that (HDR x this
+  frame's exposure) where HN's depth is nearer than the capture's and Minecraft doesn't cover the pixel: a receiver
+  peeking out (the trailing clone). The re-projection marches to HN's depth again (bisection kept).
+- Steve's judder: Minecraft at exactly HN's 60 fps let the two clocks drift (a frame shown twice or skipped); now twice
+  HN's rate (120 here), the stand-ins still posed from the frame HN will show.
+- Built (HN, MC compiles, shader); the shader and DLL go in together at the next close.

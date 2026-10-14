@@ -405,7 +405,8 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 		// (and up to 1.5 blocks past the receiver: the capture is a quarter of the size, and on a face seen edge-on its depth
 		// was often the nearer front edge's, the march stopped short of the face and it came apart in streaks: the user's
 		// screenshots 22:14 and 22:23)
-		const float zHint = RecvActive ? min(zh, max(tex2Dlod(sRecv, float4(uv, 0, 0)).a * 0.01, 0.2) + 1.5) : zh;
+		// (the receivers are in the player's view again: HN's surface here is the receiver where there is one)
+		const float zHint = zh;
 		const float zNear = 0.2, zFar = max(min(zHint + allow, 400.0), 0.5);
 		float2 ndc = 0.0;
 		inside = false;
@@ -525,20 +526,33 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 	// with a coloured HN surface: a block sunk level with the grass); the colour stays the sun's
 	// the receiver's light: from HN's scene capture when the receivers are drawn only there, else from the screen where
 	// HN's surface is at Minecraft's depth (the receiver drawn in the player's view)
-	const float2 captured = RecvActive && cover > 0.0 ? capture_received(uv, zm, grad) : 0.0;
-	if (cover > 0.0 && ReceiverMatch > 0.0 && (captured.y > 0.0 || (!RecvActive && abs(zh - zm) < 0.06 + 0.01 * zm)))
+	// (the receivers are in the player's view again: their light pixel-exact from the screen; capture_received, the light
+	// from the scene capture, is kept for reference but unused: quarter-size, no anti-aliasing, a frame apart)
+	if (cover > 0.0 && ReceiverMatch > 0.0 && abs(zh - zm) < 0.06 + 0.01 * zm)
 	{
 		const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
 		// compressed (^0.6): the grey stand-in under dim indoor light came out much darker than HN's own bright-textured
 		// walls beside it (the user: Steve too dark in a lit room); edges keep their contrast, dim light lifts
 		// and never more than HN's own surfaces around it show (surround_cap: the stand-in's light can be the indirect
 		// grid's, brighter than the room)
-		const float g = min(clamp(pow(max((RecvActive ? captured.x : received_luma(uv, host)) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
+		const float g = min(clamp(pow(max(received_luma(uv, host) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
 		const float3 received = world.rgb * tint * g;
 		const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
-		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch * (RecvActive ? captured.y : 1.0));
+		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch);
 	}
-	outColor = float4(lit * visible + host * (1.0 - cover), 1.0);
+	// where a receiver peeks past Minecraft's picture (Steve's stand-in a frame apart from him: "a clone chasing my
+	// player"), what is behind it: the scene capture leaves the receivers out (bridge.cpp receivers_hidden_tick), so where
+	// HN's depth here is nearer than the capture's, HN drew a receiver, and the capture has the background (HDR, to the
+	// screen's brightness by this frame's exposure)
+	float3 shown = host;
+	if (RecvActive && cover < 1.0)
+	{
+		const float zc = tex2Dlod(sRecv, float4(uv, 0, 0)).a * 0.01;
+		const float e = tex2Dlod(sRecvExpA, float4(0.5, 0.5, 0, 0)).x;
+		if (zc > zh + 0.05 + 0.02 * zh && e != 0.0)
+			shown = saturate(tex2Dlod(sRecvSmooth, float4(uv, 0, 0)).rgb * exp(e));
+	}
+	outColor = float4(lit * visible + shown * (1.0 - cover), 1.0);
 	outInfo = float4(cover, cover > 0.0 ? zm : 0.0, zh, 0.0);
 }
 

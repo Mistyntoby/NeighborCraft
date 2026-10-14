@@ -1509,7 +1509,8 @@ namespace nc
 			UObject *level = nullptr;               // level_key: the capture's actor and target go with their level
 			UObject *actor = nullptr, *component = nullptr, *target = nullptr;
 			bool failed = false;
-			UObject *pc = nullptr; // whose HiddenActors hold ours
+			UObject *owner = nullptr;   // whose HiddenActors hold ours (the capture's component)
+			UObject *levelPc = nullptr; // the controller the capture was made under
 			int32_t base = 0;      // the entries before ours (the engine's own, if any)
 			int32_t ours = 0;      // ours after them
 			bool hiding = false;
@@ -1522,17 +1523,18 @@ namespace nc
 			int32_t num, max;
 		};
 
-		/// Our entries in `pc`'s HiddenActors become `actors` (an engine-owned TArray<AActor*>: grown with the engine's own
-		/// allocator, which frees it on a level change). Never holds an actor we destroyed: rewritten at the end of each
-		/// tick and emptied before stand-ins are destroyed (release_hidden_receivers).
-		void set_hidden_receivers(UObject *pc, const std::vector<UObject *> &actors)
+		/// Our entries in the capture component's HiddenActors become `actors` (an engine-owned TArray<AActor*>: grown with
+		/// the engine's own allocator, which frees it with its owner). Never holds an actor we destroyed: rewritten at the end
+		/// of each tick and emptied before stand-ins are destroyed (release_hidden_receivers).
+		void set_hidden_receivers(UObject *owner, const std::vector<UObject *> &actors)
 		{
-			auto *a = pc ? pc->GetValuePtrByPropertyNameInChain<RawActorArray>(STR("HiddenActors")) : nullptr;
+			auto *a = owner ? capture_field<RawActorArray>(owner, STR("HiddenActors"), 0x250) : nullptr;
+			UObject *pc = owner;
 			if (!a || !GMalloc || !*GMalloc)
 				return;
-			if (pc != g_rc.pc)
+			if (pc != g_rc.owner)
 			{
-				g_rc.pc = pc;
+				g_rc.owner = pc;
 				g_rc.base = a->num;
 				g_rc.ours = 0;
 			}
@@ -1557,8 +1559,8 @@ namespace nc
 		/// Our entries out of the controller's list (before stand-ins are destroyed in the middle of a tick).
 		void release_hidden_receivers()
 		{
-			if (g_rc.pc && g_rc.ours > 0)
-				set_hidden_receivers(g_rc.pc, {});
+			if (g_rc.owner && g_rc.ours > 0)
+				set_hidden_receivers(g_rc.owner, {});
 		}
 
 		/// The capture, made once per level, follows HN's camera (driving ticks).
@@ -1569,16 +1571,18 @@ namespace nc
 				g_rc.checked = true;
 				g_rc.visible = bool(std::ifstream(module_dir() + L"neighborcraft_receivers_visible.txt"));
 				log(g_rc.visible ? L"receivers: drawn for the player (neighborcraft_receivers_visible.txt)"
-								 : L"receivers: seen only by a scene capture (the player's camera skips them)");
+								 : L"receivers: drawn for the player; a scene capture without them shows what is behind (for where they peek out)");
 			}
 			if (g_rc.visible)
 				return;
 			if (g_rc.level != level_key(pc))
 			{
 				// a new level (or a level streamed in or out): the capture is made again (its actor may have gone with it)
-				if (g_rc.actor && g_rc.level && g_rc.pc == pc)
+				if (g_rc.actor && g_rc.level && g_rc.levelPc == pc)
 					Call(g_rc.actor, STR("K2_DestroyActor")).invoke();
+				g_rc.owner = nullptr, g_rc.ours = 0; // the list went with the component
 				g_rc.level = level_key(pc);
+				g_rc.levelPc = pc;
 				g_rc.actor = g_rc.component = g_rc.target = nullptr;
 				g_rc.failed = false;
 			}
@@ -1646,12 +1650,28 @@ namespace nc
 		/// End of every tick: the receivers hidden from the player while the compositor reads them from the capture.
 		void receivers_hidden_tick(UObject *pc)
 		{
-			const bool hiding = !g_rc.visible && g_rc.actor && compositor::receiver_texture_found();
+			// Roles (2026-10-13 night): the receivers stay in the player's view (their light read pixel-exact from the screen,
+			// as before), and the scene capture leaves them out: it shows what is behind them, and the compositor paints
+			// that where a receiver peeks past Minecraft's picture (Steve's trailing clone). The other way round (receivers
+			// only in the capture) read their light from a quarter-size picture without anti-aliasing a frame apart:
+			// bleeding edges, shimmer, faces brightening, Steve stuttering (the user).
+			if (g_rc.component && g_rc.level != level_key(pc))
+			{
+				// the capture belongs to a level that changed: under the same controller only a streamed level came or went
+				// and the capture (in the persistent level) lives: destroyed (it would go on rendering); else it went with
+				// its level: only forgotten. Made again by receiver_capture_tick
+				if (g_rc.actor && g_rc.levelPc == pc)
+					Call(g_rc.actor, STR("K2_DestroyActor")).invoke();
+				g_rc.component = g_rc.actor = g_rc.target = nullptr;
+				g_rc.owner = nullptr, g_rc.ours = 0;
+				g_rc.level = nullptr;
+			}
+			const bool hiding = !g_rc.visible && g_rc.component && compositor::receiver_texture_found();
 			if (hiding != g_rc.hiding)
 			{
 				g_rc.hiding = hiding;
-				log(hiding ? L"receivers: hidden from the player, their light read from the scene capture"
-						   : L"receivers: drawn for the player (no capture texture in the compositor)");
+				log(hiding ? L"receivers: left out of the scene capture: the compositor paints what is behind them where they peek out"
+						   : L"receivers: no capture texture in the compositor: nothing behind them to paint");
 			}
 			if (!hiding && g_rc.actor && GetTickCount() - g_rc.since > 15000)
 			{
@@ -1673,7 +1693,7 @@ namespace nc
 						actors.push_back(g_pool.boxes[i]);
 			}
 			if (hiding || g_rc.ours > 0)
-				set_hidden_receivers(pc, actors);
+				set_hidden_receivers(g_rc.component, actors);
 		}
 
 		/// The colour of HN's sun (its directional light's LightColor, following HN's day and night), once a second, to
@@ -1831,7 +1851,7 @@ namespace nc
 			if (alive)
 				release_hidden_receivers(); // before they're destroyed
 			else
-				g_rc.pc = nullptr, g_rc.ours = 0; // the controller went with its level
+				g_rc.owner = nullptr, g_rc.ours = 0; // the capture went with its level
 			if (alive)
 			{
 				for (UObject *part : g_steveShadow.parts)
