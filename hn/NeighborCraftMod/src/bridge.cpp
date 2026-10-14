@@ -1148,7 +1148,6 @@ namespace nc
 			}
 		}
 
-		void capture_test_cube(UObject *a); // the scene-capture prototype's test cube (below)
 		UObject *spawn_shadow(UObject *context, const Vec3f &centre, uint32_t rgb)
 		{
 			// exactly a block: flush with its neighbours (a 0.99 stand-in left 1 cm gaps, through which the compositor read
@@ -1158,297 +1157,7 @@ namespace nc
 			// frames after HN hears of it, and the grey stand-in showed in between (the user)
 			if (a && receiver_material(context))
 				g_pendingReceivers.push_back({a, GetTickCount() + 100, rgb});
-			if (a)
-				capture_test_cube(a);
 			return a;
-		}
-
-		// ---- scene-capture receiver prototype (2026-10-13) -------------------------------------------------------
-		// The receivers (stand-ins HN draws so the compositor can read HN's light on Minecraft's surfaces) show wherever
-		// Minecraft's picture doesn't cover them. The experiment: hide ONE receiver from the player's camera only
-		// (APlayerController.HiddenActors) and let a scene capture that follows the camera see it, lit by HN with its
-		// shadows. Off unless dlls/neighborcraft_capture_test.txt exists ("hide" in it: the test cube hidden from the
-		// player; else shown, for comparing the capture with the screen). Rollback: delete the file (or git tag
-		// receivers-visible-baseline).
-		struct CaptureTest
-		{
-			bool checked = false, on = false, hide = false;
-			int source = 2;             // ESceneCaptureSource (the file's second word; 2: final colour)
-			UObject *level = nullptr;   // level_key
-			WeakRef cube;        // the test receiver (the first block stand-in placed while on)
-			WeakRef actor;       // the SceneCapture2D
-			WeakRef component;   // its CaptureComponent2D
-			WeakRef target;      // its TextureRenderTarget2D
-			bool hidden = false;        // the cube is in the player controller's HiddenActors
-			DWORD nextLog = 0, nextExport = 0, nextRead = 0;
-		} g_cap;
-		constexpr int kCapW = 480, kCapH = 270; // a size nothing else in HN uses: the compositor could find it by it
-
-		/// A field of the capture component: by name, else at its offset in this build (CXXHeaderDump, Engine.hpp
-		/// USceneCaptureComponent(2D)): the name lookup came back empty for FOVAngle in game, and writing through it
-		/// crashed HN (19:20:57, bridge.cpp capture_test_tick).
-		template <typename T>
-		T *capture_field(UObject *component, const TCHAR *name, size_t offset)
-		{
-			if (!component)
-				return nullptr;
-			if (T *p = component->GetValuePtrByPropertyNameInChain<T>(name))
-				return p;
-			if (!is_a(component, L"SceneCaptureComponent2D"))
-				return nullptr;
-			static std::unordered_set<std::wstring> logged;
-			if (logged.insert(name).second)
-				log(std::wstring(L"capture test: ") + name + L" not found by name: at its offset " + std::to_wstring(offset));
-			return reinterpret_cast<T *>(reinterpret_cast<uint8_t *>(component) + offset);
-		}
-
-		bool capture_test_on()
-		{
-			// read again every 5 s: "show" and "hide" switch live (A/B in one session)
-			if (g_cap.checked && g_cap.on && GetTickCount() > g_cap.nextRead)
-			{
-				g_cap.nextRead = GetTickCount() + 5000;
-				std::ifstream f(module_dir() + L"neighborcraft_capture_test.txt");
-				if (!f)
-				{
-					// the file gone: the test ends (it went on rendering the scene twice, reading pixels back and exporting
-					// every 10 s until the game was restarted: the user's "shit load of lag")
-					g_cap.on = false;
-					if (UObject *component = g_cap.component.Get())
-						if (bool *everyFrame = capture_field<bool>(component, STR("bCaptureEveryFrame"), 0x280))
-							*everyFrame = false;
-					log(L"capture test: off (the file is gone)");
-					return false;
-				}
-				std::string word;
-				int source = 2;
-				f >> word >> source;
-				if (source != g_cap.source)
-				{
-					g_cap.source = source;
-					log(L"capture test: capture source " + std::to_wstring(source));
-				}
-				if ((word == "hide") != g_cap.hide)
-				{
-					g_cap.hide = word == "hide";
-					log(std::wstring(L"capture test: now ") + (g_cap.hide ? L"hiding" : L"showing") + L" the test cube");
-				}
-			}
-			if (!g_cap.checked)
-			{
-				g_cap.checked = true;
-				std::ifstream f(module_dir() + L"neighborcraft_capture_test.txt");
-				g_cap.on = bool(f);
-				std::string word;
-				if (f)
-					f >> word;
-				g_cap.hide = word == "hide";
-				if (g_cap.on)
-					log(std::wstring(L"capture test: on, the test cube ") + (g_cap.hide ? L"hidden from the player's camera" : L"shown (comparison)"));
-			}
-			return g_cap.on;
-		}
-
-		/// Adds `actor` to the controller's HiddenActors (an engine-owned TArray<AActor*>: grown with the engine's own
-		/// allocator, as the engine frees it with its own on a level change).
-		bool hide_from_player(UObject *pc, UObject *actor)
-		{
-			struct RawArray
-			{
-				UObject **data;
-				int32_t num, max;
-			};
-			auto *a = pc->GetValuePtrByPropertyNameInChain<RawArray>(STR("HiddenActors"));
-			if (!a || !GMalloc || !*GMalloc)
-				return false;
-			for (int32_t i = 0; i < a->num; ++i)
-				if (a->data[i] == actor)
-					return true;
-			if (a->num == a->max)
-			{
-				const int32_t max = a->max * 2 + 4;
-				void *grown = (*GMalloc)->Realloc(a->data, size_t(max) * sizeof(UObject *));
-				if (!grown)
-					return false;
-				a->data = static_cast<UObject **>(grown);
-				a->max = max;
-			}
-			a->data[a->num++] = actor;
-			return true;
-		}
-
-		void capture_test_cube(UObject *a)
-		{
-			// the newest block placed (the first one spawned was an old block synced in at load, far off)
-			if (capture_test_on())
-			{
-				g_cap.cube = a;
-				g_cap.hidden = false;
-				log(L"capture test: the test cube is " + a->GetName());
-			}
-		}
-
-		/// Takes `actor` out of the controller's HiddenActors again.
-		void unhide_from_player(UObject *pc, UObject *actor)
-		{
-			struct RawArray
-			{
-				UObject **data;
-				int32_t num, max;
-			};
-			auto *a = pc->GetValuePtrByPropertyNameInChain<RawArray>(STR("HiddenActors"));
-			if (!a)
-				return;
-			for (int32_t i = 0; i < a->num; ++i)
-				if (a->data[i] == actor)
-				{
-					a->data[i] = a->data[--a->num];
-					return;
-				}
-		}
-
-		void capture_test_tick(UObject *pc, UObject *pawn)
-		{
-			if (!capture_test_on())
-				return;
-			if (g_cap.level != level_key(pc))
-			{
-				const WeakRef cube = g_cap.cube; // a block placed before the first tick here is still the test cube
-				const int source = g_cap.source;
-				g_cap = CaptureTest{true, true, g_cap.hide};
-				g_cap.source = source;
-				g_cap.level = level_key(pc);
-				g_cap.cube = cube;
-			}
-			UObject *cube = g_cap.cube.Get();
-			// alive while it is still one of the block stand-ins (broken: destroyed and out of g_shadows)
-			bool known = false;
-			for (const auto &[key, a] : g_shadows)
-				known = known || a == cube;
-			if (!cube || !known)
-				return; // waiting for a block placed
-			if (!g_cap.actor.Get())
-			{
-				static UObject *captureClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.SceneCapture2D"));
-				static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
-				UObject *statics = gameplay_statics();
-				if (!captureClass || !rendering || !statics)
-				{
-					log(L"capture test: no SceneCapture2D class / rendering library");
-					g_cap.on = false;
-					return;
-				}
-				Transform4 t;
-				Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
-				begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), captureClass).set(STR("SpawnTransform"), t)
-					.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
-				UObject *const *actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
-				if (!actor || !*actor)
-				{
-					log(L"capture test: the SceneCapture2D couldn't be spawned");
-					g_cap.on = false;
-					return;
-				}
-				Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
-				UObject **component = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("CaptureComponent2D"));
-				Call make(rendering, STR("CreateRenderTarget2D"));
-				make.set<UObject *>(STR("WorldContextObject"), pawn).set<int32_t>(STR("Width"), kCapW).set<int32_t>(STR("Height"), kCapH).set<uint8_t>(STR("Format"), 5); // RTF_RGBA16f (4.20 exports float targets only)
-				UObject *const *target = make.invoke() ? make.param<UObject *>(STR("ReturnValue")) : nullptr;
-				if (!component || !*component || !target || !*target)
-				{
-					log(L"capture test: no capture component or render target");
-					g_cap.on = false;
-					return;
-				}
-				UObject **texture = capture_field<UObject *>(*component, STR("TextureTarget"), 0x2E0);
-				uint8_t *source = capture_field<uint8_t>(*component, STR("CaptureSource"), 0x2E8);
-				bool *everyFrame = capture_field<bool>(*component, STR("bCaptureEveryFrame"), 0x280);
-				if (!texture || !source || !everyFrame)
-				{
-					log(L"capture test: the capture component's fields weren't found: off");
-					g_cap.on = false;
-					return;
-				}
-				*texture = *target;
-				*source = 2; // SCS_FinalColorLDR: as the screen
-				*everyFrame = true;
-				// HN's own player out of it: its body is hidden from the player's camera by owner-only flags, which a capture
-				// (no owner) ignores: the first export showed the lower half black, the camera inside the body
-				Call(*component, STR("HideActorComponents")).set<UObject *>(STR("InActor"), pawn).invoke();
-				g_cap.actor = *actor;
-				g_cap.component = *component;
-				g_cap.target = *target;
-				log(L"capture test: " + (*actor)->GetFullName() + L" -> " + (*target)->GetFullName() + L" (" + std::to_wstring(kCapW) + L"x" +
-					std::to_wstring(kCapH) + L", final colour)");
-			}
-			UObject *actor = g_cap.actor.Get(), *component = g_cap.component.Get(), *target = g_cap.target.Get();
-			if (!actor || !component || !target)
-				return;
-			// the test cube: hidden from the player's camera only (the capture has its own hidden list)
-			if (g_cap.hide && !g_cap.hidden)
-			{
-				g_cap.hidden = hide_from_player(pc, cube);
-				log(std::wstring(L"capture test: the test cube ") + (g_cap.hidden ? L"is in the player controller's HiddenActors" : L"couldn't be hidden"));
-			}
-			else if (!g_cap.hide && g_cap.hidden)
-			{
-				unhide_from_player(pc, cube);
-				g_cap.hidden = false;
-				log(L"capture test: the test cube is shown to the player again");
-			}
-			// the capture follows the camera HN renders with
-			Camera cam;
-			if (!read_camera(pc, cam))
-				return;
-			Call(actor, STR("K2_SetActorLocationAndRotation")).set(STR("NewLocation"), cam.loc).set(STR("NewRotation"), cam.rot)
-				.set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
-			if (float *fov = capture_field<float>(component, STR("FOVAngle"), 0x2D4))
-				*fov = cam.hfov;
-			if (uint8_t *source = capture_field<uint8_t>(component, STR("CaptureSource"), 0x2E8))
-				*source = uint8_t(g_cap.source);
-			// diagnostics: the capture's pixel at the cube's centre, every 2 s; the whole capture as a file every 30 s
-			if (GetTickCount() > g_cap.nextLog)
-			{
-				g_cap.nextLog = GetTickCount() + 2000;
-				Vec3f at;
-				const Vec3f *c = actor_location(cube, at) ? &at : nullptr;
-				if (!c)
-					log(L"capture test: the test cube's position couldn't be read");
-				if (c)
-				{
-					const float d2r = 3.14159265f / 180.0f, cp = std::cos(cam.rot.pitch * d2r), sp = std::sin(cam.rot.pitch * d2r);
-					const float cy = std::cos(cam.rot.yaw * d2r), sy = std::sin(cam.rot.yaw * d2r);
-					const Vec3f f{cp * cy, cp * sy, sp}, r{-sy, cy, 0.0f}, u{-sp * cy, -sp * sy, cp};
-					const Vec3f d{c->x - cam.loc.x, c->y - cam.loc.y, c->z - cam.loc.z};
-					const float df = d.x * f.x + d.y * f.y + d.z * f.z, dr = d.x * r.x + d.y * r.y + d.z * r.z, du = d.x * u.x + d.y * u.y + d.z * u.z;
-					const float t = std::tan(cam.hfov * 0.5f * d2r);
-					const float nx = df > 0.0f ? dr / df / t : 9.0f, ny = df > 0.0f ? du / df / (t * kCapH / kCapW) : 9.0f;
-					if (std::abs(nx) < 1.0f && std::abs(ny) < 1.0f)
-					{
-						static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
-						const int px = int((nx + 1.0f) * 0.5f * kCapW), py = int((1.0f - ny) * 0.5f * kCapH);
-						Call read(rendering, STR("ReadRenderTargetRawPixel"));
-						read.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("TextureRenderTarget"), target).set<int32_t>(STR("X"), px).set<int32_t>(STR("Y"), py);
-						const uint8_t *bgra = read.invoke() ? read.param<uint8_t>(STR("ReturnValue")) : nullptr;
-						if (bgra)
-							log(L"capture test: the cube's centre at capture pixel " + std::to_wstring(px) + L"," + std::to_wstring(py) + L" (" +
-								std::to_wstring(int(df / 100.0f)) + L" m): RGB " + std::to_wstring(bgra[2]) + L" " + std::to_wstring(bgra[1]) + L" " +
-								std::to_wstring(bgra[0]) + (g_cap.hidden ? L" (hidden from the player)" : L" (shown to the player)"));
-					}
-					else
-						log(L"capture test: the cube is off the capture");
-				}
-			}
-			if (GetTickCount() > g_cap.nextExport)
-			{
-				g_cap.nextExport = GetTickCount() + 10000;
-				static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
-				static int n = 0;
-				const std::wstring name = L"capture_" + std::to_wstring(n++) + L".hdr";
-				Call(rendering, STR("ExportRenderTarget")).set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("TextureRenderTarget"), target)
-					.set(STR("FilePath"), FString(module_dir().c_str())).set(STR("FileName"), FString(name.c_str())).invoke(); // "FileName", as the icon export
-				log(L"capture test: exported " + module_dir() + name);
-			}
 		}
 
 		/// HN's lights as the engine has them, once per level: which can cast a dynamic shadow at all (a static light's
@@ -1767,6 +1476,206 @@ namespace nc
 			P.used = used;
 		}
 
+		// ---- receivers seen only by a scene capture ----------------------------------------------------------------
+		// The receivers (stand-ins HN draws so the compositor can read HN's light on Minecraft's surfaces) showed wherever
+		// Minecraft's picture didn't cover them: two renderers are never in step, and Steve's stand-in trailed him on
+		// every turn (the user: "a clone of myself chasing my player"). Now they are in the player controller's
+		// HiddenActors (gone from the player's camera only) and a SceneCapture2D that follows the camera sees them, lit by
+		// HN with its shadows (the 2026-10-13 prototype: [game] verified both). The capture's texture (colour HDR, depth in
+		// A) is found by the ReShade add-on by its size and read by NeighborCraft.fx (capture_received). Until the add-on
+		// has it, or with dlls/neighborcraft_receivers_visible.txt, the receivers stay visible (the old path).
+
+		/// A field of the capture component: by name, else at its offset in this build (CXXHeaderDump, Engine.hpp
+		/// USceneCaptureComponent(2D)): the name lookup came back empty for FOVAngle in game, and writing through it
+		/// crashed HN (2026-10-13 19:20:57).
+		template <typename T>
+		T *capture_field(UObject *component, const TCHAR *name, size_t offset)
+		{
+			if (!component)
+				return nullptr;
+			if (T *p = component->GetValuePtrByPropertyNameInChain<T>(name))
+				return p;
+			if (!is_a(component, L"SceneCaptureComponent2D"))
+				return nullptr;
+			static std::unordered_set<std::wstring> logged;
+			if (logged.insert(name).second)
+				log(std::wstring(L"receivers: the capture's ") + name + L" not found by name: at its offset " + std::to_wstring(offset));
+			return reinterpret_cast<T *>(reinterpret_cast<uint8_t *>(component) + offset);
+		}
+
+		struct ReceiverCapture
+		{
+			bool checked = false, visible = false; // visible: the fallback file (receivers drawn for the player, no capture)
+			UObject *level = nullptr;               // level_key: the capture's actor and target go with their level
+			UObject *actor = nullptr, *component = nullptr, *target = nullptr;
+			bool failed = false;
+			UObject *pc = nullptr; // whose HiddenActors hold ours
+			int32_t base = 0;      // the entries before ours (the engine's own, if any)
+			int32_t ours = 0;      // ours after them
+			bool hiding = false;
+			DWORD since = 0;       // the capture made at (the add-on's report is awaited a while)
+		} g_rc;
+
+		struct RawActorArray
+		{
+			UObject **data;
+			int32_t num, max;
+		};
+
+		/// Our entries in `pc`'s HiddenActors become `actors` (an engine-owned TArray<AActor*>: grown with the engine's own
+		/// allocator, which frees it on a level change). Never holds an actor we destroyed: rewritten at the end of each
+		/// tick and emptied before stand-ins are destroyed (release_hidden_receivers).
+		void set_hidden_receivers(UObject *pc, const std::vector<UObject *> &actors)
+		{
+			auto *a = pc ? pc->GetValuePtrByPropertyNameInChain<RawActorArray>(STR("HiddenActors")) : nullptr;
+			if (!a || !GMalloc || !*GMalloc)
+				return;
+			if (pc != g_rc.pc)
+			{
+				g_rc.pc = pc;
+				g_rc.base = a->num;
+				g_rc.ours = 0;
+			}
+			if (a->num != g_rc.base + g_rc.ours)
+				g_rc.base = std::max(0, a->num - g_rc.ours); // someone else changed the list: keep theirs in front
+			const int32_t want = g_rc.base + int32_t(actors.size());
+			if (want > a->max)
+			{
+				const int32_t max = want + 64;
+				void *grown = (*GMalloc)->Realloc(a->data, size_t(max) * sizeof(UObject *));
+				if (!grown)
+					return;
+				a->data = static_cast<UObject **>(grown);
+				a->max = max;
+			}
+			for (size_t i = 0; i < actors.size(); ++i)
+				a->data[g_rc.base + int32_t(i)] = actors[i];
+			a->num = want;
+			g_rc.ours = int32_t(actors.size());
+		}
+
+		/// Our entries out of the controller's list (before stand-ins are destroyed in the middle of a tick).
+		void release_hidden_receivers()
+		{
+			if (g_rc.pc && g_rc.ours > 0)
+				set_hidden_receivers(g_rc.pc, {});
+		}
+
+		/// The capture, made once per level, follows HN's camera (driving ticks).
+		void receiver_capture_tick(UObject *pc, UObject *pawn)
+		{
+			if (!g_rc.checked)
+			{
+				g_rc.checked = true;
+				g_rc.visible = bool(std::ifstream(module_dir() + L"neighborcraft_receivers_visible.txt"));
+				log(g_rc.visible ? L"receivers: drawn for the player (neighborcraft_receivers_visible.txt)"
+								 : L"receivers: seen only by a scene capture (the player's camera skips them)");
+			}
+			if (g_rc.visible)
+				return;
+			if (g_rc.level != level_key(pc))
+			{
+				// a new level (or a level streamed in or out): the capture is made again (its actor may have gone with it)
+				if (g_rc.actor && g_rc.level && g_rc.pc == pc)
+					Call(g_rc.actor, STR("K2_DestroyActor")).invoke();
+				g_rc.level = level_key(pc);
+				g_rc.actor = g_rc.component = g_rc.target = nullptr;
+				g_rc.failed = false;
+			}
+			if (!g_rc.actor && !g_rc.failed)
+			{
+				g_rc.failed = true; // until it worked
+				static UObject *captureClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.SceneCapture2D"));
+				static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
+				UObject *statics = gameplay_statics();
+				if (!captureClass || !rendering || !statics)
+				{
+					log(L"receivers: no SceneCapture2D class or rendering library: the receivers stay visible");
+					return;
+				}
+				Transform4 t;
+				Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+				begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), captureClass).set(STR("SpawnTransform"), t)
+					.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
+				UObject *const *actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
+				if (!actor || !*actor)
+				{
+					log(L"receivers: the scene capture couldn't be spawned: the receivers stay visible");
+					return;
+				}
+				Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
+				UObject **component = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("CaptureComponent2D"));
+				Call make(rendering, STR("CreateRenderTarget2D"));
+				make.set<UObject *>(STR("WorldContextObject"), pawn).set<int32_t>(STR("Width"), int32_t(compositor::kReceiverW))
+					.set<int32_t>(STR("Height"), int32_t(compositor::kReceiverH)).set<uint8_t>(STR("Format"), 5); // RTF_RGBA16f
+				UObject *const *target = make.invoke() ? make.param<UObject *>(STR("ReturnValue")) : nullptr;
+				UObject **texture = component && *component ? capture_field<UObject *>(*component, STR("TextureTarget"), 0x2E0) : nullptr;
+				uint8_t *source = component && *component ? capture_field<uint8_t>(*component, STR("CaptureSource"), 0x2E8) : nullptr;
+				bool *everyFrame = component && *component ? capture_field<bool>(*component, STR("bCaptureEveryFrame"), 0x280) : nullptr;
+				if (!target || !*target || !texture || !source || !everyFrame)
+				{
+					log(L"receivers: the capture's component, target or fields weren't found: the receivers stay visible");
+					Call(*actor, STR("K2_DestroyActor")).invoke();
+					return;
+				}
+				*texture = *target;
+				*source = 3; // SCS_SceneColorSceneDepth: HDR colour (its own exposure made FinalColorLDR black), depth in A
+				*everyFrame = true;
+				// HN's own player out of it: its body is hidden from the player's camera by owner-only flags, which a capture
+				// (no owner) ignores
+				Call(*component, STR("HideActorComponents")).set<UObject *>(STR("InActor"), pawn).invoke();
+				g_rc.actor = *actor;
+				g_rc.component = *component;
+				g_rc.target = *target;
+				g_rc.failed = false;
+				g_rc.since = GetTickCount();
+				log(L"receivers: scene capture " + (*actor)->GetName() + L" -> " + (*target)->GetName() + L" (" + std::to_wstring(compositor::kReceiverW) + L"x" +
+					std::to_wstring(compositor::kReceiverH) + L", HDR colour and depth)");
+			}
+			if (!g_rc.actor)
+				return;
+			Camera cam;
+			if (!read_camera(pc, cam))
+				return;
+			Call(g_rc.actor, STR("K2_SetActorLocationAndRotation")).set(STR("NewLocation"), cam.loc).set(STR("NewRotation"), cam.rot)
+				.set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+			if (float *fov = capture_field<float>(g_rc.component, STR("FOVAngle"), 0x2D4))
+				*fov = cam.hfov;
+		}
+
+		/// End of every tick: the receivers hidden from the player while the compositor reads them from the capture.
+		void receivers_hidden_tick(UObject *pc)
+		{
+			const bool hiding = !g_rc.visible && g_rc.actor && compositor::receiver_texture_found();
+			if (hiding != g_rc.hiding)
+			{
+				g_rc.hiding = hiding;
+				log(hiding ? L"receivers: hidden from the player, their light read from the scene capture"
+						   : L"receivers: drawn for the player (no capture texture in the compositor)");
+			}
+			if (!hiding && g_rc.actor && GetTickCount() - g_rc.since > 15000)
+			{
+				static bool told = false;
+				if (!told)
+				{
+					told = true;
+					log(L"receivers: the compositor hasn't found the capture's texture after 15 s: the receivers stay visible");
+				}
+			}
+			compositor::set_receivers_captured(hiding);
+			std::vector<UObject *> actors;
+			if (hiding)
+			{
+				for (const auto &[key, a] : g_shadows)
+					actors.push_back(a);
+				for (size_t i = 0; i < g_pool.boxes.size(); ++i)
+					if (i < g_pool.receiving.size() && g_pool.receiving[i] > 0)
+						actors.push_back(g_pool.boxes[i]);
+			}
+			if (hiding || g_rc.ours > 0)
+				set_hidden_receivers(pc, actors);
+		}
+
 		/// The colour of HN's sun (its directional light's LightColor, following HN's day and night), once a second, to
 		/// the compositor: Minecraft's surfaces are tinted by it. The compositor used to take the light's colour from
 		/// the picture, which is mostly the surfaces' own colour: a cobblestone wall went green while the screen
@@ -1920,6 +1829,10 @@ namespace nc
 		void shadow_extras_reset(bool alive)
 		{
 			if (alive)
+				release_hidden_receivers(); // before they're destroyed
+			else
+				g_rc.pc = nullptr, g_rc.ours = 0; // the controller went with its level
+			if (alive)
 			{
 				for (UObject *part : g_steveShadow.parts)
 					if (part)
@@ -1941,6 +1854,8 @@ namespace nc
 
 		void destroy_colliders(bool alive)
 		{
+			if (alive)
+				release_hidden_receivers(); // before the stand-ins are destroyed
 			if (alive)
 			{
 				for (auto &[key, actor] : g_colliders)
@@ -6480,7 +6395,7 @@ namespace nc
 			steve_shadow_tick(pc, pawn);
 			shadow_boxes_tick(pc, pawn);
 			pending_receivers_tick();
-			capture_test_tick(pc, pawn);
+			receiver_capture_tick(pc, pawn);
 			lend_shadows_tick(pc);
 			light_colour_tick(pc);
 			for (const std::string &id : g_throwRequests)
@@ -6492,6 +6407,7 @@ namespace nc
 		g_throwRequests.clear();
 		if (g_driving && g_mcReady)
 			dynamic_tick(pc);
+		receivers_hidden_tick(pc);
 		// The loose objects near Steve are moving collision (see the moving parts), so the world probe looks past them:
 		// past their actor, as traces ignore whole actors. Only when the object is its actor (its root component): a
 		// loose part of a bigger actor (a street's bins, a yard's props) used to make the probe ignore that whole actor,
