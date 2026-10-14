@@ -751,3 +751,6 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - Faint coloured silhouette beside Steve when turning (screenshot 23:00): not the stand-ins (now cast only): Minecraft's
   picture is 1-3 frames older than HN's camera, and re-projecting a thin, close, turning model leaves a trace. Only a
   native Steve (phase 5) or a shorter frame path removes it.
+- [game] 23:08-23:15: native blocks VERIFIED by the user ("blocks are good now") and by screenshots: cobblestone drawn by
+  HN (ReShade off: still there), sharp, lit by HN's sky in shade, no shimmer. Every eligible full cube native (n=4096).
+  Seen once, not yet explained: a glowing white square near the neighbour's door in HN's own picture (n1/n1off.png).
