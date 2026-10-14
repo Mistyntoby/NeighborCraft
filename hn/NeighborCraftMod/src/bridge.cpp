@@ -799,6 +799,17 @@ namespace nc
 		// primitive in the scene.) Glass, slabs, torches (not full opaque cubes) get none.
 
 		std::unordered_map<unsigned long long, UObject *> g_shadows; // block -> its shadow stand-in
+		// Blocks HN draws itself (native rendering, phase 2: Minecraft leaves them out of its picture, mc NativeBlocks):
+		// Unreal's 1 m cube with the block's texture, lit, shadowed, depth-tested and anti-aliased by HN. Instead of a
+		// stand-in: two renderers never agreed to the pixel (a trailing clone, light bleeding in around blocks).
+		std::unordered_map<unsigned long long, UObject *> g_native;
+		struct PendingNative
+		{
+			int x, y, z;
+			std::string tex; // empty: no longer native
+		};
+		std::vector<PendingNative> g_pendingNative;
+		std::unordered_map<std::string, UObject *> g_nativeMaterials; // this level's, by texture
 		bool g_proxiesShown = false; // F6: the stand-ins drawn in the picture as well (to see where they are)
 		/// A stand-in seen by the camera or not: hidden (shadow only) normally; with F6 also drawn, to check its place and
 		/// size. Hidden in game, its shadow stays (bCastHiddenShadow).
@@ -881,7 +892,7 @@ namespace nc
 		/// keeper dies with its level; the pool's level change makes new materials (shadow_boxes_tick).
 		UObject *new_receiver_material(UObject *context, const std::wstring &file, const std::string &png)
 		{
-			if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
+			if (!png.empty() && GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
 				if (FILE *f = _wfopen(file.c_str(), L"wb"))
 				{
 					fwrite(png.data(), 1, png.size(), f);
@@ -1036,6 +1047,27 @@ namespace nc
 			if (m)
 				log(L"receivers: a material in " + std::wstring(name) + L" (Minecraft's colour " + std::to_wstring(rgb) + L")");
 			return m ? m : g_receiverMaterial;
+		}
+
+		/// Where Minecraft writes the textures of native blocks (mc NativeBlocks.dir).
+		std::wstring native_texture_dir()
+		{
+			wchar_t buffer[MAX_PATH] = {};
+			const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH);
+			return (n ? std::wstring(buffer) : std::wstring(L".")) + L"\\NeighborCraft\\blocks\\";
+		}
+
+		/// HN's base_m with a native block's texture (the PNG Minecraft wrote, imported), kept alive by its keeper.
+		UObject *native_material(UObject *context, const std::string &tex)
+		{
+			if (auto it = g_nativeMaterials.find(tex); it != g_nativeMaterials.end())
+				return it->second;
+			const std::wstring file = native_texture_dir() + std::wstring(tex.begin(), tex.end()) + L".png";
+			UObject *m = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES ? new_receiver_material(context, file, std::string()) : nullptr;
+			g_nativeMaterials[tex] = m;
+			log(m ? L"native blocks: a material for " + std::wstring(tex.begin(), tex.end())
+				  : L"native blocks: no texture file " + file + L": the block stays Minecraft's");
+			return m;
 		}
 
 		/// A stand-in drawn by HN (receiver: its grey material, visible) or only casting (hidden).
@@ -1882,11 +1914,55 @@ namespace nc
 					Call(actor, STR("K2_DestroyActor")).invoke();
 				for (auto &[key, actor] : g_shadows)
 					Call(actor, STR("K2_DestroyActor")).invoke();
+				for (auto &[key, actor] : g_native)
+					Call(actor, STR("K2_DestroyActor")).invoke();
 			}
 			g_colliders.clear();
 			g_shadows.clear();
+			g_native.clear();
+			g_nativeMaterials.clear(); // their keepers went with the level (or were destroyed with the stand-ins' pool)
 			g_probeIgnore.clear();
 			shadow_extras_reset(alive);
+		}
+
+		void destroy_native(unsigned long long key)
+		{
+			if (auto it = g_native.find(key); it != g_native.end())
+			{
+				Call(it->second, STR("K2_DestroyActor")).invoke();
+				g_native.erase(it);
+			}
+		}
+
+		/// {"t":"nblock","p":[x,y,z],"tex":name} from Minecraft: HN draws this block (tex "": no longer).
+		void apply_native(UObject *context, const std::vector<PendingNative> &blocks)
+		{
+			release_hidden_receivers(); // stand-ins are destroyed below: never left in an engine list
+			for (const PendingNative &b : blocks)
+			{
+				const unsigned long long key = cell_key(b.x, b.y, b.z);
+				destroy_native(key);
+				if (b.tex.empty())
+					continue;
+				UObject *material = native_material(context, b.tex);
+				if (!material)
+					continue;
+				// its stand-in goes: the native cube casts its own shadow and is its own receiver of HN's light
+				if (auto it = g_shadows.find(key); it != g_shadows.end())
+				{
+					Call(it->second, STR("K2_DestroyActor")).invoke();
+					g_shadows.erase(it);
+				}
+				UObject *a = spawn_shadow_box(context, to_ue(b.x + 0.5, b.y + 0.5, b.z + 0.5), Vec3f{1.0f, 1.0f, 1.0f}, Rot3f{});
+				UObject **mesh = a ? a->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")) : nullptr;
+				if (!mesh || !*mesh)
+					continue;
+				Call(*mesh, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), material).invoke();
+				Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), false).set_bool(STR("bPropagateToChildren"), false).invoke();
+				g_native[key] = a;
+				log(L"native blocks: " + std::to_wstring(b.x) + L" " + std::to_wstring(b.y) + L" " + std::to_wstring(b.z) + L" drawn by HN (" +
+					std::wstring(b.tex.begin(), b.tex.end()) + L")");
+			}
 		}
 
 		/// {"t":"blocks","set":[x,y,z,...],"clear":[x,y,z,...]} from Minecraft: solid blocks placed and removed.
@@ -1897,6 +1973,9 @@ namespace nc
 			std::unordered_map<unsigned long long, uint32_t> isOpaque;
 			for (size_t i = 0; i + 2 < opaque.size(); i += 3)
 				isOpaque[cell_key(opaque[i], opaque[i + 1], opaque[i + 2])] = i / 3 < colours.size() ? uint32_t(colours[i / 3]) : 0xFFFFFFFFu;
+			release_hidden_receivers(); // stand-ins may be destroyed below: never left in an engine list (rewritten at the tick's end)
+			for (size_t i = 0; i + 2 < clear.size(); i += 3)
+				destroy_native(cell_key(clear[i], clear[i + 1], clear[i + 2]));
 			auto dropShadow = [&](unsigned long long key) {
 				if (auto it = g_shadows.find(key); it != g_shadows.end())
 				{
@@ -1911,7 +1990,7 @@ namespace nc
 				const unsigned long long key = cell_key(set[i], set[i + 1], set[i + 2]);
 				if (!isOpaque.count(key))
 					dropShadow(key);
-				else if (!g_shadows.count(key) && g_shadows.size() < kMaxShadows)
+				else if (!g_shadows.count(key) && !g_native.count(key) && g_shadows.size() < kMaxShadows)
 					if (UObject *a = spawn_shadow(context, to_ue(set[i] + 0.5, set[i + 1] + 0.5, set[i + 2] + 0.5), isOpaque[key]))
 						g_shadows[key] = a;
 			}
@@ -2923,8 +3002,28 @@ namespace nc
 			}
 			else if (m.find("\"t\":\"screen\"") != std::string::npos)
 				g_minecraftScreen = m.find("\"open\":true") != std::string::npos;
+			else if (m.find("\"t\":\"nblock\"") != std::string::npos)
+			{
+				double p[3];
+				if (json_vec3(m, "p", p))
+				{
+					std::string tex;
+					const size_t at = m.find("\"tex\":\"");
+					if (at != std::string::npos)
+					{
+						const size_t from = at + 7, to = m.find('"', from);
+						if (to != std::string::npos)
+							tex = m.substr(from, to - from);
+					}
+					g_pendingNative.push_back({int(p[0]), int(p[1]), int(p[2]), tex});
+				}
+			}
 			else if (m.find("\"t\":\"hello\"") != std::string::npos)
 			{
+				// native blocks (phase 2: one block while it is checked); off with dlls/neighborcraft_native_off.txt
+				const bool nativeOff = bool(std::ifstream(module_dir() + L"neighborcraft_native_off.txt"));
+				sendf("{\"t\":\"native\",\"n\":%d}", nativeOff ? 0 : 1);
+				log(nativeOff ? L"native blocks: off (neighborcraft_native_off.txt)" : L"native blocks: Minecraft may hand HN 1 block (the phase 2 prototype)");
 				double pid = 0;
 				if (json_number(m, "pid", pid))
 					g_mcPid = DWORD(pid);
@@ -6274,6 +6373,11 @@ namespace nc
 				dumped = true;
 				dump(pc, pawn);
 			}
+		}
+		if (!g_pendingNative.empty())
+		{
+			apply_native(pawn, g_pendingNative);
+			g_pendingNative.clear();
 		}
 		if (!g_pendingSet.empty() || !g_pendingClear.empty())
 		{

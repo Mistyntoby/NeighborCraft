@@ -196,6 +196,7 @@ final class ClientInput {
 						message -> dev.neighborcraft.Passthrough.LOG.info("screenshot: {}", message.getString()));
 				}
 			}
+			case "native" -> NativeBlocks.setLimit(minecraft, m.get("n").getAsInt()); // blocks HN draws itself (NativeBlocks)
 			case "hostfps" -> {
 				// Minecraft renders at Hello Neighbor's rate (to the option's nearest step of 10: rounded up, HN's 60.2 gave 70):
 				// faster, it drew frames HN never showed, and the picture HN showed was several of its frames behind (Steve's

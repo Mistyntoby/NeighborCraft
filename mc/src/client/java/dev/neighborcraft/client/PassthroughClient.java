@@ -104,6 +104,7 @@ public class PassthroughClient implements ClientModInitializer {
 	private static int heldRepeat;
 
 	private static void tick(final Minecraft minecraft) {
+		NativeBlocks.tick(minecraft);
 		// the Hello Neighbor object in the selected hotbar slot (if any): HN shows that very object in the hand; and
 		// whether the hand is empty (only an empty hand picks HN's objects up)
 		if (minecraft.player != null) {
