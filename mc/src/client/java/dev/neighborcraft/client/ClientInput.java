@@ -197,6 +197,12 @@ final class ClientInput {
 				}
 			}
 			case "native" -> NativeBlocks.setLimit(minecraft, m.get("n").getAsInt()); // blocks HN draws itself (NativeBlocks)
+			case "nsteve" -> {
+				// HN draws Steve (NativeSteve); its face textures again for a new level's materials
+				NativeSteve.enabled = m.get("on").getAsBoolean();
+				dev.neighborcraft.Passthrough.LOG.info("native Steve: {}", NativeSteve.enabled ? "drawn by Hello Neighbor" : "Minecraft's");
+				NativeSteve.resend();
+			}
 			case "hostfps" -> {
 				// Minecraft renders at Hello Neighbor's rate (to the option's nearest step of 10: rounded up, HN's 60.2 gave 70):
 				// faster, it drew frames HN never showed, and the picture HN showed was several of its frames behind (Steve's

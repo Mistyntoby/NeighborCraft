@@ -617,11 +617,14 @@ namespace nc
 			std::vector<double> boxes;
 			std::vector<int> kinds;
 			std::vector<int> colours;
+			std::vector<double> faces; // native Steve's faces (13 numbers each: texture id, centre, U edge, V edge, normal)
 			double hand[12] = {};
 			bool hasHand = false;
 			DWORD at = 0;
 		};
 		std::deque<ShadowFrame> g_shadowFrames;
+		std::vector<double> g_steveFaces;                       // this frame's native Steve faces (select_shadow_frame)
+		std::unordered_map<int, std::string> g_steveTextures;   // face texture id -> its file name (mc NativeSteve)
 
 		/// Puts the matching message's boxes in g_shadowBoxes / g_shadowKinds / g_hand3p (game thread, every tick).
 		void select_shadow_frame()
@@ -665,6 +668,7 @@ namespace nc
 			g_shadowBoxes = pick->boxes;
 			g_shadowKinds = pick->kinds;
 			g_shadowColours = pick->colours;
+			g_steveFaces = pick->faces;
 			g_shadowBoxesAt = pick->at;
 			if (pick->hasHand)
 			{
@@ -821,17 +825,21 @@ namespace nc
 		constexpr size_t kMaxShadows = 1500;
 
 		/// Unreal's 1 m cube: loaded already, else through the asset registry (Blueprint-callable, shipped).
-		UObject *shadow_cube()
+		/// One of Unreal's basic shapes (an engine asset, loaded through the asset registry if not in memory).
+		UObject *basic_shape(const TCHAR *path)
 		{
-			if (UObject *cube = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Engine/BasicShapes/Cube.Cube")))
+			if (UObject *cube = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, path))
 				return cube;
-			static bool failed = false;
-			if (failed)
+			static std::unordered_set<std::wstring> failedPaths;
+			if (failedPaths.count(path))
 				return nullptr;
+			bool dummy = false;
+			bool &failedFlag = dummy;
 			UObject *helpers = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/AssetRegistry.Default__AssetRegistryHelpers"));
 			auto fail = [&](const wchar_t *why) -> UObject * {
-				failed = true;
-				log(std::wstring(L"shadows: no cube mesh (") + why + L"): Minecraft's blocks cast no shadows in HN");
+				failedPaths.insert(path);
+				(void)failedFlag;
+				log(std::wstring(L"shapes: no mesh ") + path + L" (" + why + L")");
 				return nullptr;
 			};
 			if (!helpers)
@@ -841,7 +849,7 @@ namespace nc
 			if (!registry || !*registry)
 				return fail(L"no asset registry");
 			Call find(*registry, STR("GetAssetByObjectPath"));
-			find.set(STR("ObjectPath"), name_param(STR("/Engine/BasicShapes/Cube.Cube"))).set_bool(STR("bIncludeOnlyOnDiskAssets"), false);
+			find.set(STR("ObjectPath"), name_param(path)).set_bool(STR("bIncludeOnlyOnDiskAssets"), false);
 			FProperty *data = find.property(STR("ReturnValue"));
 			if (!data || !find.invoke())
 				return fail(L"GetAssetByObjectPath");
@@ -853,8 +861,13 @@ namespace nc
 			UObject *const *cube = get.invoke() ? get.param<UObject *>(STR("ReturnValue")) : nullptr;
 			if (!cube || !*cube)
 				return fail(L"the registry has no such asset");
-			log(L"shadows: loaded " + (*cube)->GetFullName());
+			log(L"shapes: loaded " + (*cube)->GetFullName());
 			return *cube;
+		}
+
+		UObject *shadow_cube()
+		{
+			return basic_shape(STR("/Engine/BasicShapes/Cube.Cube"));
 		}
 
 		bool get_bool_property(UObject *o, const TCHAR *name, bool &value)
@@ -884,7 +897,7 @@ namespace nc
 		UObject *g_receiverMaterial = nullptr; // this level's (shadow_extras_reset forgets it)
 		UObject *g_receiverTexture = nullptr;
 		bool g_receiverTried = false;
-		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot);
+		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot, UObject *meshAsset = nullptr);
 		/// HN's base_m with a texture of one colour (a PNG the mod writes, imported), kept alive by a keeper stand-in
 		/// (hidden, far below) that always uses it: nothing else of the engine's held such a material, and the garbage
 		/// collector freed it; the next SetMaterial read a freed material and the game crashed (19:11 and 19:2x on
@@ -1081,10 +1094,10 @@ namespace nc
 			Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), !receive && !g_proxiesShown).set_bool(STR("bPropagateToChildren"), false).invoke();
 		}
 
-		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot)
+		UObject *spawn_shadow_box(UObject *context, const Vec3f &centre, const Vec3f &size, const Rot3f &rot, UObject *meshAsset)
 		{
 			static UObject *meshActor = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshActor"));
-			UObject *statics = gameplay_statics(), *cube = shadow_cube();
+			UObject *statics = gameplay_statics(), *cube = meshAsset ? meshAsset : shadow_cube();
 			if (!meshActor || !statics || !cube)
 				return nullptr;
 			Transform4 t;
@@ -1429,6 +1442,136 @@ namespace nc
 			return true;
 		}
 
+		// ---- native Steve (migration phase 5) ----------------------------------------------------------------------
+		// Minecraft's picture arrives 1-3 of its frames after HN's camera, a different number each frame: Steve, moving
+		// with the camera, wobbled against the world and left a silhouette (the user). HN draws him instead: each face of
+		// his model's cubes a plane (Unreal's 1 m plane) with that face's part of the skin, placed every frame from
+		// Minecraft's posed model (mc NativeSteve). Lit, shadowed and anti-aliased by HN; it casts his shadow (his hidden
+		// shadow boxes stop casting: coinciding with the planes they would speckle them). In first person the planes are
+		// hidden and still cast.
+		struct NativeSteveState
+		{
+			UObject *level = nullptr; // level_key
+			UObject *pc = nullptr;    // the controller the planes were made under
+			std::vector<UObject *> planes;
+			std::vector<int> tex;     // the texture id each plane wears
+			std::vector<int> shown;   // -1 unknown, 0 hidden, 1 drawn
+			int swap = 0, flipU = 0, flipV = 0; // the plane's UV convention (dlls/neighborcraft_steve_uv.txt: "swap flipU flipV")
+			bool read = false;
+		} g_steve;
+
+		bool native_steve_on()
+		{
+			static const bool off = bool(std::ifstream(module_dir() + L"neighborcraft_native_steve_off.txt"));
+			return !off && !g_steveFaces.empty();
+		}
+
+		/// A face (13 numbers: id, centre, U edge, V edge, normal; Minecraft's world) as the 1 m plane's transform: its X along
+		/// the texture's U, its normal outward, its Y along the texture's V (a negative scale where the hand rule says the
+		/// other way: Unreal turns the culling with it).
+		bool face_transform(const double *f, Transform4 &t)
+		{
+			double eu[3] = {f[4], f[5], f[6]}, ev[3] = {f[7], f[8], f[9]};
+			if (g_steve.swap)
+				std::swap(eu, ev);
+			if (g_steve.flipU)
+				for (double &x : eu)
+					x = -x;
+			if (g_steve.flipV)
+				for (double &x : ev)
+					x = -x;
+			const double b[12] = {f[1], f[2], f[3], eu[0] * 0.5, eu[1] * 0.5, eu[2] * 0.5, ev[0] * 0.5, ev[1] * 0.5, ev[2] * 0.5, f[10] * 0.005, f[11] * 0.005, f[12] * 0.005};
+			if (!box_transform(b, t))
+				return false;
+			// box_transform keeps X (U) and Z (the normal) and makes Y = Z x X: compare with the texture's V
+			const Vec3f o = to_ue(0, 0, 0);
+			auto dir = [&](const double *v) {
+				const Vec3f w = to_ue(v[0], v[1], v[2]);
+				return Vec3f{w.x - o.x, w.y - o.y, w.z - o.z};
+			};
+			const Vec3f X = dir(eu), Z = dir(f + 10), V = dir(ev);
+			const Vec3f Y{Z.y * X.z - Z.z * X.y, Z.z * X.x - Z.x * X.z, Z.x * X.y - Z.y * X.x};
+			if (Y.x * V.x + Y.y * V.y + Y.z * V.z < 0.0f)
+				t.scale[1] = -t.scale[1];
+			t.scale[2] = 1.0f; // a plane: no thickness to scale
+			return true;
+		}
+
+		void native_steve_tick(UObject *pc, UObject *pawn)
+		{
+			NativeSteveState &S = g_steve;
+			if (!S.read)
+			{
+				S.read = true;
+				std::ifstream f(module_dir() + L"neighborcraft_steve_uv.txt");
+				if (f)
+					f >> S.swap >> S.flipU >> S.flipV;
+			}
+			if (S.level != level_key(pc))
+			{
+				// the same controller: only a streamed level came or went, the planes live: destroyed; else they went with
+				// their level: only forgotten
+				if (S.pc == pc)
+					for (UObject *plane : S.planes)
+						if (plane)
+							Call(plane, STR("K2_DestroyActor")).invoke();
+				S.planes.clear(), S.tex.clear(), S.shown.clear();
+				S.level = level_key(pc);
+				S.pc = pc;
+			}
+			if (!native_steve_on())
+				return;
+			UObject *plane = basic_shape(STR("/Engine/BasicShapes/Plane.Plane"));
+			if (!plane)
+				return;
+			const size_t n = g_steveFaces.size() / 13;
+			while (S.planes.size() < n)
+			{
+				UObject *a = spawn_shadow_box(pawn, g_eye, Vec3f{0.1f, 0.1f, 0.1f}, Rot3f{}, plane);
+				if (!a)
+					return;
+				S.planes.push_back(a);
+				S.tex.push_back(-1);
+				S.shown.push_back(-1);
+			}
+			const bool draw = !g_mcFirstPerson;
+			for (size_t i = 0; i < S.planes.size(); ++i)
+			{
+				UObject **mesh = S.planes[i]->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent"));
+				if (!mesh || !*mesh)
+					continue;
+				bool ok = false;
+				if (i < n)
+				{
+					const double *f = &g_steveFaces[i * 13];
+					const int id = int(f[0]);
+					if (id != S.tex[i])
+					{
+						auto it = g_steveTextures.find(id);
+						UObject *material = it != g_steveTextures.end() ? native_material(pawn, it->second) : nullptr;
+						if (material)
+						{
+							Call(*mesh, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), material).invoke();
+							S.tex[i] = id;
+						}
+					}
+					Transform4 t;
+					if (S.tex[i] == id && face_transform(f, t))
+					{
+						Call(S.planes[i], STR("K2_SetActorTransform")).set(STR("NewTransform"), t).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+						ok = true;
+					}
+				}
+				const int want = ok ? (draw ? 1 : 2) : 0; // 1 drawn, 2 hidden but casting (first person), 0 neither
+				if (S.shown[i] != want)
+				{
+					S.shown[i] = want;
+					Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), want != 1).set_bool(STR("bPropagateToChildren"), false).invoke();
+					Call(*mesh, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), want != 0).invoke();
+				}
+			}
+		}
+
 		void shadow_boxes_tick(UObject *pc, UObject *pawn)
 		{
 			ShadowPool &P = g_pool;
@@ -1472,7 +1615,8 @@ namespace nc
 				if (!box_transform(&boxes[i * 12], t))
 					continue;
 				Call(P.boxes[used], STR("K2_SetActorTransform")).set(STR("NewTransform"), t).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
-				pool_cast(used, true);
+				// with native Steve, the local player's boxes (kind 2) don't cast: his planes do
+				pool_cast(used, !(native_steve_on() && i < g_shadowKinds.size() && g_shadowKinds[i] == 2));
 				// a model's surface is drawn (lit by HN for the compositor); the local player's only in third person: in first
 				// person Minecraft doesn't draw him, and HN's grey boxes would be what one sees looking down
 				const int kind = i < g_shadowKinds.size() ? g_shadowKinds[i] : 0;
@@ -2904,6 +3048,7 @@ namespace nc
 				json_doubles(m, "b", f.boxes);
 				json_ints(m, "k", f.kinds);
 				json_ints(m, "c", f.colours);
+				json_doubles(m, "nf", f.faces);
 				f.hasHand = json_numbers(m, "hand", f.hand, 12);
 				f.at = GetTickCount();
 				double frame = -1.0;
@@ -3006,6 +3151,17 @@ namespace nc
 			}
 			else if (m.find("\"t\":\"screen\"") != std::string::npos)
 				g_minecraftScreen = m.find("\"open\":true") != std::string::npos;
+			else if (m.find("\"t\":\"stex\"") != std::string::npos)
+			{
+				double id = -1;
+				const size_t at = m.find("\"name\":\"");
+				if (json_number(m, "id", id) && at != std::string::npos)
+				{
+					const size_t from = at + 8, to = m.find('"', from);
+					if (to != std::string::npos)
+						g_steveTextures[int(id)] = m.substr(from, to - from);
+				}
+			}
 			else if (m.find("\"t\":\"nblock\"") != std::string::npos)
 			{
 				double p[3];
@@ -3031,6 +3187,10 @@ namespace nc
 				// block is lighter than the rest")
 				sendf("{\"t\":\"native\",\"n\":%d}", nativeOff ? 0 : 4096);
 				log(nativeOff ? L"native blocks: off (neighborcraft_native_off.txt)" : L"native blocks: every full cube with one texture is drawn by HN");
+				// native Steve (phase 5); off with dlls/neighborcraft_native_steve_off.txt
+				const bool steveOff = bool(std::ifstream(module_dir() + L"neighborcraft_native_steve_off.txt"));
+				sendf("{\"t\":\"nsteve\",\"on\":%s}", steveOff ? "false" : "true");
+				log(steveOff ? L"native Steve: off" : L"native Steve: drawn by HN from Minecraft's model each frame");
 				double pid = 0;
 				if (json_number(m, "pid", pid))
 					g_mcPid = DWORD(pid);
@@ -6527,6 +6687,7 @@ namespace nc
 			light_census(pawn);
 			steve_shadow_tick(pc, pawn);
 			shadow_boxes_tick(pc, pawn);
+			native_steve_tick(pc, pawn);
 			pending_receivers_tick();
 			receiver_capture_tick(pc, pawn);
 			lend_shadows_tick(pc);

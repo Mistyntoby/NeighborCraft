@@ -87,6 +87,8 @@ public final class ShadowExport {
 		NativeImage skin;
 		Identifier skinId;
 		int colour = -1;
+		/** The local player's model faces for HN's native Steve (NativeSteve.face), 13 numbers each. */
+		final StringBuilder faces = new StringBuilder(4096);
 		int boxes;
 		/**
 		 * What the next boxes are: 0 shadow only (items, particles, other entities' boxes), 1 a model's real surface
@@ -181,6 +183,9 @@ public final class ShadowExport {
 			// the frame these boxes belong to: HN poses its stand-ins from the frame its compositor shows
 			msg.append(",\"f\":").append(FrameExporter.lastCaptured());
 			msg.append(",\"c\":[").append(out.colours).append(']');
+			if (NativeSteve.enabled) {
+				msg.append(",\"nf\":[").append(out.faces).append(']');
+			}
 			if (hand != null) {
 				msg.append(",\"hand\":[");
 				for (int i = 0; i < hand.length; i++) {
@@ -203,7 +208,13 @@ public final class ShadowExport {
 	@SuppressWarnings({"unchecked", "rawtypes"})
 	private static float[] entity(final Minecraft minecraft, final Entity e, final float partial, final Out out) {
 		EntityRenderer renderer = minecraft.getEntityRenderDispatcher().getRenderer(e);
-		EntityRenderState state = renderer.createRenderState(e, partial);
+		NativeSteve.exporting = true; // Minecraft's own Steve stays visible here (LivingEntityRendererMixin)
+		EntityRenderState state;
+		try {
+			state = renderer.createRenderState(e, partial);
+		} finally {
+			NativeSteve.exporting = false;
+		}
 		Vec3 offset = renderer.getRenderOffset(state);
 		PoseStack pose = new PoseStack();
 		pose.translate(state.x + offset.x - out.origin.x, state.y + offset.y - out.origin.y, state.z + offset.z - out.origin.z);
@@ -348,6 +359,8 @@ public final class ShadowExport {
 		});
 	}
 
+	private static final java.util.Set<String> OUTER_LAYERS = java.util.Set.of("hat", "jacket", "left_sleeve", "right_sleeve", "left_pants", "right_pants");
+
 	/** A model part's cubes and its children's, as drawn (visible ones only: the skin's outer layers as the skin has them). */
 	private static void part(final ModelPart p, final String name, final PoseStack pose, final Out out) {
 		if (!p.visible) {
@@ -360,6 +373,13 @@ public final class ShadowExport {
 		if (!p.skipDraw) {
 			Matrix4f m = pose.last().pose();
 			for (ModelPart.Cube c : access.passthrough$cubes()) {
+				// native Steve: the local player's body faces (not the skin's outer layers: mostly transparent pixels, and
+				// HN's material is opaque)
+				if (NativeSteve.enabled && out.surface == 2 && !OUTER_LAYERS.contains(name)) {
+					for (int i = 0; i < c.polygons.length; i++) {
+						NativeSteve.face(out.faces, out.skinId, out.skin, m, c, i, c.polygons[i], out.origin);
+					}
+				}
 				out.colour = cubeColour(out.skinId, out.skin, c);
 				out.box(m, (c.minX + c.maxX) / 32.0F, (c.minY + c.maxY) / 32.0F, (c.minZ + c.maxZ) / 32.0F, (c.maxX - c.minX) / 32.0F, (c.maxY - c.minY) / 32.0F,
 					(c.maxZ - c.minZ) / 32.0F);
