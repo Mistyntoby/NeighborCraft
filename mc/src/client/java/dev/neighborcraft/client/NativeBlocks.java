@@ -21,6 +21,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.BlockAndLightGetter;
 
 /**
  * Blocks Hello Neighbor draws itself (native rendering, phase 2 of the migration: see HANDOFF.md). Minecraft's picture
@@ -41,6 +42,8 @@ public final class NativeBlocks {
 	private static final Queue<String> OUT = new ConcurrentLinkedQueue<>();
 	/** Sprites already written for HN. */
 	private static final Map<String, Boolean> WRITTEN = new ConcurrentHashMap<>();
+	/** What HN was last told per native block (its faces' light levels): told again when that changes. */
+	private static final Map<BlockPos, String> TOLD_FACES = new ConcurrentHashMap<>();
 
 	private NativeBlocks() {
 	}
@@ -66,7 +69,7 @@ public final class NativeBlocks {
 		return result;
 	}
 
-	public static boolean handle(final BlockPos pos, final BlockState state, final BlockStateModel model) {
+	public static boolean handle(final BlockPos pos, final BlockState state, final BlockStateModel model, final BlockAndLightGetter level) {
 		if (limit <= 0) {
 			return false;
 		}
@@ -92,8 +95,24 @@ public final class NativeBlocks {
 
 		say("native: " + name, state, true);
 
-		if (NATIVE.add(key)) {
-			OUT.add("{\"t\":\"nblock\",\"p\":[" + key.getX() + "," + key.getY() + "," + key.getZ() + "],\"tex\":\"" + name + "\"}");
+		// each face HN draws, with the light level of the air in front of it (Minecraft's own: sky and torch light). HN's
+		// world can't darken a space its runtime blocks enclose (its sky and bounce light are precomputed from its own
+		// level): a box built around Steve stayed lit inside (the user). -1: a face against another solid block, not drawn
+		StringBuilder faces = new StringBuilder();
+		for (Direction d : Direction.values()) {
+			BlockPos n = key.relative(d);
+			int light = level.getBlockState(n).isSolidRender() ? -1 : level.getRawBrightness(n, 0);
+			if (light >= 0 && !write(name, sprite, light)) {
+				light = -1;
+			}
+
+			faces.append(faces.isEmpty() ? "" : ",").append(light);
+		}
+
+		NATIVE.add(key);
+		String f = faces.toString();
+		if (!f.equals(TOLD_FACES.put(key, f))) {
+			OUT.add("{\"t\":\"nblock\",\"p\":[" + key.getX() + "," + key.getY() + "," + key.getZ() + "],\"tex\":\"" + name + "\",\"f\":[" + f + "]}");
 		}
 
 		return true;
@@ -129,6 +148,52 @@ public final class NativeBlocks {
 		}
 
 		return one;
+	}
+
+	/**
+	 * Minecraft's brightness for a light level (its light curve without the "brightness" option: 15 -> 1, 8 -> 0.22, 0 ->
+	 * nearly black).
+	 */
+	static float lightFactor(final int level) {
+		float f = level / 15.0F;
+		return Math.max(0.03F, f / (4.0F - 3.0F * f));
+	}
+
+	/** The sprite at a light level ("<name>_l<level>"), written once. */
+	private static boolean write(final String name, final TextureAtlasSprite sprite, final int light) {
+		String file = name + "_l" + light;
+		if (WRITTEN.containsKey(file)) {
+			return true;
+		}
+
+		float k = lightFactor(light);
+		try {
+			NativeImage image = ((SpriteContentsAccessor) sprite.contents()).passthrough$originalImage();
+			if (image == null) {
+				return false;
+			}
+
+			int w = sprite.contents().width(), h = sprite.contents().height(), s = 8;
+			Path path = dir().resolve(file + ".png");
+			Files.createDirectories(path.getParent());
+			try (NativeImage big = new NativeImage(w * s, h * s, false)) {
+				for (int y = 0; y < h * s; y++) {
+					for (int x = 0; x < w * s; x++) {
+						int c = image.getPixel(x / s, y / s);
+						int r = Math.round((c >> 16 & 0xFF) * k), g = Math.round((c >> 8 & 0xFF) * k), b = Math.round((c & 0xFF) * k);
+						big.setPixel(x, y, 0xFF000000 | r << 16 | g << 8 | b);
+					}
+				}
+
+				big.writeToFile(path);
+			}
+
+			WRITTEN.put(file, Boolean.TRUE);
+			return true;
+		} catch (Exception ex) {
+			Passthrough.LOG.warn("native blocks: texture {} not written ({})", file, ex.toString());
+			return false;
+		}
 	}
 
 	/** The sprite as a PNG, scaled up 8x with nearest pixels (HN filters textures smoothly: 16 px would blur). */
@@ -171,6 +236,7 @@ public final class NativeBlocks {
 			for (BlockPos pos : NATIVE) {
 				if (!minecraft.level.getBlockState(pos).isSolidRender()) {
 					NATIVE.remove(pos);
+					TOLD_FACES.remove(pos);
 					OUT.add("{\"t\":\"nblock\",\"p\":[" + pos.getX() + "," + pos.getY() + "," + pos.getZ() + "],\"tex\":\"\"}");
 				}
 			}
@@ -199,6 +265,7 @@ public final class NativeBlocks {
 
 		limit = n;
 		NATIVE.clear();
+		TOLD_FACES.clear();
 		Passthrough.LOG.info("native blocks: up to {} drawn by Hello Neighbor", n);
 		if (minecraft.levelRenderer != null) {
 			minecraft.levelRenderer.resetLevelRenderData(); // every chunk meshed again

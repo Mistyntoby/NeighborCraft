@@ -754,3 +754,13 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - [game] 23:08-23:15: native blocks VERIFIED by the user ("blocks are good now") and by screenshots: cobblestone drawn by
   HN (ReShade off: still there), sharp, lit by HN's sky in shade, no shimmer. Every eligible full cube native (n=4096).
   Seen once, not yet explained: a glowing white square near the neighbour's door in HN's own picture (n1/n1off.png).
+- [game] the user: a box of native blocks built around Steve stayed lit inside. HN's sky and bounce light are
+  precomputed from its own level: runtime blocks can't darken what they enclose (only direct sun shadows work). Now
+  Minecraft's own light levels: each native block is a plane per visible face (against air), each with its texture
+  darkened by Minecraft's light curve for the light level in front of it ("<tex>_l<level>", written by mc NativeBlocks,
+  resent when the light changes); planes cast shadows two-sided.
+- Native Steve (phase 5) built alongside: mc NativeSteve/ShadowExport send the local player's body faces (13 numbers each,
+  "nf") and their skin textures ("stex"); HN native_steve_tick places a plane per face each frame; Minecraft hides his
+  body (LivingEntityRendererMixin), his held item stays; outer skin layers skipped (opaque material). Plane UV convention
+  untested: dlls/neighborcraft_steve_uv.txt "swap flipU flipV" (also used by block faces). Off:
+  neighborcraft_native_steve_off.txt.

@@ -806,11 +806,14 @@ namespace nc
 		// Blocks HN draws itself (native rendering, phase 2: Minecraft leaves them out of its picture, mc NativeBlocks):
 		// Unreal's 1 m cube with the block's texture, lit, shadowed, depth-tested and anti-aliased by HN. Instead of a
 		// stand-in: two renderers never agreed to the pixel (a trailing clone, light bleeding in around blocks).
-		std::unordered_map<unsigned long long, UObject *> g_native;
+		// per block, a plane per face drawn (a face against another solid block isn't): each with the block's texture at
+		// Minecraft's light level of the air in front of it (HN can't darken a space its runtime blocks enclose)
+		std::unordered_map<unsigned long long, std::vector<UObject *>> g_native;
 		struct PendingNative
 		{
 			int x, y, z;
-			std::string tex; // empty: no longer native
+			std::string tex;  // empty: no longer native
+			int light[6];     // per face (Minecraft's Direction order: down, up, north, south, west, east); -1 not drawn
 		};
 		std::vector<PendingNative> g_pendingNative;
 		std::unordered_map<std::string, UObject *> g_nativeMaterials; // this level's, by texture
@@ -1530,6 +1533,8 @@ namespace nc
 				UObject *a = spawn_shadow_box(pawn, g_eye, Vec3f{0.1f, 0.1f, 0.1f}, Rot3f{}, plane);
 				if (!a)
 					return;
+				if (UObject **m = a->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); m && *m)
+					set_bool_property(*m, STR("bCastShadowAsTwoSided"), true); // a one-sided plane: its shadow from both sides
 				S.planes.push_back(a);
 				S.tex.push_back(-1);
 				S.shown.push_back(-1);
@@ -2062,8 +2067,9 @@ namespace nc
 					Call(actor, STR("K2_DestroyActor")).invoke();
 				for (auto &[key, actor] : g_shadows)
 					Call(actor, STR("K2_DestroyActor")).invoke();
-				for (auto &[key, actor] : g_native)
-					Call(actor, STR("K2_DestroyActor")).invoke();
+				for (auto &[key, actors] : g_native)
+					for (UObject *actor : actors)
+						Call(actor, STR("K2_DestroyActor")).invoke();
 			}
 			g_colliders.clear();
 			g_shadows.clear();
@@ -2077,10 +2083,14 @@ namespace nc
 		{
 			if (auto it = g_native.find(key); it != g_native.end())
 			{
-				Call(it->second, STR("K2_DestroyActor")).invoke();
+				for (UObject *a : it->second)
+					Call(a, STR("K2_DestroyActor")).invoke();
 				g_native.erase(it);
 			}
 		}
+
+		bool face_transform(const double *f, Transform4 &t);
+		UObject *basic_shape(const TCHAR *path);
 
 		/// {"t":"nblock","p":[x,y,z],"tex":name} from Minecraft: HN draws this block (tex "": no longer).
 		void apply_native(UObject *context, const std::vector<PendingNative> &blocks)
@@ -2092,22 +2102,43 @@ namespace nc
 				destroy_native(key);
 				if (b.tex.empty())
 					continue;
-				UObject *material = native_material(context, b.tex);
-				if (!material)
+				UObject *plane = basic_shape(STR("/Engine/BasicShapes/Plane.Plane"));
+				if (!plane)
 					continue;
-				// its stand-in goes: the native cube casts its own shadow and is its own receiver of HN's light
+				// its stand-in goes: the planes cast its shadow (from both sides) and are their own receivers of HN's light
 				if (auto it = g_shadows.find(key); it != g_shadows.end())
 				{
 					Call(it->second, STR("K2_DestroyActor")).invoke();
 					g_shadows.erase(it);
 				}
-				UObject *a = spawn_shadow_box(context, to_ue(b.x + 0.5, b.y + 0.5, b.z + 0.5), Vec3f{1.0f, 1.0f, 1.0f}, Rot3f{});
-				UObject **mesh = a ? a->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")) : nullptr;
-				if (!mesh || !*mesh)
-					continue;
-				Call(*mesh, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), material).invoke();
-				Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), false).set_bool(STR("bPropagateToChildren"), false).invoke();
-				g_native[key] = a;
+				// the faces: normal, U edge, V edge (Minecraft's axes, a block's size; down, up, north, south, west, east)
+				static const double faces[6][9] = {
+					{0, -1, 0, 1, 0, 0, 0, 0, -1}, {0, 1, 0, 1, 0, 0, 0, 0, 1},  {0, 0, -1, -1, 0, 0, 0, -1, 0},
+					{0, 0, 1, 1, 0, 0, 0, -1, 0},  {-1, 0, 0, 0, 0, 1, 0, -1, 0}, {1, 0, 0, 0, 0, -1, 0, -1, 0}};
+				std::vector<UObject *> drawn;
+				for (int d = 0; d < 6; ++d)
+				{
+					if (b.light[d] < 0)
+						continue;
+					UObject *material = native_material(context, b.tex + "_l" + std::to_string(b.light[d]));
+					if (!material)
+						continue;
+					const double *F = faces[d];
+					const double f[13] = {0, b.x + 0.5 + F[0] * 0.5, b.y + 0.5 + F[1] * 0.5, b.z + 0.5 + F[2] * 0.5, F[3], F[4], F[5], F[6], F[7], F[8], F[0], F[1], F[2]};
+					Transform4 t;
+					if (!face_transform(f, t))
+						continue;
+					UObject *a = spawn_shadow_box(context, to_ue(f[1], f[2], f[3]), Vec3f{0.1f, 0.1f, 0.1f}, Rot3f{}, plane);
+					UObject **mesh = a ? a->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")) : nullptr;
+					if (!mesh || !*mesh)
+						continue;
+					Call(a, STR("K2_SetActorTransform")).set(STR("NewTransform"), t).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
+					Call(*mesh, STR("SetMaterial")).set<int32_t>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), material).invoke();
+					set_bool_property(*mesh, STR("bCastShadowAsTwoSided"), true);
+					Call(*mesh, STR("SetHiddenInGame")).set_bool(STR("NewHidden"), false).set_bool(STR("bPropagateToChildren"), false).invoke();
+					drawn.push_back(a);
+				}
+				g_native[key] = drawn;
 				log(L"native blocks: " + std::to_wstring(b.x) + L" " + std::to_wstring(b.y) + L" " + std::to_wstring(b.z) + L" drawn by HN (" +
 					std::wstring(b.tex.begin(), b.tex.end()) + L")");
 			}
@@ -3175,7 +3206,12 @@ namespace nc
 						if (to != std::string::npos)
 							tex = m.substr(from, to - from);
 					}
-					g_pendingNative.push_back({int(p[0]), int(p[1]), int(p[2]), tex});
+					PendingNative b{int(p[0]), int(p[1]), int(p[2]), tex, {-1, -1, -1, -1, -1, -1}};
+					std::vector<int> light;
+					json_ints(m, "f", light);
+					for (size_t d = 0; d < 6; ++d)
+						b.light[d] = d < light.size() ? light[d] : 15;
+					g_pendingNative.push_back(b);
 				}
 			}
 			else if (m.find("\"t\":\"hello\"") != std::string::npos)

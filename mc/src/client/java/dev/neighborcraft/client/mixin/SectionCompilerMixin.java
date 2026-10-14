@@ -24,7 +24,7 @@ abstract class SectionCompilerMixin {
 	private void passthrough$native(final BlockQuadOutput out, final float x, final float y, final float z, final BlockAndTintGetter level,
 		final BlockPos pos, final BlockState state, final BlockStateModel model, final long seed, final CallbackInfo ci) {
 		NativeBlocks.hooked();
-		if (NativeBlocks.handle(pos, state, model)) {
+		if (NativeBlocks.handle(pos, state, model, level)) {
 			ci.cancel();
 		}
 	}
