@@ -217,6 +217,27 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+00000000000. **NATIVE RENDERING MIGRATION (2026-10-13 night, the user's choice and order: one cube -> depth -> light and
+            shadow -> many blocks -> Steve; the current renderer kept as fallback at every step).**
+            Phase 1 baseline (current renderer): Minecraft renders world/hand/overlay; FrameExporter copies colour + depth to
+            shared memory (async GPU readback, 1-3 frames late); compositor.cpp uploads them; NeighborCraft.fx composites by
+            depth after re-projecting Minecraft's frame onto HN's camera (24-step march + bisection). HN stand-ins
+            (spawn_shadow_box: Unreal's 1 m cube) cast HN shadows and, drawn grey (receivers), give HN's light, read off the
+            screen where HN's depth equals Minecraft's. Every artifact reported on 2026-10-13 comes from two renderers not
+            agreeing (trailing clone, light bleeding in, shimmer; MODLOG). Restore: the off-files below, or tag
+            receivers-visible-baseline.
+            Verified facts for phase 2: texture source = Minecraft's BlockStateModel quads -> TextureAtlasSprite ->
+            SpriteContents.originalImage; UE = (mcX, mcZ, mcY - yOffset) * 100 (to_ue); Minecraft meshes a block in
+            SectionCompiler.compile -> ModelBlockRenderer.tesselateBlock; ProceduralMeshComponent exists in this build, but
+            runtime component creation isn't scriptable in 4.20; the proven runtime path is StaticMeshActor + Unreal's cube
+            + a base_m dynamic material with an imported texture (the stand-ins').
+            Phase 2 BUILT, not yet run: mc NativeBlocks + SectionCompilerMixin leave a full opaque cube with one untinted
+            sprite on all six faces out of Minecraft's chunk mesh and send it to HN ("nblock"; texture PNG 8x upscaled in
+            %LOCALAPPDATA%/NeighborCraft/blocks); at most HN's "native" n blocks (1 now). HN apply_native: the stand-in
+            goes, a textured cube is drawn (g_native); removed with the block and on level change. Off:
+            dlls/neighborcraft_native_off.txt. Test: place one cobblestone: Minecraft's look, lit and shadowed by HN,
+            hidden by walls/doors in front, no clone; then the phase 3 checks.
+
 0000000000. **BUILT and running (2026-10-13 21:54, MODLOG "Receivers seen only by a scene capture"): steps 1-3 done; [game] logs confirm the texture found and the receivers hidden. Left: the visual check (no trailing clone; blocks/Steve lit and shadowed; brightness vs before), GPU cost. Earlier plan:** Done and
            built (inactive until step 3): compositor.cpp finds the capture texture by size (compositor::kReceiverW/H =
            482x271, RGBA16F) at init_resource, binds it as HNRECV, sets RecvActive when set_receivers_captured(true);
