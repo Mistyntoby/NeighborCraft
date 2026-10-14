@@ -712,3 +712,7 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   (it sees the receivers) and the crossing is bisected (6 steps). Live 22:13:59.
 - Looking straight up/down "freaks out" the cameras: the look pitch (HN computes it from raw mouse) is now +-89, not
   +-90. Built; needs a restart.
+- [game] the user (screenshots 22:14, 22:23): a block's edge-on side face came apart in vertical streaks. The march's
+  end (capture depth) is a quarter-size reading: on an edge-on face it was the front edge's, short of the face. Now
+  1.5 blocks past it (the bisection keeps the steps fine). Live 22:26:26.
+- Looking straight up/down: the +-89 pitch build was never installed (HN was running); installed at the next close.

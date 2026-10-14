@@ -396,7 +396,10 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 		// as far as HN's surface here, or the receiver here (the scene capture sees them; the player's camera doesn't): with
 		// the receivers hidden, HN's surface behind a block is the road or a house far off, the steps got long, and the
 		// hit snapped from step to step while turning: copies of Steve and blocks (the user's trailOrSmudgingEffect.png)
-		const float zHint = RecvActive ? min(zh, max(tex2Dlod(sRecv, float4(uv, 0, 0)).a * 0.01, 0.2)) : zh;
+		// (and up to 1.5 blocks past the receiver: the capture is a quarter of the size, and on a face seen edge-on its depth
+		// was often the nearer front edge's, the march stopped short of the face and it came apart in streaks: the user's
+		// screenshots 22:14 and 22:23)
+		const float zHint = RecvActive ? min(zh, max(tex2Dlod(sRecv, float4(uv, 0, 0)).a * 0.01, 0.2) + 1.5) : zh;
 		const float zNear = 0.2, zFar = max(min(zHint + allow, 400.0), 0.5);
 		float2 ndc = 0.0;
 		inside = false;
