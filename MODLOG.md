@@ -674,3 +674,9 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   paused 19:20:59 and quit 19:21:37, no java left), the picture kept under the pause menu (blocks visible behind it),
   "levels: 6 loaded" (the level list for the nightmare-crash fix is readable). The scene capture (480x270, every
   frame) cost nothing measurable: 16.7 ms average with and without it.
+- [game] 19:59: UE4SS's FWeakObjectPtr for a stand-in just spawned gave A DIFFERENT OBJECT, and a check of the object
+  array's slot (IndexToObject(GetInternalIndex())) didn't hold it either: in this build the object array doesn't line
+  up with the objects' indices. The nightmare-crash fix's weak light pointers were therefore wrong; now plain pointers
+  dropped whenever level_key changes (a streamed level leaves World.Levels when it unloads, so its lights are dropped
+  on the next tick, before any call); the lent light is forgotten on that change, not called. Nothing may rely on
+  the object array (weak pointers, root set) in this build.

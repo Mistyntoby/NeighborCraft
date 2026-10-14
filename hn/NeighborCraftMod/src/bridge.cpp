@@ -20,8 +20,6 @@
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/FString.hpp>
-#include <Unreal/FWeakObjectPtr.hpp>
-#include <Unreal/UObjectArray.hpp>
 #include <Unreal/FMemory.hpp>
 #include <Unreal/Property/FStructProperty.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -229,25 +227,17 @@ namespace nc
 			return out;
 		}
 
-		/// An engine object that may be destroyed (a streamed level's light, a stand-in): the pointer and its slot in the
-		/// global object array; Get() gives it only while that slot still holds this very object. In game UE4SS's
-		/// FWeakObjectPtr gave objects calls failed on (the capture prototype's test cube, 2026-10-13: "position couldn't
-		/// be read"), so this checks the slot itself (the object array is what UE4SS's FindAllOf walks, and that works).
+		/// A per-level object: held only while level_key is unchanged (the caches holding these start over when it changes;
+		/// a streamed level leaves the world's Levels list when it unloads, so its objects are dropped on the next tick).
+		/// Not a weak pointer: in this build the object array doesn't line up with the objects' indices: in game UE4SS's
+		/// FWeakObjectPtr gave A DIFFERENT OBJECT for a stand-in just spawned, and a check of the array's slot gave none
+		/// (2026-10-13 19:59, the capture prototype's log), so nothing here may rely on the object array.
 		struct WeakRef
 		{
 			UObject *ptr = nullptr;
-			int32_t index = -1;
 			WeakRef() = default;
-			WeakRef(UObject *o) : ptr(o), index(o ? o->GetInternalIndex() : -1) {}
-			UObject *Get() const
-			{
-				if (!ptr || index < 0)
-					return nullptr;
-				FUObjectItem *item = UObjectArray::IndexToObject(index);
-				if (!item || item->GetUObject() != ptr || item->IsUnreachable())
-					return nullptr;
-				return ptr;
-			}
+			WeakRef(UObject *o) : ptr(o) {}
+			UObject *Get() const { return ptr; }
 		};
 
 		/// What the per-level caches (doors, interactive parts, the lent light, the sun) are keyed by: the controller AND the
@@ -1277,11 +1267,7 @@ namespace nc
 			{
 				g_cap.cube = a;
 				g_cap.hidden = false;
-				// evidence for the weak pointers: does UE4SS's agree with the object array's slot?
-				const FWeakObjectPtr theirs(a);
-				log(L"capture test: the test cube is " + a->GetName() + L" (UE4SS's weak pointer: " +
-					(theirs.Get() == a ? L"the same object" : theirs.Get() ? L"A DIFFERENT OBJECT" : L"null") + L"; the slot check: " +
-					(g_cap.cube.Get() == a ? L"the same object" : L"null") + L")");
+				log(L"capture test: the test cube is " + a->GetName());
 			}
 		}
 
@@ -1316,8 +1302,12 @@ namespace nc
 				g_cap.cube = cube;
 			}
 			UObject *cube = g_cap.cube.Get();
-			if (!cube)
-				return; // waiting for the first block placed
+			// alive while it is still one of the block stand-ins (broken: destroyed and out of g_shadows)
+			bool known = false;
+			for (const auto &[key, a] : g_shadows)
+				known = known || a == cube;
+			if (!cube || !known)
+				return; // waiting for a block placed
 			if (!g_cap.actor.Get())
 			{
 				static UObject *captureClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.SceneCapture2D"));
@@ -1529,8 +1519,7 @@ namespace nc
 				return;
 			if (L.level != level_key(pc))
 			{
-				if (UObject *was = L.lent.Get())
-					Call(was, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
+				// the lent light may have gone with its level: forgotten, not called (no check in this build can tell)
 				L = LentLight{};
 				L.level = level_key(pc);
 				for (const wchar_t *kind : {L"PointLightComponent", L"SpotLightComponent"})
