@@ -24,6 +24,11 @@ uniform float2 HostPlanes = float2(0.1, 10000000.0);
 uniform bool McActive = false;
 // Set by the add-on: HN's pause menu is up: Minecraft's world stays, its overlay (its own pause screen) and hand don't.
 uniform bool McPaused = false;
+// Set by the add-on: HN's receivers are drawn only into its scene capture (hidden from the player's camera, so a stand-in
+// a frame off Minecraft's picture can't show), and the capture is bound to HNRECV: their light is read from it.
+uniform bool RecvActive = false;
+texture HNRecvTex : HNRECV;
+sampler sRecv { Texture = HNRecvTex; MinFilter = POINT; MagFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
 
 uniform bool HostReversedZ < ui_label = "Host depth is reversed (UE4: yes)"; > = true;
 uniform float DepthBias < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.005; ui_label = "Depth bias (m)";
@@ -218,6 +223,36 @@ float received_luma(float2 uv, float3 host)
 	return lerp(luma(host), s.x / max(s.y, 1e-3), saturate(s.y * 2.0 - 0.4));
 }
 
+/// The light on a receiver from HN's scene capture of them (RecvActive), as the screen's brightness, or -1 where the
+/// capture has no receiver at Minecraft's surface. The capture is the same view (HN's camera, its field of view) in
+/// HDR (RGB) with its depth in centimetres (A): a receiver is where that depth is Minecraft's. HDR to the screen: HN's
+/// own surfaces within ~1.2 m around it are in both pictures (where the capture's depth is the screen's), and their
+/// brightness on screen over their brightness in the capture is the exposure and tone curve at this brightness.
+float capture_received(float2 uv, float zm)
+{
+	const float4 c = tex2Dlod(sRecv, float4(uv, 0, 0));
+	if (abs(c.a * 0.01 - zm) > 0.06 + 0.01 * zm)
+		return -1.0;
+	const float r = clamp(1.2 / (max(zm, 0.3) * 2.0 * WarpTan.x), 0.02, 0.35);
+	float screen = 0.0, hdr = 0.0;
+	[unroll] for (int i = 0; i < 12; ++i)
+	{
+		const float a = i * 2.39996 + 0.7;
+		const float rr = r * sqrt((i + 0.5) / 12.0);
+		const float2 t = uv + float2(cos(a) * BUFFER_HEIGHT * BUFFER_RCP_WIDTH, sin(a)) * rr;
+		const float4 ct = tex2Dlod(sRecv, float4(t, 0, 0));
+		const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 0)).x);
+		if (abs(ct.a * 0.01 - zt) < 0.05 + 0.01 * zt) // the same HN surface in both (not a receiver, not covered)
+		{
+			screen += luma(tex2Dlod(ReShade::BackBuffer, float4(t, 0, 0)).rgb);
+			hdr += luma(ct.rgb);
+		}
+	}
+	if (hdr <= 1e-5)
+		return -1.0;
+	return luma(c.rgb) * screen / hdr;
+}
+
 /// Hello Neighbor's light where a Minecraft surface is: from Hello Neighbor's surfaces near it in depth (the floor a block
 /// stands on, the wall beside it), never from the picture behind it. It used to be the blurred picture at the Minecraft
 /// pixel itself, which is what lies behind the block or hand: a block in front of a bright window came out bright, in
@@ -407,14 +442,17 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 	// grey stand-in HN draws under blocks and models (bridge.cpp receiver_material), lit by HN's sun with HN's shadows:
 	// a roof's shadow edge crosses the block as it crosses the ground. Its brightness only (a stand-in can coincide
 	// with a coloured HN surface: a block sunk level with the grass); the colour stays the sun's
-	if (cover > 0.0 && ReceiverMatch > 0.0 && abs(zh - zm) < 0.06 + 0.01 * zm)
+	// the receiver's light: from HN's scene capture when the receivers are drawn only there, else from the screen where
+	// HN's surface is at Minecraft's depth (the receiver drawn in the player's view)
+	const float captured = RecvActive && cover > 0.0 ? capture_received(uv, zm) : -1.0;
+	if (cover > 0.0 && ReceiverMatch > 0.0 && (captured >= 0.0 || (!RecvActive && abs(zh - zm) < 0.06 + 0.01 * zm)))
 	{
 		const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
 		// compressed (^0.6): the grey stand-in under dim indoor light came out much darker than HN's own bright-textured
 		// walls beside it (the user: Steve too dark in a lit room); edges keep their contrast, dim light lifts
 		// and never more than HN's own surfaces around it show (surround_cap: the stand-in's light can be the indirect
 		// grid's, brighter than the room)
-		const float g = min(clamp(pow(max(received_luma(uv, host) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
+		const float g = min(clamp(pow(max((captured >= 0.0 ? captured : received_luma(uv, host)) / ReceiverReference, 0.0), 0.6), 0.2, 1.35), surround_cap(uv, zm));
 		const float3 received = world.rgb * tint * g;
 		const float h = saturate((1.0 - exp(-max(zm - HazeStart, 0.0) / HazeDistance)) * HazeStrength);
 		lit = lerp(lit, lerp(received, tex2Dlod(sHostLight, float4(uv, 0, LightBlur + 1.0)).rgb, h), ReceiverMatch);

@@ -14,6 +14,13 @@ namespace compositor
 	void set_paused(bool paused);
 	/// Minecraft's frame number (FrameExporter's) of the picture last uploaded; -1 before the first.
 	long long shown_frame();
+	/// The scene capture of HN's receivers (bridge.cpp ReceiverCapture): its render target's size, which the add-on finds
+	/// the texture by when Unreal creates it (no other HN texture has it).
+	constexpr unsigned kReceiverW = 482, kReceiverH = 271;
+	/// Whether the capture's texture was found and bound to the effect (HNRECV).
+	bool receiver_texture_found();
+	/// HN draws its receivers only into the capture now (hidden from the player): the effect reads their light from it.
+	void set_receivers_captured(bool captured);
 	/// The host camera's clip planes in metres (Unreal: near only, the far plane is infinite).
 	void set_host_planes(float near_clip, float far_clip);
 	/// The host's current camera in Minecraft's convention (rotation in degrees, vertical fov, position in Minecraft

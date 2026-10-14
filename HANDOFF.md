@@ -217,6 +217,18 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+0000000000. **IN PROGRESS (2026-10-13 late): receivers hidden from the player, light read from the capture.** Done and
+           built (inactive until step 3): compositor.cpp finds the capture texture by size (compositor::kReceiverW/H =
+           482x271, RGBA16F) at init_resource, binds it as HNRECV, sets RecvActive when set_receivers_captured(true);
+           NeighborCraft.fx capture_received() (capture depth in A, cm, = Minecraft's depth; HDR -> screen by HN's own
+           surfaces around it in both pictures). Left: (3) bridge.cpp: replace the capture test block (capture_test_*)
+           with a production ReceiverCapture: SceneCapture2D always on, CaptureSource 3 (SceneColorSceneDepth),
+           RTF_RGBA16f at 482x271, HideActorComponents(pawn), follows the camera, NO readbacks/exports; once
+           compositor::receiver_texture_found(): every receiver (g_shadows actors, pool boxes with receiving > 0) in the
+           player controller's HiddenActors, rebuilt at the end of each tick (never a destroyed actor in it), and
+           set_receivers_captured(true); fallback file neighborcraft_receivers_visible.txt. (4) test in game; the user
+           still sees Steve's stand-in trailing him: this is the fix. Skin UV mapping: not needed once hidden.
+
 000000000. **Scene-capture receivers (prototype, 2026-10-13 evening)**: goal: receivers invisible to the player while
           the compositor still reads HN's light on them. Off unless `dlls/neighborcraft_capture_test.txt` exists ("show"
           or "hide", optional second word = ESceneCaptureSource; re-read every 5 s). Rollback: delete the file; full

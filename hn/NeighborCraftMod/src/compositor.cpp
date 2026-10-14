@@ -24,6 +24,13 @@ namespace
 	std::atomic<bool> g_active{false};
 	std::atomic<bool> g_paused{false};
 	std::atomic<long long> g_shownFrame{-1};
+	// the receivers' scene capture (its colour in RGB, its depth in A, centimetres): Unreal's render target, found by
+	// its size when created, viewed by us and bound to the effect as HNRECV
+	std::mutex g_recvLock;
+	uint64_t g_recvRes = 0;
+	resource_view g_recvSrv = {0};
+	bool g_recvDirty = false;
+	std::atomic<bool> g_recvFound{false}, g_recvCaptured{false};
 	std::atomic<float> g_hostNear{0.15f};
 	std::atomic<float> g_hostFar{10000.0f};
 	std::atomic<uint32_t> g_bbWidth{0}, g_bbHeight{0};
@@ -384,6 +391,37 @@ namespace
 		}
 	};
 
+	void on_init_resource(device *dev, const resource_desc &desc, const subresource_data *, resource_usage, resource res)
+	{
+		if (desc.type != resource_type::texture_2d || desc.texture.width != compositor::kReceiverW || desc.texture.height != compositor::kReceiverH ||
+			(desc.texture.format != format::r16g16b16a16_float && desc.texture.format != format::r16g16b16a16_typeless))
+			return;
+		std::lock_guard<std::mutex> lock(g_recvLock);
+		if (g_recvSrv.handle != 0)
+			dev->destroy_resource_view(g_recvSrv);
+		g_recvSrv = {0};
+		g_recvRes = res.handle;
+		if (!dev->create_resource_view(res, resource_usage::shader_resource, resource_view_desc(format::r16g16b16a16_float), &g_recvSrv))
+			g_recvSrv = {0};
+		g_recvDirty = true;
+		g_recvFound = g_recvSrv.handle != 0;
+		reshade::log::message(reshade::log::level::info, g_recvFound ? "NeighborCraft: the receivers' capture texture found (482x271, RGBA16F)"
+																	: "NeighborCraft: the receivers' capture texture found, but no view of it could be made");
+	}
+
+	void on_destroy_resource(device *dev, resource res)
+	{
+		std::lock_guard<std::mutex> lock(g_recvLock);
+		if (res.handle == 0 || res.handle != g_recvRes)
+			return;
+		if (g_recvSrv.handle != 0)
+			dev->destroy_resource_view(g_recvSrv);
+		g_recvSrv = {0};
+		g_recvRes = 0;
+		g_recvDirty = true;
+		g_recvFound = false;
+	}
+
 	void on_init_effect_runtime(effect_runtime *runtime)
 	{
 		g_runtime = runtime;
@@ -472,6 +510,16 @@ namespace
 			runtime->set_uniform_value_bool(v, on);
 		if (!on)
 			return;
+		{
+			std::lock_guard<std::mutex> lock(g_recvLock);
+			if (g_recvDirty)
+			{
+				g_recvDirty = false;
+				runtime->update_texture_bindings("HNRECV", g_recvSrv, g_recvSrv);
+			}
+			if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "RecvActive"); v.handle != 0)
+				runtime->set_uniform_value_bool(v, g_recvSrv.handle != 0 && g_recvCaptured.load());
+		}
 		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "McPaused"); v.handle != 0)
 			runtime->set_uniform_value_bool(v, g_paused.load());
 		if (const effect_uniform_variable v = runtime->find_uniform_variable(kEffect, "McPlanes"); v.handle != 0)
@@ -573,6 +621,10 @@ namespace
 
 	void on_reloaded_effects(effect_runtime *runtime)
 	{
+		{
+			std::lock_guard<std::mutex> lock(g_recvLock);
+			g_recvDirty = true; // a reloaded effect lost its bindings
+		}
 		if (g_width != 0)
 			bind(runtime);
 	}
@@ -600,6 +652,8 @@ namespace compositor
 		reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
 		reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_render_targets);
 		reshade::register_event<reshade::addon_event::draw>(on_draw);
+		reshade::register_event<reshade::addon_event::init_resource>(on_init_resource);
+		reshade::register_event<reshade::addon_event::destroy_resource>(on_destroy_resource);
 		reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
 		reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_indirect);
 		g_registered = true;
@@ -616,6 +670,16 @@ namespace compositor
 	void set_paused(bool paused)
 	{
 		g_paused = paused;
+	}
+
+	bool receiver_texture_found()
+	{
+		return g_recvFound.load();
+	}
+
+	void set_receivers_captured(bool captured)
+	{
+		g_recvCaptured = captured;
 	}
 
 	long long shown_frame()
