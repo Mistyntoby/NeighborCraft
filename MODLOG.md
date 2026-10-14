@@ -693,3 +693,9 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   texture found (482x271, RGBA16F)", "receivers: hidden from the player, their light read from the scene capture".
   Not yet seen: the picture itself (no clone, blocks and Steve still lit/shadowed), the GPU cost. The user needs the
   foreground: the visual check is theirs.
+- [game] the user (verybroken.png): no clone any more, but the light on a cobblestone block showed a house's window and
+  roof edges and 4-pixel squares. ReShade.log: only one 482x271 texture was ever found (the binding was right). Cause:
+  the exposure was estimated per pixel from 12 points around it in both pictures; the two pictures are a hair apart,
+  so the ratio jumped at every edge the points crossed. Now one exposure per frame (RecvExposure pass: screen and
+  capture brightness where both see the same HN surface, mipped to one value), and the capture's colour read with
+  filtering. Live 21:58:33. compositor.cpp also keeps the first matching texture only (built, needs a restart).

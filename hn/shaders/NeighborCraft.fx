@@ -29,6 +29,11 @@ uniform bool McPaused = false;
 uniform bool RecvActive = false;
 texture HNRecvTex : HNRECV;
 sampler sRecv { Texture = HNRecvTex; MinFilter = POINT; MagFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
+sampler sRecvSmooth { Texture = HNRecvTex; AddressU = CLAMP; AddressV = CLAMP; };
+// HN's exposure for the capture's HDR, for the whole frame: where the capture and the screen see the same HN surface,
+// x: the screen's brightness, y: the capture's (mipped down to one value per frame, RecvExposure)
+texture RecvRatioTex { Width = 128; Height = 72; Format = RG32F; MipLevels = 8; };
+sampler sRecvRatio { Texture = RecvRatioTex; AddressU = CLAMP; AddressV = CLAMP; };
 
 uniform bool HostReversedZ < ui_label = "Host depth is reversed (UE4: yes)"; > = true;
 uniform float DepthBias < ui_type = "drag"; ui_min = 0.0; ui_max = 1.0; ui_step = 0.005; ui_label = "Depth bias (m)";
@@ -223,34 +228,34 @@ float received_luma(float2 uv, float3 host)
 	return lerp(luma(host), s.x / max(s.y, 1e-3), saturate(s.y * 2.0 - 0.4));
 }
 
+/// One frame's exposure for the capture: the screen's and the capture's brightness where both see the same HN surface
+/// (the capture's depth is the screen's). A per-pixel estimate from points around each block imprinted the edges of
+/// what was around it (a house's window and roof inside a cobblestone block: the user's verybroken.png): exposure is the
+/// same for the whole frame, so it is measured once for the whole frame.
+float2 PS_RecvExposure(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+	if (!RecvActive)
+		return 0.0;
+	const float4 c = tex2Dlod(sRecv, float4(uv, 0, 0));
+	const float zh = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(uv, 0, 0)).x);
+	if (zh > 200.0 || abs(c.a * 0.01 - zh) > 0.05 + 0.01 * zh)
+		return 0.0;
+	return float2(luma(tex2Dlod(ReShade::BackBuffer, float4(uv, 0, 0)).rgb), luma(c.rgb));
+}
+
 /// The light on a receiver from HN's scene capture of them (RecvActive), as the screen's brightness, or -1 where the
-/// capture has no receiver at Minecraft's surface. The capture is the same view (HN's camera, its field of view) in
-/// HDR (RGB) with its depth in centimetres (A): a receiver is where that depth is Minecraft's. HDR to the screen: HN's
-/// own surfaces within ~1.2 m around it are in both pictures (where the capture's depth is the screen's), and their
-/// brightness on screen over their brightness in the capture is the exposure and tone curve at this brightness.
+/// capture has no receiver at Minecraft's surface. The capture is the same view (HN's camera, its field of view) in HDR
+/// (RGB) with its depth in centimetres (A): a receiver is where that depth is Minecraft's. Its colour read smoothly (the
+/// capture is a quarter of the screen's size: read point by point it came out in 4-pixel squares).
 float capture_received(float2 uv, float zm)
 {
-	const float4 c = tex2Dlod(sRecv, float4(uv, 0, 0));
-	if (abs(c.a * 0.01 - zm) > 0.06 + 0.01 * zm)
+	const float depth = tex2Dlod(sRecv, float4(uv, 0, 0)).a;
+	if (abs(depth * 0.01 - zm) > 0.06 + 0.01 * zm)
 		return -1.0;
-	const float r = clamp(1.2 / (max(zm, 0.3) * 2.0 * WarpTan.x), 0.02, 0.35);
-	float screen = 0.0, hdr = 0.0;
-	[unroll] for (int i = 0; i < 12; ++i)
-	{
-		const float a = i * 2.39996 + 0.7;
-		const float rr = r * sqrt((i + 0.5) / 12.0);
-		const float2 t = uv + float2(cos(a) * BUFFER_HEIGHT * BUFFER_RCP_WIDTH, sin(a)) * rr;
-		const float4 ct = tex2Dlod(sRecv, float4(t, 0, 0));
-		const float zt = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(t, 0, 0)).x);
-		if (abs(ct.a * 0.01 - zt) < 0.05 + 0.01 * zt) // the same HN surface in both (not a receiver, not covered)
-		{
-			screen += luma(tex2Dlod(ReShade::BackBuffer, float4(t, 0, 0)).rgb);
-			hdr += luma(ct.rgb);
-		}
-	}
-	if (hdr <= 1e-5)
+	const float2 e = tex2Dlod(sRecvRatio, float4(0.5, 0.5, 0, 7)).xy;
+	if (e.y <= 1e-6)
 		return -1.0;
-	return luma(c.rgb) * screen / hdr;
+	return luma(tex2Dlod(sRecvSmooth, float4(uv, 0, 0)).rgb) * e.x / e.y;
 }
 
 /// Hello Neighbor's light where a Minecraft surface is: from Hello Neighbor's surfaces near it in depth (the floor a block
@@ -570,6 +575,12 @@ technique NeighborCraft < ui_tooltip = "Minecraft passthrough: enabled automatic
 		PixelShader = PS_Light;
 		RenderTarget0 = HostLightTex;
 		RenderTarget1 = HostSurroundTex;
+	}
+	pass RecvExposure
+	{
+		VertexShader = PostProcessVS;
+		PixelShader = PS_RecvExposure;
+		RenderTarget = RecvRatioTex;
 	}
 	pass Composite
 	{

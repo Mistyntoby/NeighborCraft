@@ -397,8 +397,11 @@ namespace
 			(desc.texture.format != format::r16g16b16a16_float && desc.texture.format != format::r16g16b16a16_typeless))
 			return;
 		std::lock_guard<std::mutex> lock(g_recvLock);
-		if (g_recvSrv.handle != 0)
-			dev->destroy_resource_view(g_recvSrv);
+		// the first one only (until it is destroyed): ours is made when the capture is set up, before it renders; rendering
+		// it, Unreal makes its own working textures of the capture's size and format, and taking the last one made bound
+		// one of those (the user saw a window's and a roof's edges inside a cobblestone block)
+		if (g_recvRes != 0)
+			return;
 		g_recvSrv = {0};
 		g_recvRes = res.handle;
 		if (!dev->create_resource_view(res, resource_usage::shader_resource, resource_view_desc(format::r16g16b16a16_float), &g_recvSrv))
