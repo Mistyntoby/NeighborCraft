@@ -3026,8 +3026,11 @@ namespace nc
 			{
 				// native blocks (phase 2: one block while it is checked); off with dlls/neighborcraft_native_off.txt
 				const bool nativeOff = bool(std::ifstream(module_dir() + L"neighborcraft_native_off.txt"));
-				sendf("{\"t\":\"native\",\"n\":%d}", nativeOff ? 0 : 1);
-				log(nativeOff ? L"native blocks: off (neighborcraft_native_off.txt)" : L"native blocks: Minecraft may hand HN 1 block (the phase 2 prototype)");
+				// every eligible block (phase 4): the one-block prototype worked in game (23:04, planks drawn by HN), and a mix
+				// looked uneven: a native block lit by HN beside Minecraft's lit by the compositor's estimate (the user: "a random
+				// block is lighter than the rest")
+				sendf("{\"t\":\"native\",\"n\":%d}", nativeOff ? 0 : 4096);
+				log(nativeOff ? L"native blocks: off (neighborcraft_native_off.txt)" : L"native blocks: every full cube with one texture is drawn by HN");
 				double pid = 0;
 				if (json_number(m, "pid", pid))
 					g_mcPid = DWORD(pid);
