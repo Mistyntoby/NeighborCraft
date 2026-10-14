@@ -1209,10 +1209,20 @@ namespace nc
 			{
 				g_cap.nextRead = GetTickCount() + 5000;
 				std::ifstream f(module_dir() + L"neighborcraft_capture_test.txt");
+				if (!f)
+				{
+					// the file gone: the test ends (it went on rendering the scene twice, reading pixels back and exporting
+					// every 10 s until the game was restarted: the user's "shit load of lag")
+					g_cap.on = false;
+					if (UObject *component = g_cap.component.Get())
+						if (bool *everyFrame = capture_field<bool>(component, STR("bCaptureEveryFrame"), 0x280))
+							*everyFrame = false;
+					log(L"capture test: off (the file is gone)");
+					return false;
+				}
 				std::string word;
 				int source = 2;
-				if (f)
-					f >> word >> source;
+				f >> word >> source;
 				if (source != g_cap.source)
 				{
 					g_cap.source = source;
