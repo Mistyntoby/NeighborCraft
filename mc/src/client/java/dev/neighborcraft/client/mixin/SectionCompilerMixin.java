@@ -23,6 +23,7 @@ abstract class SectionCompilerMixin {
 	@Inject(method = "tesselateBlock", at = @At("HEAD"), cancellable = true, require = 0)
 	private void passthrough$native(final BlockQuadOutput out, final float x, final float y, final float z, final BlockAndTintGetter level,
 		final BlockPos pos, final BlockState state, final BlockStateModel model, final long seed, final CallbackInfo ci) {
+		NativeBlocks.hooked();
 		if (NativeBlocks.handle(pos, state, model)) {
 			ci.cancel();
 		}

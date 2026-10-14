@@ -1479,7 +1479,11 @@ namespace nc
 				const int colour = i < g_shadowColours.size() ? g_shadowColours[i] : -1;
 				// -2: a cube the skin leaves transparent (an empty outer layer): Minecraft draws nothing there, so HN
 				// doesn't draw its stand-in either (it still casts)
-				const bool draw = (kind == 1 || (kind == 2 && !g_mcFirstPerson)) && colour != -2 && receiver_material(pawn);
+				// models' boxes (Steve's) only cast now: drawn, they trailed him a frame behind ("the weird clone", the user),
+				// and only a native Steve (migration phase 5) ends that; his light comes from HN's surfaces around him
+				// meanwhile. dlls/neighborcraft_model_receivers.txt draws them again
+				static const bool modelReceivers = bool(std::ifstream(module_dir() + L"neighborcraft_model_receivers.txt"));
+				const bool draw = modelReceivers && (kind == 1 || (kind == 2 && !g_mcFirstPerson)) && colour != -2 && receiver_material(pawn);
 				const int receive = draw ? 1 + (colour >= 0 ? (colour & 0xFFFFFF) : 0x1000000) : 0;
 				if (P.receiving[used] != receive)
 				{

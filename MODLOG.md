@@ -739,3 +739,8 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   target(s)"): the redirect of tesselateBlock's call in SectionCompiler.compile found nothing in game. Now an inject at
   the head of ModelBlockRenderer.tesselateBlock (cancelled for native blocks), require = 0: a failing hook leaves
   Minecraft running with all blocks its own.
+- 22:55 session: Minecraft got "native n=1" and two blocks were placed, but none became native and no texture was
+  written; no log says why (require = 0 hides a hook that didn't apply). Now logged: "Minecraft's block meshing is
+  hooked" once, and the first 12 decisions with their reason.
+- Steve's clone (the user's screenshot 22:56): his model boxes no longer draw (cast only); his light from HN's surfaces
+  around him until native Steve (phase 5). dlls/neighborcraft_model_receivers.txt draws them again.

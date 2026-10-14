@@ -55,25 +55,42 @@ public final class NativeBlocks {
 	 * From a chunk compile thread, before Minecraft meshes a block: true if HN draws it (Minecraft then skips it). Sends
 	 * HN the block and its texture.
 	 */
+	/** The first decisions, logged (the 22:55 session placed blocks and none became native; nothing said why). */
+	private static final java.util.concurrent.atomic.AtomicInteger TOLD = new java.util.concurrent.atomic.AtomicInteger();
+
+	private static boolean say(final String why, final BlockState state, final boolean result) {
+		if (limit > 0 && TOLD.getAndIncrement() < 12) {
+			Passthrough.LOG.info("native blocks: {} -> {} ({})", state, result ? "HN's" : "Minecraft's", why);
+		}
+
+		return result;
+	}
+
 	public static boolean handle(final BlockPos pos, final BlockState state, final BlockStateModel model) {
-		if (limit <= 0 || !state.isSolidRender()) {
+		if (limit <= 0) {
 			return false;
+		}
+
+		if (!state.isSolidRender()) {
+			return say("not a solid cube", state, false);
 		}
 
 		BlockPos key = pos.immutable();
 		if (!NATIVE.contains(key) && NATIVE.size() >= limit) {
-			return false;
+			return say("the limit (" + limit + ") reached", state, false);
 		}
 
 		TextureAtlasSprite sprite = singleSprite(model, state.getSeed(pos));
 		if (sprite == null) {
-			return false;
+			return say("faces differ, tinted or not six", state, false);
 		}
 
 		String name = sprite.contents().name().toString().replace(':', '_').replace('/', '_');
 		if (!write(name, sprite)) {
-			return false;
+			return say("texture not written", state, false);
 		}
+
+		say("native: " + name, state, true);
 
 		if (NATIVE.add(key)) {
 			OUT.add("{\"t\":\"nblock\",\"p\":[" + key.getX() + "," + key.getY() + "," + key.getZ() + "],\"tex\":\"" + name + "\"}");
@@ -123,6 +140,7 @@ public final class NativeBlocks {
 		try {
 			NativeImage image = ((SpriteContentsAccessor) sprite.contents()).passthrough$originalImage();
 			if (image == null) {
+				Passthrough.LOG.warn("native blocks: {} has no image in memory", name);
 				return false;
 			}
 
@@ -160,6 +178,16 @@ public final class NativeBlocks {
 
 		for (String m; (m = OUT.poll()) != null;) {
 			Passthrough.events.accept(m);
+		}
+	}
+
+	private static volatile boolean hookedOnce;
+
+	/** The tesselateBlock hook runs (SectionCompilerMixin): logged once, so a hook that didn't apply shows by its absence. */
+	public static void hooked() {
+		if (!hookedOnce) {
+			hookedOnce = true;
+			Passthrough.LOG.info("native blocks: Minecraft's block meshing is hooked");
 		}
 	}
 
