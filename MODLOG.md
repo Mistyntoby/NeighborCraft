@@ -716,3 +716,8 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   end (capture depth) is a quarter-size reading: on an edge-on face it was the front edge's, short of the face. Now
   1.5 blocks past it (the bisection keeps the steps fine). Live 22:26:26.
 - Looking straight up/down: the +-89 pitch build was never installed (HN was running); installed at the next close.
+- [game] the user: walking around a block, the face turning away from them brightened. Cause: the capture's 4x4
+  texels around a pixel were weighed by depth against the pixel's own depth; at a block's edge the next face of the
+  same block has nearly that depth, so its light bled onto a face turning edge-on (mostly edge). Now plane-aware: each
+  texel is compared with this face's plane at the texel's place (the depth slope per pixel from Minecraft's depth, the
+  same samples as the face normal), and the tolerance grows with the slope. Live 22:31:45.

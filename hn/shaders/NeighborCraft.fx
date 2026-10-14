@@ -275,11 +275,16 @@ float PS_RecvExpStore(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
 /// here, so the light of the background behind a block's edge never mixes in (read bilinearly it smudged, read point
 /// by point it came out in squares). How sure fades the capture's light in and out (where Steve's picture and his
 /// stand-ins are a frame apart, the plain depth test flipped pixels between two lights: his "visual stutter").
-float2 capture_received(float2 uv, float zm)
+/// `grad`: how Minecraft's surface's depth changes per screen pixel (x right, y down). Plane-aware: each capture texel is
+/// compared with the depth this face's plane has at the texel's place, not with this pixel's own depth: at a block's
+/// edge the next face of the same block has nearly the same depth, and its light bled onto a face turning edge-on (the
+/// user: the side being walked away from brightened); off this face's plane it doesn't count.
+float2 capture_received(float2 uv, float zm, float2 grad)
 {
 	const float2 size = tex2Dsize(sRecv, 0);
 	const float2 base = (floor(uv * size - 0.5) + 0.5) / size;
-	const float tol = 0.04 + 0.01 * zm;
+	grad = clamp(grad, -0.5, 0.5);
+	const float tol = 0.03 + 0.005 * zm + 0.5 * length(grad);
 	float light = 0.0, weight = 0.0;
 	[unroll] for (int y = -1; y <= 2; ++y)
 		[unroll] for (int x = -1; x <= 2; ++x)
@@ -287,7 +292,8 @@ float2 capture_received(float2 uv, float zm)
 			const float2 t = base + float2(x, y) / size;
 			const float4 c = tex2Dlod(sRecv, float4(t, 0, 0));
 			const float2 d = abs(t - uv) * size; // texels from this pixel
-			const float w = exp(-abs(c.a * 0.01 - zm) / tol) * saturate(1.5 - d.x) * saturate(1.5 - d.y);
+			const float plane = zm + dot(grad, (t - uv) * BUFFER_SCREEN_SIZE); // this face's depth there
+			const float w = exp(-abs(c.a * 0.01 - plane) / tol) * saturate(1.5 - d.x) * saturate(1.5 - d.y);
 			light += luma(c.rgb) * w;
 			weight += w;
 		}
@@ -487,6 +493,7 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 	// the face's normal, from Minecraft's depth around this point (the neighbour on the side with the nearer depth, so
 	// a block's edge doesn't bend it), in Minecraft's camera space; facing the camera
 	float ndl = -2.0;
+	float2 grad = 0.0; // the surface's depth change per screen pixel (x right, y down)
 	if (cover > 0.0)
 	{
 		const float2 texel = 1.0 / tex2Dsize(sDepth, 0);
@@ -499,6 +506,9 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 		const float3 pd = float3((ud * 2.0 - 1.0) * mcScale, -1.0) * mc_linear(tex2Dlod(sDepth, float4(ud, 0, 0)).r);
 		const float3 dx = abs(pr.z - pc.z) < abs(pc.z - pl.z) ? pr - pc : pc - pl;
 		const float3 dy = abs(pu.z - pc.z) < abs(pc.z - pd.z) ? pu - pc : pc - pd;
+		// depth is -z; Minecraft's rows run up, the screen's down (its frame is the screen's size: a texel is a pixel)
+		if (abs(pc.z) < 1e8)
+			grad = float2(-dx.z, dy.z);
 		float3 n = cross(dx, dy);
 		if (dot(n, n) > 1e-12 && abs(pc.z) < 1e8)
 		{
@@ -515,7 +525,7 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 	// with a coloured HN surface: a block sunk level with the grass); the colour stays the sun's
 	// the receiver's light: from HN's scene capture when the receivers are drawn only there, else from the screen where
 	// HN's surface is at Minecraft's depth (the receiver drawn in the player's view)
-	const float2 captured = RecvActive && cover > 0.0 ? capture_received(uv, zm) : 0.0;
+	const float2 captured = RecvActive && cover > 0.0 ? capture_received(uv, zm, grad) : 0.0;
 	if (cover > 0.0 && ReceiverMatch > 0.0 && (captured.y > 0.0 || (!RecvActive && abs(zh - zm) < 0.06 + 0.01 * zm)))
 	{
 		const float3 tint = clamp(lerp(1.0, light_colour(), LightTint), 0.55, 1.5);
