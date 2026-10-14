@@ -393,9 +393,14 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 		// (Steve in third person) are found even when the camera has swung sideways.
 		const float3 ray = float3((uv.x * 2.0 - 1.0) * WarpTan.x * BUFFER_WIDTH * BUFFER_RCP_HEIGHT, (1.0 - uv.y * 2.0) * WarpTan.x, -1.0);
 		const float2 mcScale = float2(WarpTan.y * WarpTan.z, WarpTan.y);
-		const float zNear = 0.2, zFar = max(min(zh + allow, 400.0), 0.5);
+		// as far as HN's surface here, or the receiver here (the scene capture sees them; the player's camera doesn't): with
+		// the receivers hidden, HN's surface behind a block is the road or a house far off, the steps got long, and the
+		// hit snapped from step to step while turning: copies of Steve and blocks (the user's trailOrSmudgingEffect.png)
+		const float zHint = RecvActive ? min(zh, max(tex2Dlod(sRecv, float4(uv, 0, 0)).a * 0.01, 0.2)) : zh;
+		const float zNear = 0.2, zFar = max(min(zHint + allow, 400.0), 0.5);
 		float2 ndc = 0.0;
 		inside = false;
+		float zPrev = zNear;
 		[loop] for (int i = 0; i < 24; ++i)
 		{
 			const float z = zNear * pow(zFar / zNear, i / 23.0);
@@ -408,10 +413,29 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 				continue;
 			const float zmv = mc_linear(tex2Dlod(sDepth, float4(n * 0.5 + 0.5, 0, 0)).r);
 			if (zmv > -pm.z + 0.03)
+			{
+				zPrev = z;
 				continue; // still in front of whatever Minecraft drew there
-			// crossed Minecraft's surface: settle on it (fixed-point on the surface point's Hello Neighbor depth)
-			float zg = z;
+			}
+			// crossed Minecraft's surface between the last step and this one: bisect to the crossing (the steps alone
+			// quantised it), then settle on it (fixed-point on the surface point's Hello Neighbor depth)
+			float lo = zPrev, hi = z;
 			ndc = n;
+			[loop] for (int b = 0; b < 6; ++b)
+			{
+				const float zb = sqrt(lo * hi);
+				const float3 pb = ray * zb;
+				const float3 mb = float3(dot(WarpRow0, pb), dot(WarpRow1, pb), dot(WarpRow2, pb)) + WarpT;
+				const float2 nb = mb.xy / -mb.z / mcScale;
+				if (mb.z > -1e-3 || any(abs(nb) > 1.0) || mc_linear(tex2Dlod(sDepth, float4(nb * 0.5 + 0.5, 0, 0)).r) > -mb.z + 0.03)
+					lo = zb;
+				else
+				{
+					hi = zb;
+					ndc = nb;
+				}
+			}
+			float zg = hi;
 			[loop] for (int k = 0; k < 3; ++k)
 			{
 				const float3 pk = ray * zg;

@@ -706,3 +706,9 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   an edge, no squares), returns how sure it is and the composite fades by it (no flip between two lights where Steve's
   picture and boxes are a frame apart); the exposure is a log-average, eased over ~12 frames (RecvExpSmooth/Store).
   Live 22:02:45. Not yet seen. Left if it still shimmers: a larger capture (cost) or temporal smoothing of the light.
+- [game] the user (trailOrSmudgingEffect.png): copies of Steve and a block when turning. Cause: the re-projection
+  marches each pixel's ray up to HN's surface there in 24 steps; with the receivers hidden that surface is the road or
+  a house far behind, the steps grew long and the hit snapped between them. Now the march ends at the capture's depth
+  (it sees the receivers) and the crossing is bisected (6 steps). Live 22:13:59.
+- Looking straight up/down "freaks out" the cameras: the look pitch (HN computes it from raw mouse) is now +-89, not
+  +-90. Built; needs a restart.

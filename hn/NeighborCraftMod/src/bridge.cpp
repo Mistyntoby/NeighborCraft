@@ -6351,7 +6351,9 @@ namespace nc
 					// Minecraft's MouseHandler: f = sensitivity * 0.6 + 0.2, turn = counts * f^3 * 8 * 0.15 degrees
 					const double f = 0.5 * 0.6 + 0.2, k = f * f * f * 8.0 * 0.15;
 					g_lookYaw += dx * k;
-					g_lookPitch = std::clamp(g_lookPitch + dy * k, -90.0, 90.0);
+					// +-89, not 90: straight up or down the yaw stops meaning anything, and Minecraft's camera and HN's (and the
+					// compositor's re-projection between them) disagreed there (the user: "the cameras freak out")
+					g_lookPitch = std::clamp(g_lookPitch + dy * k, -89.0, 89.0);
 				}
 				else
 				{
@@ -6359,7 +6361,7 @@ namespace nc
 					double d = std::fmod(yaw - g_lookYaw, 360.0);
 					d += d > 180.0 ? -360.0 : d < -180.0 ? 360.0 : 0.0;
 					g_lookYaw += d;
-					g_lookPitch = std::clamp(double(pitch), -90.0, 90.0);
+					g_lookPitch = std::clamp(double(pitch), -89.0, 89.0);
 				}
 			}
 			yaw = float(g_lookYaw);
