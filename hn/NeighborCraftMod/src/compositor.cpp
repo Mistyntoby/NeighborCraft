@@ -474,6 +474,52 @@ namespace
 		return type != indirect_command::dispatch && before_draw(cmd_list);
 	}
 
+	/// The effect's receiver diagnostics (RecvStatsTex, mipped to one texel) and exposure, read back into ReShade.log.
+	void log_receiver_stats(effect_runtime *runtime)
+	{
+		static resource staging = {0};
+		device *dev = runtime->get_device();
+		auto read = [&](const char *name, uint32_t mip, float out[4]) {
+			const effect_texture_variable var = runtime->find_texture_variable(kEffect, name);
+			if (var.handle == 0)
+				return false;
+			resource_view srv = {0}, srgb = {0};
+			runtime->get_texture_binding(var, &srv, &srgb);
+			if (srv.handle == 0)
+				return false;
+			const resource tex = dev->get_resource_from_view(srv);
+			const resource_desc desc = dev->get_resource_desc(tex);
+			if (staging.handle == 0 &&
+				!dev->create_resource(resource_desc(1, 1, 1, 1, format::r32g32b32a32_float, 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest), nullptr,
+									  resource_usage::copy_dest, &staging))
+				return false;
+			if (desc.texture.format != format::r32g32b32a32_float && desc.texture.format != format::r32_float)
+				return false;
+			command_queue *queue = runtime->get_command_queue();
+			command_list *cmd = queue->get_immediate_command_list();
+			const subresource_box one = {0, 0, 0, 1, 1, 1};
+			cmd->barrier(tex, resource_usage::shader_resource, resource_usage::copy_source);
+			if (desc.texture.format == format::r32g32b32a32_float)
+				cmd->copy_texture_region(tex, mip, &one, staging, 0, &one);
+			cmd->barrier(tex, resource_usage::copy_source, resource_usage::shader_resource);
+			queue->flush_immediate_command_list();
+			queue->wait_idle();
+			subresource_data data = {};
+			if (!dev->map_texture_region(staging, 0, nullptr, map_access::read_only, &data) || !data.data)
+				return false;
+			std::memcpy(out, data.data, sizeof(float) * 4);
+			dev->unmap_texture_region(staging, 0);
+			return true;
+		};
+		float s[4] = {};
+		if (!read("RecvStatsTex", 7, s))
+			return;
+		char text[256];
+		snprintf(text, sizeof(text), "NeighborCraft: receivers' capture vs HN's depth: fill fires on %.1f%% of near pixels, capture/HN depth %.3f, %.1f%% agree",
+			s[2] > 0 ? 100.0 * s[0] / s[2] : 0.0, s[2] > 0 ? s[1] / s[2] : 0.0, s[2] > 0 ? 100.0 * s[3] / s[2] : 0.0);
+		reshade::log::message(reshade::log::level::info, text);
+	}
+
 	void on_present(effect_runtime *runtime)
 	{
 		watch_effect_file(runtime); // every frame, even when the effect failed to compile
@@ -489,6 +535,8 @@ namespace
 				early, frames, g_backBufferDraws, g_width, g_height, g_mcPose.fov, g_bbWidth.load(), g_bbHeight.load());
 			reshade::log::message(reshade::log::level::info, text);
 			frames = early = 0;
+			if (g_recvCaptured.load())
+				log_receiver_stats(runtime);
 		}
 		// the next frame starts: look for its scene pass and its first UI draw again
 		g_sceneDrawn = false;

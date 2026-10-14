@@ -27,6 +27,9 @@ uniform bool McPaused = false;
 // Set by the add-on: HN's receivers are drawn only into its scene capture (hidden from the player's camera, so a stand-in
 // a frame off Minecraft's picture can't show), and the capture is bound to HNRECV: their light is read from it.
 uniform bool RecvActive = false;
+// Off: the first try painted the capture's quarter-size picture over most of HN (the user: "the entire game is a
+// pixelated mess"): the depth test that finds receivers fired almost everywhere. Debug view 4 shows that test.
+uniform bool BackgroundFill < ui_label = "Paint what is behind peeking receivers"; > = false;
 texture HNRecvTex : HNRECV;
 sampler sRecv { Texture = HNRecvTex; MinFilter = POINT; MagFilter = POINT; AddressU = CLAMP; AddressV = CLAMP; };
 sampler sRecvSmooth { Texture = HNRecvTex; AddressU = CLAMP; AddressV = CLAMP; };
@@ -35,6 +38,11 @@ sampler sRecvSmooth { Texture = HNRecvTex; AddressU = CLAMP; AddressV = CLAMP; }
 texture RecvRatioTex { Width = 128; Height = 72; Format = RGBA32F; MipLevels = 8; };
 sampler sRecvRatio { Texture = RecvRatioTex; AddressU = CLAMP; AddressV = CLAMP; };
 // the exposure (log of screen over capture), smoothed over frames: this frame's (A) and last frame's (B)
+// diagnostics, read back by the add-on into ReShade.log every 10 s (one value per frame after the mips): x the share of
+// HN's pixels where the capture's depth is behind HN's (what the background fill fires on), y the capture's depth over
+// HN's (where both are under 100 m), z how many such, w the share where they agree within 5 cm + 1%
+texture RecvStatsTex { Width = 128; Height = 72; Format = RGBA32F; MipLevels = 8; };
+sampler sRecvStats { Texture = RecvStatsTex; };
 texture RecvExpATex { Width = 1; Height = 1; Format = R32F; };
 sampler sRecvExpA { Texture = RecvExpATex; MinFilter = POINT; MagFilter = POINT; };
 texture RecvExpBTex { Width = 1; Height = 1; Format = R32F; };
@@ -261,6 +269,17 @@ float PS_RecvExpSmooth(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targ
 		return prev;
 	const float now = (m.x - m.y) / m.z;
 	return prev == 0.0 ? now : lerp(prev, now, 0.08);
+}
+
+float4 PS_RecvStats(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+{
+	if (!RecvActive)
+		return 0.0;
+	const float zc = tex2Dlod(sRecv, float4(uv, 0, 0)).a * 0.01;
+	const float zh = host_linear(tex2Dlod(ReShade::DepthBuffer, float4(uv, 0, 0)).x);
+	if (zh > 100.0 || zc > 100.0 || zc <= 0.0)
+		return float4(0.0, 0.0, 0.0, 0.0);
+	return float4(zc > zh + 0.05 + 0.02 * zh ? 1.0 : 0.0, zc / zh, 1.0, abs(zc - zh) < 0.05 + 0.01 * zh ? 1.0 : 0.0);
 }
 
 float PS_RecvExpStore(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
@@ -545,7 +564,7 @@ void PS_Composite(float4 pos : SV_Position, float2 uv : TEXCOORD, out float4 out
 	// HN's depth here is nearer than the capture's, HN drew a receiver, and the capture has the background (HDR, to the
 	// screen's brightness by this frame's exposure)
 	float3 shown = host;
-	if (RecvActive && cover < 1.0)
+	if (RecvActive && BackgroundFill && cover < 1.0)
 	{
 		const float zc = tex2Dlod(sRecv, float4(uv, 0, 0)).a * 0.01;
 		const float e = tex2Dlod(sRecvExpA, float4(0.5, 0.5, 0, 0)).x;
@@ -677,6 +696,12 @@ technique NeighborCraft < ui_tooltip = "Minecraft passthrough: enabled automatic
 		VertexShader = PostProcessVS;
 		PixelShader = PS_RecvExpSmooth;
 		RenderTarget = RecvExpATex;
+	}
+	pass RecvStats
+	{
+		VertexShader = PostProcessVS;
+		PixelShader = PS_RecvStats;
+		RenderTarget = RecvStatsTex;
 	}
 	pass RecvExpStore
 	{
