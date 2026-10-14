@@ -197,9 +197,10 @@ final class ClientInput {
 				}
 			}
 			case "hostfps" -> {
-				// Minecraft renders at Hello Neighbor's rate (rounded up to the option's steps of 10): faster, it drew frames
-				// HN never showed, and the picture HN showed was several of its frames behind (Steve's trail on turns)
-				int want = Math.clamp((int) Math.ceil(m.get("v").getAsDouble() / 10.0) * 10, 30, 240);
+				// Minecraft renders at Hello Neighbor's rate (to the option's nearest step of 10: rounded up, HN's 60.2 gave 70):
+				// faster, it drew frames HN never showed, and the picture HN showed was several of its frames behind (Steve's
+				// trail on turns)
+				int want = Math.clamp((int) Math.round(m.get("v").getAsDouble() / 10.0) * 10, 30, 240);
 				if (minecraft.options.framerateLimit().get() != want) {
 					dev.neighborcraft.Passthrough.LOG.info("frame rate limit {} -> {} (Hello Neighbor's rate)", minecraft.options.framerateLimit().get(), want);
 					minecraft.options.framerateLimit().set(want);

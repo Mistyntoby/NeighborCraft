@@ -217,6 +217,30 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+000000000. **Scene-capture receivers (prototype, 2026-10-13 evening)**: goal: receivers invisible to the player while
+          the compositor still reads HN's light on them. Off unless `dlls/neighborcraft_capture_test.txt` exists ("show"
+          or "hide", optional second word = ESceneCaptureSource; re-read every 5 s). Rollback: delete the file; full
+          rollback: tag `receivers-visible-baseline`.
+          - APIs (4.20 header dump): APlayerController.HiddenActors (engine TArray, grown with GMalloc), SceneCapture2D
+            + CaptureComponent2D (FOVAngle 0x2D4, TextureTarget 0x2E0, CaptureSource 0x2E8, bCaptureEveryFrame 0x280;
+            the name lookup failed for FOVAngle once: fields by name, else by offset), HideActorComponents,
+            KismetRenderingLibrary CreateRenderTarget2D / ExportRenderTarget (param "FileName"; float targets only:
+            .hdr) / ReadRenderTargetRawPixel (useless on a float target).
+          - [game] VERIFIED: a receiver in the player controller's HiddenActors is gone from HN's own picture (ReShade
+            off, screenshots hide2_off/hide0_off) and still in the capture, lit by HN (SceneColorHDR export: bluish in a
+            house's shade; BaseColor: grey 128; normals right). Camera alignment of the capture matches the screen.
+          - [game] SCS_FinalColorLDR comes out black near the camera (the capture's own auto exposure): use HDR.
+          - [game] no frame-time change (60 fps vsync-bound, 16.7 ms with and without; GPU time not measured).
+          - NOT settled: whether a player-hidden receiver still casts its shadow in the player's view (the
+            sideways-lit test lost the cube from view). Design so it doesn't matter: keep the hidden shadow caster
+            (proven) next to the player-hidden receiver.
+          - Next: (1) the compositor reads the capture: the ReShade add-on finds the 480x270 RGBA16F texture by its
+            description at init_resource, makes a view and binds it to the effect (update_texture_bindings); the shader
+            takes the received light from it (HDR ratio to a sunlit-grey reference, to be measured); (2) receivers as
+            separate actors in HiddenActors, casters unchanged; (3) GPU cost of a second scene render.
+          - Found on the way: UE4SS's FWeakObjectPtr gives OTHER objects in this build (the object array doesn't line up
+            with the indices): no weak pointers or root-set anywhere (lights now per-level plain pointers).
+
 00000000. **Play-test 2026-10-13** (P0): blocks and Steve in a dark room (the nightmare corridor) should no longer be
          daylight bright (shader surround_cap, MODLOG 2026-10-13); check blocks in shade on dark ground aren't too dark.
          Next: the user's seven-task list (doors, held-item use + Act 1 car keys, performance, lamp, torch light,

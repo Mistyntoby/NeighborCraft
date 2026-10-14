@@ -1173,6 +1173,7 @@ namespace nc
 		struct CaptureTest
 		{
 			bool checked = false, on = false, hide = false;
+			int source = 2;             // ESceneCaptureSource (the file's second word; 2: final colour)
 			UObject *level = nullptr;   // level_key
 			WeakRef cube;        // the test receiver (the first block stand-in placed while on)
 			WeakRef actor;       // the SceneCapture2D
@@ -1209,8 +1210,14 @@ namespace nc
 				g_cap.nextRead = GetTickCount() + 5000;
 				std::ifstream f(module_dir() + L"neighborcraft_capture_test.txt");
 				std::string word;
+				int source = 2;
 				if (f)
-					f >> word;
+					f >> word >> source;
+				if (source != g_cap.source)
+				{
+					g_cap.source = source;
+					log(L"capture test: capture source " + std::to_wstring(source));
+				}
 				if ((word == "hide") != g_cap.hide)
 				{
 					g_cap.hide = word == "hide";
@@ -1297,7 +1304,9 @@ namespace nc
 			if (g_cap.level != level_key(pc))
 			{
 				const WeakRef cube = g_cap.cube; // a block placed before the first tick here is still the test cube
+				const int source = g_cap.source;
 				g_cap = CaptureTest{true, true, g_cap.hide};
+				g_cap.source = source;
 				g_cap.level = level_key(pc);
 				g_cap.cube = cube;
 			}
@@ -1353,6 +1362,9 @@ namespace nc
 				*texture = *target;
 				*source = 2; // SCS_FinalColorLDR: as the screen
 				*everyFrame = true;
+				// HN's own player out of it: its body is hidden from the player's camera by owner-only flags, which a capture
+				// (no owner) ignores: the first export showed the lower half black, the camera inside the body
+				Call(*component, STR("HideActorComponents")).set<UObject *>(STR("InActor"), pawn).invoke();
 				g_cap.actor = *actor;
 				g_cap.component = *component;
 				g_cap.target = *target;
@@ -1382,6 +1394,8 @@ namespace nc
 				.set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
 			if (float *fov = capture_field<float>(component, STR("FOVAngle"), 0x2D4))
 				*fov = cam.hfov;
+			if (uint8_t *source = capture_field<uint8_t>(component, STR("CaptureSource"), 0x2E8))
+				*source = uint8_t(g_cap.source);
 			// diagnostics: the capture's pixel at the cube's centre, every 2 s; the whole capture as a file every 30 s
 			if (GetTickCount() > g_cap.nextLog)
 			{
@@ -1417,7 +1431,7 @@ namespace nc
 			}
 			if (GetTickCount() > g_cap.nextExport)
 			{
-				g_cap.nextExport = GetTickCount() + 30000;
+				g_cap.nextExport = GetTickCount() + 10000;
 				static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
 				static int n = 0;
 				const std::wstring name = L"capture_" + std::to_wstring(n++) + L".hdr";
