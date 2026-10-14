@@ -744,3 +744,10 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   hooked" once, and the first 12 decisions with their reason.
 - Steve's clone (the user's screenshot 22:56): his model boxes no longer draw (cast only); his light from HN's surfaces
   around him until native Steve (phase 5). dlls/neighborcraft_model_receivers.txt draws them again.
+- 22:58 session: "native blocks: hooked" never appeared: Fabric API's renderer (fabric-renderer-api SectionCompilerMixin
+  + fabric-renderer-indigo) meshes every block through Indigo's AltModelBlockRendererImpl.tesselateBlock, never
+  Minecraft's ModelBlockRenderer.tesselateBlock (and had rewritten the call the first redirect looked for). Now
+  IndigoBlockMixin (@Pseudo, require = 0) hooks Indigo's method; the vanilla hook stays for a game without Indigo.
+- Faint coloured silhouette beside Steve when turning (screenshot 23:00): not the stand-ins (now cast only): Minecraft's
+  picture is 1-3 frames older than HN's camera, and re-projecting a thin, close, turning model leaves a trace. Only a
+  native Steve (phase 5) or a shorter frame path removes it.
