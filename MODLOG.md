@@ -914,3 +914,13 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   too, their face textures named "..._a" and keeping alpha (cut at 128; a face fully clear in the skin skipped), and HN
   gives "_a" textures the masked base_alpha_m (/Game/Objects/Materials/Base/base_Alpha_m). Profile jar updated; HN
   DLL built, waiting for HN to close.
+- [game] outer skin layers "slightly darker": HN's masked base_alpha_m draws darker than base_m. Now only outer faces
+  with clear pixels get "_a" (masked); fully covered ones are "_o" (opaque, as the body). Both parents' settings under
+  the usual names are logged once ("materials: ...") to find the difference.
+- [game] "I can push through the window": panes were moving collision, cleared from Steve's hitbox + 12.5 cm like a
+  door leaf: pressing on one cleared it. Now panes are added after that clearance. Glass punches: the 7 kg banana at
+  16 m/s left GlassMesh1 of BP_Window_12 whole, 5 times. Now the heaviest loose object up to 60 kg at 25 m/s (sprint 30),
+  and the thrown object's velocity 0.4 s later is logged (did it hit the pane?).
+- [game] car key "still doesn't work": no "use:" line: the user right-clicked, which put the key down ("carry: placed").
+  Now right click with an applicable item on a lock, a door or an actor with its own blueprint OnApplyToMe (the car)
+  uses it (use_target, then item_use); elsewhere it still places.

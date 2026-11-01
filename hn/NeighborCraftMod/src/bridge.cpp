@@ -960,6 +960,36 @@ namespace nc
 				return nullptr;
 			}
 			Call(*mid, STR("SetTextureParameterValue")).set(STR("ParameterName"), name_param(STR("Diffuse"))).set<UObject *>(STR("Value"), *texture).invoke();
+			// once per parent: its scalar and colour settings under the usual names (the masked one drew darker than the
+			// opaque one, the user 2026-11-01: what differs)
+			static std::unordered_set<UObject *> described;
+			if (described.insert(parent).second)
+			{
+				std::wstring line;
+				for (const wchar_t *n : {L"Brightness", L"Roughness", L"Specular", L"Metallic", L"Emissive", L"EmissivePower", L"Opacity", L"OpacityMask",
+						 L"Contrast", L"Saturation", L"Darken", L"AO", L"Power", L"Multiply", L"Intensity", L"Tiling", L"Subsurface"})
+				{
+					Call g(*mid, STR("K2_GetScalarParameterValue"));
+					g.set(STR("ParameterName"), name_param(n));
+					if (const float *v = g.invoke() ? g.param<float>(STR("ReturnValue")) : nullptr; v && *v != 0.0f)
+						line += L" " + std::wstring(n) + L"=" + std::to_wstring(*v).substr(0, 5);
+				}
+				for (const wchar_t *n : {L"Color", L"Tint", L"BaseColor", L"DiffuseColor", L"Colour", L"Multiply"})
+				{
+					Call g(*mid, STR("K2_GetVectorParameterValue"));
+					g.set(STR("ParameterName"), name_param(n));
+					if (const float *v = g.invoke() ? g.param<float>(STR("ReturnValue")) : nullptr; v && (v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f))
+						line += L" " + std::wstring(n) + L"=(" + std::to_wstring(v[0]).substr(0, 4) + L"," + std::to_wstring(v[1]).substr(0, 4) + L"," +
+								std::to_wstring(v[2]).substr(0, 4) + L")";
+				}
+				const uint8_t *shading = parent->GetValuePtrByPropertyNameInChain<uint8_t>(STR("ShadingModel"));
+				const uint8_t *blend = parent->GetValuePtrByPropertyNameInChain<uint8_t>(STR("BlendMode"));
+				bool twoSided = false;
+				get_bool_property(parent, STR("TwoSided"), twoSided);
+				log(L"materials: " + parent->GetName() + L": blend " + (blend ? std::to_wstring(*blend) : std::wstring(L"?")) + L", shading " +
+					(shading ? std::to_wstring(*shading) : std::wstring(L"?")) + L", two-sided " + std::to_wstring(twoSided) + L";" +
+					(line.empty() ? std::wstring(L" no parameters under the usual names") : line));
+			}
 			if (UObject *keeper = spawn_shadow_box(context, Vec3f{g_eye.x, g_eye.y, g_eye.z - 100000.0f}, Vec3f{0.01f, 0.01f, 0.01f}, Rot3f{}))
 				if (UObject **km = keeper->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMeshComponent")); km && *km)
 				{
@@ -3082,6 +3112,7 @@ namespace nc
 		} g_throwCharge; // Q held with an HN object in the hand
 		void carry_start_pickup(UObject *actor, UObject *body);
 		bool item_use(UObject *pc, UObject *pawn);
+		bool use_target(UObject *pawn);
 		UObject *held_magnet();
 		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut = nullptr, UObject **hitOut = nullptr);
 		bool electric(UObject *actor);
@@ -3112,6 +3143,7 @@ namespace nc
 		};
 		std::vector<Punch> g_punches; // Minecraft's attacks that hit HN's world, applied on the next tick
 		UObject *g_glassWatch = nullptr; // a pane just hit (glass_punch), logged when it breaks
+		UObject *g_glassThrown = nullptr; // what was thrown at it (its velocity after: did it hit the pane?)
 		DWORD g_glassWatchUntil = 0;
 		struct NeighborHit
 		{
@@ -3958,7 +3990,10 @@ namespace nc
 			{
 				if (!g_heldId.empty())
 				{
-					carry_place(g_controlsPc, g_controlsPawn);
+					// a key (any usable item) on a lock, a door or the car: Minecraft's use button uses it (the user
+					// right-clicked the car with its key and the key was put down, 2026-11-01); anywhere else it's put down
+					if (!(use_target(g_controlsPawn) && item_use(g_controlsPc, g_controlsPawn)))
+						carry_place(g_controlsPc, g_controlsPawn);
 					g_rightClickCarry = true;
 					return;
 				}
@@ -6537,6 +6572,23 @@ namespace nc
 			return true;
 		}
 
+		/// What the crosshair is on takes a held item: a lock, a door (its locks), or an actor with its own blueprint
+		/// OnApplyToMe (the Neighbor's car); only a held item HN can apply (a key).
+		bool use_target(UObject *pawn)
+		{
+			auto it = g_carried.find(g_heldId);
+			if (it == g_carried.end() || !it->second.confirmed || !it->second.actor || !apply_component(it->second.actor))
+				return false;
+			UObject *actor = nullptr, *component = nullptr;
+			Vec3f point{};
+			if (!look_hit(pawn, it->second.actor, 300.0f, actor, component, point) || !actor)
+				return false;
+			if (class_contains(actor, L"Lock") || class_contains(actor, L"Door"))
+				return true;
+			UFunction *own = actor->GetFunctionByNameInChain(STR("OnApplyToMe"));
+			return own && own->GetOuterPrivate() && own->GetOuterPrivate()->GetName().ends_with(L"_C");
+		}
+
 		/// The HN magnet in Minecraft's selected slot (ours, confirmed), or null.
 		UObject *held_magnet()
 		{
@@ -7210,21 +7262,28 @@ namespace nc
 			if (!best)
 				return false;
 			NeighborLink &N = g_nbr;
-			if (!N.projectileClass)
+			// heavier than the Neighbor's: a 7 kg banana at 16 m/s left the pane whole (2026-11-01). The heaviest loose
+			// object up to 60 kg around, once per set of levels
+			static UObject *glassClass = nullptr, *glassLevel = nullptr;
+			if (glassLevel != level_key(pc))
 			{
-				float lightest = 1e9f;
+				glassLevel = level_key(pc);
+				glassClass = nullptr;
+				float heaviest = 0.0f;
 				for (UObject *component : physics_near(pawn, punch.at, 3000.0f))
 				{
 					if (hinged_part(component))
 						continue;
 					UObject *owner = owner_of(component);
 					const float mass = mass_of(component);
-					if (owner && mass > 0.0f && mass < lightest)
-						lightest = mass, N.projectileClass = owner->GetClassPrivate();
+					if (owner && mass <= 60.0f && mass > heaviest)
+						heaviest = mass, glassClass = owner->GetClassPrivate();
 				}
+				if (glassClass)
+					log(L"glass: windows are hit with " + glassClass->GetName() + L" (" + std::to_wstring(int(heaviest)) + L" kg)");
 			}
 			UObject *statics = gameplay_statics();
-			if (!N.projectileClass || !statics)
+			if (!glassClass || !statics)
 			{
 				log(L"glass: punched " + best->GetName() + L" but nothing to throw at it");
 				return true;
@@ -7234,7 +7293,7 @@ namespace nc
 			Transform4 t;
 			t.pos[0] = cp.x - dir.x * 40.0f, t.pos[1] = cp.y - dir.y * 40.0f, t.pos[2] = cp.z - dir.z * 40.0f;
 			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
-			begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), N.projectileClass).set(STR("SpawnTransform"), t)
+			begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), glassClass).set(STR("SpawnTransform"), t)
 				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
 			UObject **actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
 			if (!actor || !*actor)
@@ -7243,7 +7302,7 @@ namespace nc
 			Call(*actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
 			Call root(*actor, STR("K2_GetRootComponent"));
 			UObject *const *body = root.invoke() ? root.param<UObject *>(STR("ReturnValue")) : nullptr;
-			const float speed = punch.sprint ? 2200.0f : 1600.0f;
+			const float speed = punch.sprint ? 3000.0f : 2500.0f;
 			if (body && *body)
 			{
 				Call(*body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
@@ -7252,7 +7311,8 @@ namespace nc
 			}
 			N.projectiles.emplace_back(*actor, GetTickCount() + 1500);
 			g_glassWatch = best;
-			g_glassWatchUntil = GetTickCount() + 1500;
+			g_glassWatchUntil = GetTickCount() + 400; // before the thrown object goes (1.5 s)
+			g_glassThrown = body && *body ? *body : nullptr;
 			log(L"glass: punched " + best->GetName() + L" of " + (owner_of(best) ? owner_of(best)->GetName() : std::wstring(L"?")) + L": " +
 				(*actor)->GetName() + L" thrown into it at " + std::to_wstring(int(speed)) + L" cm/s");
 			return true;
@@ -7444,11 +7504,14 @@ namespace nc
 			for (UObject *component : g_nearPhysics)
 				if (!held || owner_of(component) != held)
 					voxelise(component, now, mask);
-			// windows' glass, while whole: HN's panes don't block the Pawn channel the probe asks about
+			// windows' glass, while whole: HN's panes don't block the Pawn channel the probe asks about. Added after the
+			// clearance below: a pane never moves into Steve, and cleared from his hitbox + 12.5 cm he pushed through it
+			// (the user: "I can kind of just push through the window", 2026-11-01)
+			CellMap glass;
 			for (UObject *pane : glass_panes(pc))
 			{
 				if (std::hypot(component_location(pane).x - g_eye.x, component_location(pane).y - g_eye.y) < 800.0f && pane_whole(pane))
-					voxelise(pane, now, mask);
+					voxelise(pane, glass, mask);
 			}
 			// Not where Steve is. A door leaf swinging into him or an object falling on his head became collision inside
 			// his hitbox: Minecraft can't push him out of it, finds no room to stand, and forces him to crawl (the
@@ -7481,6 +7544,12 @@ namespace nc
 											it->second[sx * 8 + sy] &= uint8_t(~(1u << sz));
 									}
 						}
+			}
+			for (auto &[key, bits] : glass)
+			{
+				auto &cell = now[key];
+				for (int j = 0; j < 64; ++j)
+					cell[j] |= bits[j];
 			}
 			// what changed since last tick goes to Minecraft (with the block's static shape)
 			// blocks whose moving collision changed: sent again, and their static part probed again (a probe taken
@@ -8007,8 +8076,15 @@ namespace nc
 					physics_punch(pawn, punch);
 			if (g_glassWatch && GetTickCount() >= g_glassWatchUntil)
 			{
-				log(L"glass: " + g_glassWatch->GetName() + (pane_whole(g_glassWatch) ? L" still whole after the hit" : L" BROKEN"));
-				g_glassWatch = nullptr;
+				std::wstring after;
+				if (g_glassThrown)
+				{
+					const Vec3f v = linear_velocity(g_glassThrown);
+					after = L"; the thrown object then moved at " + std::to_wstring(int(v.x)) + L" " + std::to_wstring(int(v.y)) + L" " +
+							std::to_wstring(int(v.z)) + L" cm/s (slowed or turned back: it hit the pane)";
+				}
+				log(L"glass: " + g_glassWatch->GetName() + (pane_whole(g_glassWatch) ? L" still whole after the hit" : L" BROKEN") + after);
+				g_glassWatch = g_glassThrown = nullptr;
 			}
 			for (const Explosion &e : g_explosions)
 				explosion_tick(pawn, e);

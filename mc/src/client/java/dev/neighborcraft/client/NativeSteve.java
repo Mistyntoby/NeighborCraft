@@ -97,8 +97,20 @@ public final class NativeSteve {
 	private static int texture(final Identifier skinId, final NativeImage skin, final ModelPart.Cube cube, final int index, final float u0,
 		final float v0, final float u1, final float v1, final boolean outer) {
 		int cubeId = CUBES.computeIfAbsent(cube, k -> CUBES.size());
-		// an outer layer's texture keeps its transparency ("_a": HN's masked material for it)
-		String name = ("steve_" + skinId.toString() + "_" + cubeId + "_" + index).replace(':', '_').replace('/', '_').replace('.', '_') + (outer ? "_a" : "");
+		// an outer layer's texture keeps its transparency ("_a": HN's masked material for it), but only where the skin has
+		// any: HN's masked material drew darker than the body's opaque one (the user, 2026-11-01), so a fully covered face
+		// (a jacket's, a sleeve's) is drawn as the body is
+		boolean clear = false;
+		if (outer) {
+			int w0 = skin.getWidth(), h0 = skin.getHeight();
+			for (int y = Math.round(v0 * h0); y < Math.round(v1 * h0) && !clear; y++) {
+				for (int x = Math.round(u0 * w0); x < Math.round(u1 * w0) && !clear; x++) {
+					clear = (skin.getPixel(x, y) >>> 24) < 128;
+				}
+			}
+		}
+
+		String name = ("steve_" + skinId.toString() + "_" + cubeId + "_" + index).replace(':', '_').replace('/', '_').replace('.', '_') + (clear ? "_a" : outer ? "_o" : "");
 		Integer known = TEXTURES.get(name);
 		if (known != null) {
 			return known;
