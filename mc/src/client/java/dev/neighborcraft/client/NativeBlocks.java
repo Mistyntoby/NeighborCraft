@@ -373,7 +373,15 @@ public final class NativeBlocks {
 		SPRITES.clear();
 		Passthrough.LOG.info("native blocks: up to {} drawn by Hello Neighbor", n);
 		if (minecraft.levelRenderer != null) {
-			minecraft.levelRenderer.resetLevelRenderData(); // every chunk meshed again
+			// every chunk meshed again. With a world loaded, invalidateCompiledGeometry (what Minecraft's own extract does):
+			// resetLevelRenderData drops the view area, and the next frame crashed ("this.viewArea is null") when Minecraft
+			// was already in its world as Hello Neighbor connected (a Modrinth profile started first, 2026-11-01); in the
+			// development client the world only came after the host, so the reset had nothing to drop
+			if (minecraft.level != null) {
+				minecraft.levelRenderer.invalidateCompiledGeometry(minecraft.level, minecraft.options, minecraft.gameRenderer.mainCamera(), minecraft.getBlockColors());
+			} else {
+				minecraft.levelRenderer.resetLevelRenderData();
+			}
 		}
 	}
 }

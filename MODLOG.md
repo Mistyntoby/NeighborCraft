@@ -901,3 +901,11 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   whole (visible + collision), within 8 m; a Minecraft punch within 30 cm of a pane throws a hidden copy of a small loose
   object into it (1.6 m/s x10, sprint 22 m/s) and logs whether the pane broke. Act 1's magnet is BP_Magnet_C (Magnet,
   Electric): held, left button down/up calls OnStartMagneting/OnEndMagneting (no Minecraft attack). None seen yet.
+- Modrinth test (the user: a profile in their Modrinth App): a release jar (gradlew build: neighborcraft-0.1.0.jar,
+  Java-WebSocket included) and a .mrpack (Minecraft 26.3, Fabric loader 0.19.5, Fabric API 0.161.0+26.3 and the jar
+  as overrides/mods) imported by the app as the profile "NeighborCraft-0.1.0"; HN's minecraft_launch.txt emptied (the dev
+  start kept as minecraft_launch.txt.dev-bak; the launcher's Install restores it). A signed-in player keeps the
+  account's skin (classic Steve only in the development client). [game] 14:18: linked ("Minecraft says hello"), then
+  Minecraft crashed 2 s later: NullPointerException "this.viewArea is null" in LevelRenderer.repositionCamera. Cause:
+  NativeBlocks.setLimit's resetLevelRenderData with a world already loaded (the dev client only loaded its world after
+  the host). Now invalidateCompiledGeometry when a world is loaded; the profile's jar replaced (md5 checked).
