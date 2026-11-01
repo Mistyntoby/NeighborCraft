@@ -6230,6 +6230,111 @@ namespace nc
 			dig_mesh_test(pawn);
 		}
 
+		// ---- interaction census (2026-11-01): locks (the car's), tools (the magnet gun), windows (Steve walked through) ----
+		// Once per set of levels, into dlls/NeighborCraft_interact.txt: each actor whose class names a car, window, glass,
+		// lock, key or tool, with its components (class, collision profile, whether it blocks the Pawn channel, simulates
+		// physics, is visible) and its class's functions that lock, open, break, use or fire. What is needed to make them
+		// work from Minecraft: none of it is known yet (the car took a door key's apply and did nothing, MODLOG 10-11).
+
+		void interact_census(UObject *pc)
+		{
+			static UObject *done = nullptr;
+			if (done == level_key(pc))
+				return;
+			done = level_key(pc);
+			std::wofstream f(module_dir() + L"NeighborCraft_interact.txt");
+			static const wchar_t *kinds[] = {L"Car", L"Window", L"Glass", L"Lock", L"Key", L"Magnet", L"Gun", L"Tool", L"Crowbar", L"Wrench",
+				L"Hammer", L"Screwdriver", L"Shovel", L"Scissor", L"Cutter", L"Flashlight", L"Broken", L"Shatter"};
+			static const wchar_t *verbs[] = {L"Lock", L"Open", L"Close", L"Break", L"Broke", L"Use", L"Apply", L"Fire", L"Shoot", L"Magnet",
+				L"Damage", L"Hit", L"Activ", L"Key", L"Code", L"Start", L"Engine", L"Glass", L"Crack", L"Destroy", L"Pull", L"Attract"};
+			struct ObjectArray
+			{
+				UObject **data;
+				int32 num, max;
+			};
+			static UObject *sceneClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.ActorComponent"));
+			std::unordered_map<std::wstring, int> perClass;
+			int listed = 0;
+			for (UObject *a : find_all(L"Actor"))
+			{
+				const std::wstring cls = a->GetClassPrivate()->GetName();
+				bool match = false;
+				for (const wchar_t *k : kinds)
+					if (cls.find(k) != std::wstring::npos)
+						match = true;
+				if (!match || perClass[cls]++ >= 2 || listed >= 120)
+					continue;
+				++listed;
+				f << L"==== " << a->GetFullName() << L"\n  classes:";
+				for (UStruct *s = a->GetClassPrivate(); s; s = s->GetSuperStruct())
+					f << L" " << s->GetName();
+				f << L"\n";
+				if (sceneClass)
+				{
+					Call list(a, STR("GetComponentsByClass"));
+					list.set<UObject *>(STR("ComponentClass"), sceneClass);
+					const ObjectArray *comps = list.invoke() ? list.param<ObjectArray>(STR("ReturnValue")) : nullptr;
+					for (int i = 0; comps && i < comps->num; ++i)
+					{
+						UObject *c = comps->data[i];
+						if (!c)
+							continue;
+						f << L"  comp " << c->GetClassPrivate()->GetName() << L" " << c->GetName();
+						Call prof(c, STR("GetCollisionProfileName"));
+						if (prof.invoke())
+							if (const FName *n = prof.param<FName>(STR("ReturnValue")))
+								f << L", profile " << n->ToString();
+						Call resp(c, STR("GetCollisionResponseToChannel"));
+						resp.set<uint8_t>(STR("Channel"), 3); // ECC_Pawn
+						if (resp.invoke())
+							if (const uint8_t *r = resp.param<uint8_t>(STR("ReturnValue")))
+								f << L", pawn " << (*r == 2 ? L"blocked" : *r == 1 ? L"overlap" : L"ignored");
+						Call ce(c, STR("GetCollisionEnabled"));
+						if (ce.invoke())
+							if (const uint8_t *e = ce.param<uint8_t>(STR("ReturnValue")))
+								f << L", collision " << int(*e);
+						Call sim(c, STR("IsSimulatingPhysics"));
+						sim.set(STR("BoneName"), NameParam{});
+						if (sim.invoke())
+							if (const uint8_t *s = sim.param<uint8_t>(STR("ReturnValue")))
+								f << (*s ? L", simulating" : L"");
+						Call vis(c, STR("IsVisible"));
+						if (vis.invoke())
+							if (const uint8_t *v = vis.param<uint8_t>(STR("ReturnValue")))
+								f << (*v ? L"" : L", hidden");
+						if (UObject **mesh = c->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMesh")); mesh && *mesh)
+							f << L", mesh " << (*mesh)->GetName();
+						f << L"\n";
+					}
+				}
+				for (UStruct *s = a->GetClassPrivate(); s; s = s->GetSuperStruct())
+				{
+					const std::wstring sn = s->GetName();
+					if (sn == L"Actor" || sn == L"Object")
+						break;
+					for (UFunction *fn : s->ForEachFunction())
+					{
+						const std::wstring n = fn->GetName();
+						for (const wchar_t *v : verbs)
+							if (n.find(v) != std::wstring::npos)
+							{
+								f << L"  func " << sn << L"::" << n << L"(";
+								bool first = true;
+								for (FProperty *p : fn->ForEachProperty())
+								{
+									f << (first ? L"" : L", ") << p->GetName();
+									first = false;
+								}
+								f << L")\n";
+								break;
+							}
+					}
+				}
+			}
+			f << L"==== " << listed << L" actors listed\n";
+			log(L"interact: census of " + std::to_wstring(listed) + L" cars, windows, locks, keys and tools written to NeighborCraft_interact.txt");
+		}
+
 		struct FStringArray
 		{
 			struct Str
@@ -7749,6 +7854,7 @@ namespace nc
 				explosion_tick(pawn, e);
 			neighbor_tick(pc, pawn);
 			dig_tick(pc, pawn, !g_punches.empty());
+			interact_census(pc);
 			g_controlsPc = pc;
 			carry_tick(pc, pawn);
 			mesh_path_probe(pawn);

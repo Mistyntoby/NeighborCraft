@@ -877,3 +877,17 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - TNT didn't throw HN's objects: HN never handled Minecraft's "explosion" message. Now explosion_tick: loose objects
   within twice the power in blocks get a velocity change away from the centre (up to 25 m/s, fading, with lift); doors
   and drawers left to HN. Not yet seen.
+
+## Locks, tools, windows (census), own skin, launcher (2026-11-01)
+- The user: all locks (the car's too) and tools (the magnet gun) should work, windows should block and break. Known:
+  keys go through HN's native apply (MODLOG 10-11: doors unlock; the car took a door key and did nothing). Built
+  interact_census: once per set of levels, dlls/NeighborCraft_interact.txt lists every actor whose class names a car,
+  window, glass, lock, key or tool: its class chain, its components (collision profile, Pawn channel response,
+  collision enabled, simulating, hidden, mesh) and its functions that lock, open, break, use, fire. Not yet run.
+- Own skin (OwnSkin.java): %LOCALAPPDATA%\NeighborCraft\skin.png, or a username in skin.txt (public skin fetched from
+  Mojang's profile service, cached; "slim" or the profile's model for the arms); registered as a DynamicTexture
+  (neighborcraft:skin/own), given to the local player by AbstractClientPlayerMixin while HN is attached, and to native
+  Steve's face textures (ShadowExport.skin: the resource manager can't open a runtime texture). Else classic Steve.
+- launcher/NeighborCraft.cmd (+ .ps1): a window that finds Hello Neighbor in the Steam libraries, checks UE4SS and
+  ReShade, installs/updates (as hn/install.sh, md5 checked) and uninstalls the mod, saves the skin username, and starts
+  HN through Steam. Ships nothing third-party. Parse and HN detection tested; the window not yet used by the user.

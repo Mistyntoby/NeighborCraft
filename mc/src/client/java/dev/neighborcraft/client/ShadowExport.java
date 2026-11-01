@@ -306,6 +306,11 @@ public final class ShadowExport {
 			return null;
 		}
 
+		NativeImage own = OwnSkin.image(id); // made at runtime: not in the resource manager
+		if (own != null) {
+			return own;
+		}
+
 		return SKINS.computeIfAbsent(id, key -> {
 			try (InputStream in = minecraft.getResourceManager().open(key)) {
 				return NativeImage.read(in);
