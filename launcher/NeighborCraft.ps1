@@ -161,7 +161,8 @@ $skinSave.Add_Click({
 	New-Item -ItemType Directory -Force $Data | Out-Null
 	$lines = @($skinBox.Text.Trim())
 	if ($slimBox.Checked) { $lines += 'slim' }
-	Set-Content -Path (Join-Path $Data 'skin.txt') -Value $lines -Encoding utf8
+	# plain UTF-8, no byte-order mark (Windows PowerShell's utf8 writes one, and the mod read it as part of the name)
+	[System.IO.File]::WriteAllLines((Join-Path $Data 'skin.txt'), [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
 	Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Data 'skin_cache.png'), (Join-Path $Data 'skin_cache.txt')
 	$note.Text = 'Skin saved: used the next time Hello Neighbor starts. (A skin.png in ' + $Data + ' wins over the username.)'
 	Refresh-Status

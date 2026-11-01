@@ -891,3 +891,13 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - launcher/NeighborCraft.cmd (+ .ps1): a window that finds Hello Neighbor in the Steam libraries, checks UE4SS and
   ReShade, installs/updates (as hn/install.sh, md5 checked) and uninstalls the mod, saves the skin username, and starts
   HN through Steam. Ships nothing third-party. Parse and HN detection tested; the window not yet used by the user.
+- [game] 14:09: skin "not fetched (api.mojang.com answered 400)": the launcher wrote skin.txt with a UTF-8 BOM (Windows
+  PowerShell 5.1), read into the name. Launcher now writes without one; OwnSkin strips it. Car key: "use: Car Key on
+  BP_Car_Neigbor_2: HN's native apply, the item is kept" and nothing else. Census (NeighborCraft_interact.txt, 24 actors):
+  BP_Car_Neigbor_C (Stand) overrides OnApplyToMe(Character, ApplyActor, IntersectComponent) in its blueprint (its trunk:
+  MovingComponent Trunk, UnlockTrunk/OpeningTrunk sounds): now a non-lock target with its own blueprint OnApplyToMe gets
+  it called (the HN body, the key, the hit part). Windows (BP_Window_1/3/5): FrameMesh blocks the Pawn channel, every
+  GlassMesh IGNORES it: the probe never saw glass. Now glass_panes (per set of levels) go into the moving collision while
+  whole (visible + collision), within 8 m; a Minecraft punch within 30 cm of a pane throws a hidden copy of a small loose
+  object into it (1.6 m/s x10, sprint 22 m/s) and logs whether the pane broke. Act 1's magnet is BP_Magnet_C (Magnet,
+  Electric): held, left button down/up calls OnStartMagneting/OnEndMagneting (no Minecraft attack). None seen yet.

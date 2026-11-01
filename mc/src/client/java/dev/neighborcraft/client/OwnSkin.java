@@ -90,7 +90,9 @@ public final class OwnSkin {
 	private static void load() {
 		try {
 			Path file = dir().resolve("skin.png"), txt = dir().resolve("skin.txt"), cache = dir().resolve("skin_cache.png");
-			List<String> lines = Files.exists(txt) ? Files.readAllLines(txt, StandardCharsets.UTF_8) : List.of();
+			// without a byte-order mark: the launcher's first version wrote one and Mojang answered 400 to "﻿<name>"
+			List<String> lines = Files.exists(txt) ? Files.readAllLines(txt, StandardCharsets.UTF_8).stream().map(l -> l.replace("﻿", "")).toList()
+				: List.of();
 			slim = lines.stream().anyMatch(l -> l.trim().equalsIgnoreCase("slim"));
 			if (Files.exists(file)) {
 				png = Files.readAllBytes(file);

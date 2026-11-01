@@ -3078,6 +3078,7 @@ namespace nc
 		} g_throwCharge; // Q held with an HN object in the hand
 		void carry_start_pickup(UObject *actor, UObject *body);
 		bool item_use(UObject *pc, UObject *pawn);
+		UObject *held_magnet();
 		UObject *pickup_target(UObject *pawn, UObject **bodyOut, const wchar_t **whyOut = nullptr, UObject **hitOut = nullptr);
 		bool electric(UObject *actor);
 		void hn_action_tap();
@@ -3106,6 +3107,8 @@ namespace nc
 			bool sprint;
 		};
 		std::vector<Punch> g_punches; // Minecraft's attacks that hit HN's world, applied on the next tick
+		UObject *g_glassWatch = nullptr; // a pane just hit (glass_punch), logged when it breaks
+		DWORD g_glassWatchUntil = 0;
 		struct NeighborHit
 		{
 			float damage;
@@ -3909,7 +3912,17 @@ namespace nc
 				// HN's objects; only then is the click ours (no mining, no punch). Else, and with anything else in the hand,
 				// Minecraft's attack as always (mining with an empty hand, or with a non-usable object)
 				static bool used = false;
-				if (attack > 0)
+				// HN's magnet in the hand: held left button magnets (its own OnStartMagneting / OnEndMagneting), the user
+				// wanted the tools to work (2026-11-01; the census: BP_Magnet_C, Magnet::OnStartMagneting)
+				UObject *magnet = held_magnet();
+				if (magnet)
+				{
+					const bool on = attack > 0;
+					const bool ok = Call(magnet, on ? STR("OnStartMagneting") : STR("OnEndMagneting")).invoke();
+					log(L"use: " + magnet->GetName() + (on ? L" magnets (OnStartMagneting " : L" stops (OnEndMagneting ") + (ok ? L"called)" : L"failed)"));
+					used = on; // the click is the magnet's: no Minecraft attack
+				}
+				if (attack > 0 && !magnet)
 					used = !g_heldId.empty() && g_controlsPawn && item_use(g_controlsPc, g_controlsPawn);
 				if (!used)
 					sendf("{\"t\":\"key\",\"k\":\"attack\",\"down\":%s}", attack > 0 ? "true" : "false");
@@ -6474,7 +6487,20 @@ namespace nc
 			const int modeBefore = flat_mode(c.actor);
 			bool result = false;
 			std::wstring how;
-			const bool applied = native_apply(c.actor, pawn, target, result, how);
+			bool applied = native_apply(c.actor, pawn, target, result, how);
+			// a target with its own blueprint OnApplyToMe (the Neighbor's car: its trunk, BP_Car_Neigbor_C) takes the item
+			// there: HN's lock apply did nothing for it (the user: "the car key does not work", 2026-11-01; the census)
+			if (!isLock)
+				if (UFunction *own = target->GetFunctionByNameInChain(STR("OnApplyToMe")))
+					if (own->GetOuterPrivate() && own->GetOuterPrivate()->GetName().size() > 2 &&
+						own->GetOuterPrivate()->GetName().ends_with(L"_C"))
+					{
+						Call apply(target, STR("OnApplyToMe"));
+						apply.set<UObject *>(STR("Character"), pawn).set<UObject *>(STR("ApplyActor"), c.actor).set<UObject *>(STR("IntersectComponent"), component);
+						const bool ok = apply.invoke();
+						how += std::wstring(L"; its own ") + own->GetOuterPrivate()->GetName() + L"::OnApplyToMe " + (ok ? L"called" : L"failed");
+						applied = applied || ok;
+					}
 			const std::wstring after = isLock ? lock_state(target, &openAfter) : L"-";
 			log(L"use: " + item_name_w(c.actor) + L" on " + target->GetName() + (target != actor ? L" (on " + actor->GetName() + L")" : L"") + L": " + how +
 				(applied ? std::wstring(result ? L", HN used the item up (a one-off)" : L", the item is kept") : L"") +
@@ -6505,6 +6531,13 @@ namespace nc
 				g_shownId.clear();
 			g_carried.erase(it);
 			return true;
+		}
+
+		/// The HN magnet in Minecraft's selected slot (ours, confirmed), or null.
+		UObject *held_magnet()
+		{
+			auto it = g_carried.find(g_heldId);
+			return it != g_carried.end() && it->second.confirmed && it->second.actor && class_contains(it->second.actor, L"Magnet") ? it->second.actor : nullptr;
 		}
 
 		void carry_start_pickup(UObject *actor, UObject *body)
@@ -7110,6 +7143,117 @@ namespace nc
 		void voxelise_at(UObject *component, const Transform4 &t, CellMap &out, float grow = 0.0f);
 
 		/// A part's collision cells (`out`), and the same half a sub-cell wider (`mask`, for the static probe).
+		/// Windows' glass (2026-11-01). HN's panes ignore the Pawn channel (the census: GlassMesh "pawn ignored", the frames
+		/// block), so the world probe, which asks what blocks a pawn, never gave them to Minecraft: Steve walked through
+		/// them (the user). Each intact pane (visible, with collision) near Steve is moving collision instead, as a door
+		/// leaf is, until it breaks. Per set of levels.
+		struct GlassPanes
+		{
+			UObject *level = nullptr; // level_key
+			std::vector<UObject *> panes;
+		} g_glass;
+
+		const std::vector<UObject *> &glass_panes(UObject *pc)
+		{
+			if (g_glass.level != level_key(pc))
+			{
+				g_glass = GlassPanes{};
+				g_glass.level = level_key(pc);
+				struct ObjectArray
+				{
+					UObject **data;
+					int32 num, max;
+				};
+				static UObject *meshClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.StaticMeshComponent"));
+				for (UObject *window : find_all(L"Window"))
+				{
+					Call list(window, STR("GetComponentsByClass"));
+					list.set<UObject *>(STR("ComponentClass"), meshClass);
+					const ObjectArray *a = meshClass && list.invoke() ? list.param<ObjectArray>(STR("ReturnValue")) : nullptr;
+					for (int i = 0; a && i < a->num; ++i)
+						if (UObject *c = a->data[i]; c && c->GetName().find(L"Glass") != std::wstring::npos)
+							g_glass.panes.push_back(c);
+				}
+				log(L"glass: " + std::to_wstring(g_glass.panes.size()) + L" window panes are solid for Minecraft while whole");
+			}
+			return g_glass.panes;
+		}
+
+		/// A pane is whole: drawn and with collision (a broken one is hidden or loses its collision).
+		bool pane_whole(UObject *pane)
+		{
+			Call vis(pane, STR("IsVisible"));
+			const uint8_t *v = vis.invoke() ? vis.param<uint8_t>(STR("ReturnValue")) : nullptr;
+			Call ce(pane, STR("GetCollisionEnabled"));
+			const uint8_t *e = ce.invoke() ? ce.param<uint8_t>(STR("ReturnValue")) : nullptr;
+			return v && *v && e && *e != 0;
+		}
+
+		/// Minecraft's swing landed on (or by) a pane: HN breaks windows when something hits them, so a hidden copy of a
+		/// small loose object is thrown into the pane from Steve's side (destroyed after 1.5 s with the Neighbor's).
+		bool glass_punch(UObject *pawn, UObject *pc, const Punch &punch)
+		{
+			UObject *best = nullptr;
+			float bestD = 30.0f;
+			Vec3f cp{};
+			for (UObject *pane : glass_panes(pc))
+			{
+				Vec3f p;
+				const float d = closest_point(pane, punch.at, p);
+				if (d >= 0.0f && d < bestD && pane_whole(pane))
+					best = pane, bestD = d, cp = p;
+			}
+			if (!best)
+				return false;
+			NeighborLink &N = g_nbr;
+			if (!N.projectileClass)
+			{
+				float lightest = 1e9f;
+				for (UObject *component : physics_near(pawn, punch.at, 3000.0f))
+				{
+					if (hinged_part(component))
+						continue;
+					UObject *owner = owner_of(component);
+					const float mass = mass_of(component);
+					if (owner && mass > 0.0f && mass < lightest)
+						lightest = mass, N.projectileClass = owner->GetClassPrivate();
+				}
+			}
+			UObject *statics = gameplay_statics();
+			if (!N.projectileClass || !statics)
+			{
+				log(L"glass: punched " + best->GetName() + L" but nothing to throw at it");
+				return true;
+			}
+			const float len = std::max(1e-3f, std::hypot(punch.dir.x, punch.dir.y, punch.dir.z));
+			const Vec3f dir{punch.dir.x / len, punch.dir.y / len, punch.dir.z / len};
+			Transform4 t;
+			t.pos[0] = cp.x - dir.x * 40.0f, t.pos[1] = cp.y - dir.y * 40.0f, t.pos[2] = cp.z - dir.z * 40.0f;
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), N.projectileClass).set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
+			UObject **actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!actor || !*actor)
+				return true;
+			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
+			Call(*actor, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
+			Call root(*actor, STR("K2_GetRootComponent"));
+			UObject *const *body = root.invoke() ? root.param<UObject *>(STR("ReturnValue")) : nullptr;
+			const float speed = punch.sprint ? 2200.0f : 1600.0f;
+			if (body && *body)
+			{
+				Call(*body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
+				Call(*body, STR("SetPhysicsLinearVelocity")).set(STR("NewVel"), Vec3f{dir.x * speed, dir.y * speed, dir.z * speed})
+					.set_bool(STR("bAddToCurrent"), false).set(STR("BoneName"), NameParam{}).invoke();
+			}
+			N.projectiles.emplace_back(*actor, GetTickCount() + 1500);
+			g_glassWatch = best;
+			g_glassWatchUntil = GetTickCount() + 1500;
+			log(L"glass: punched " + best->GetName() + L" of " + (owner_of(best) ? owner_of(best)->GetName() : std::wstring(L"?")) + L": " +
+				(*actor)->GetName() + L" thrown into it at " + std::to_wstring(int(speed)) + L" cm/s");
+			return true;
+		}
+
 		void voxelise(UObject *component, CellMap &out, CellMap &mask)
 		{
 			Transform4 t;
@@ -7296,6 +7440,12 @@ namespace nc
 			for (UObject *component : g_nearPhysics)
 				if (!held || owner_of(component) != held)
 					voxelise(component, now, mask);
+			// windows' glass, while whole: HN's panes don't block the Pawn channel the probe asks about
+			for (UObject *pane : glass_panes(pc))
+			{
+				if (std::hypot(component_location(pane).x - g_eye.x, component_location(pane).y - g_eye.y) < 800.0f && pane_whole(pane))
+					voxelise(pane, now, mask);
+			}
 			// Not where Steve is. A door leaf swinging into him or an object falling on his head became collision inside
 			// his hitbox: Minecraft can't push him out of it, finds no room to stand, and forces him to crawl (the
 			// recorder: boxes appearing in his head the tick before POSE_FORCED SWIMMING, at a door). HN's own physics
@@ -7849,7 +7999,13 @@ namespace nc
 		{
 			physics_tick(pawn);
 			for (const Punch &punch : g_punches)
-				physics_punch(pawn, punch);
+				if (!glass_punch(pawn, pc, punch))
+					physics_punch(pawn, punch);
+			if (g_glassWatch && GetTickCount() >= g_glassWatchUntil)
+			{
+				log(L"glass: " + g_glassWatch->GetName() + (pane_whole(g_glassWatch) ? L" still whole after the hit" : L" BROKEN"));
+				g_glassWatch = nullptr;
+			}
 			for (const Explosion &e : g_explosions)
 				explosion_tick(pawn, e);
 			neighbor_tick(pc, pawn);
