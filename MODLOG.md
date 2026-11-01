@@ -864,3 +864,6 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   houses are single meshes); only the landscape could be replaced tile by tile, if a runtime procedural mesh is drawn.
 - Fishing rod: pushes reached HN (7.5-9 m/s launches) but his ground friction and own walking ate them: now 1.6x and at
   least 3.5 m/s up, off the ground. Offhand swaps: only F reaches Minecraft's swap; both sides now log each swap.
+- [game] the user didn't see the runtime ProceduralMeshComponent square: constructed and built but never drawn (not
+  registered; registration is native only in 4.20, no UFunction, nothing in UE4SS). Phase A conclusion in HANDOFF §6:
+  no genuine cuts of HN meshes in this build; only landscape tiles could be replaced by placed geometry.

@@ -217,6 +217,24 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
 
 ## 6. Outstanding issues (priority order)
 
+000000000000. **TERRAIN EXCAVATION (2026-11-01, the user's spec: mine into HN's real geometry, uncover Minecraft terrain
+              under it; genuine cuts, collision in step, no masking).** Phase A (feasibility) DONE, VERIFIED in game
+              (MODLOG "Terrain excavation, phase A"):
+              - HN's world: StaticMeshComponent 1519 (470 static), Instanced 75, HISM 6, Spline 92, Brush 15, BSP 0,
+                Destructible 0; the ground (lawn, road) is Landscape_1 (225 components of 127 quads); each house is ONE
+                static mesh (Act1_Neighbor_House, Childhood_House); fences/carpets instanced (fence_1 x39).
+              - 0 of 374 mesh assets have bAllowCPUAccess: no HN mesh's vertices can be read at runtime, so none can be
+                copied, sliced or cut (no KismetProceduralMeshLibrary route).
+              - A ProceduralMeshComponent constructed at runtime (StaticConstructObject inside a deferred spawn) gets its
+                section built but is never drawn (the user saw nothing; a trace didn't hit it): it isn't registered, and
+                registering a component is native only (no UFunction, nothing in UE4SS). The mod can't make new
+                geometry; it can only place existing meshes (BasicShapes cube/plane, HN's assets) as actors.
+              - Hence: genuine cuts of houses, walls, fences, furniture are NOT possible in this build. Hiding parts of
+                them would be a fake hole (ruled out by the user's spec). The only candidate is the landscape: one tile
+                can be hidden (render and heightfield collision) and replaced by placed geometry. Tile size in metres not
+                yet measured (Landscape_1's scale). Options put to the user; the probes are on (logs only), off with
+                dlls/neighborcraft_dig_off.txt.
+
 00000000000. **NATIVE RENDERING MIGRATION (2026-10-13 night, the user's choice and order: one cube -> depth -> light and
             shadow -> many blocks -> Steve; the current renderer kept as fallback at every step).**
             Phase 1 baseline (current renderer): Minecraft renders world/hand/overlay; FrameExporter copies colour + depth to
