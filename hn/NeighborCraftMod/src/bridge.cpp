@@ -5923,6 +5923,194 @@ namespace nc
 			return actor != nullptr;
 		}
 
+		// ---- terrain excavation, phase A (feasibility): what HN's world is made of, and whether a mesh can be made ----
+		// Logs only (dlls/neighborcraft_dig_off.txt: none of it). The user's plan (2026-11-01): mine into HN's real terrain
+		// and uncover Minecraft's world under it, the HN geometry genuinely cut, not hidden or masked. What decides it:
+		// (1) what the surfaces are (a landscape can't be edited in a shipped 4.20 game; a static mesh's vertices are on the
+		// CPU only with bAllowCPUAccess); (2) whether a ProceduralMeshComponent can be created at runtime at all (UE4SS
+		// has StaticConstructObject; registering a component isn't a UFunction, but components owned by an actor that is
+		// still being spawned are registered by the spawn itself), which is the only route to cut geometry in this build.
+
+		bool dig_off()
+		{
+			static const bool off = bool(std::ifstream(module_dir() + L"neighborcraft_dig_off.txt"));
+			return off;
+		}
+
+		struct DigProbe
+		{
+			UObject *level = nullptr;                     // level_key
+			std::unordered_map<UObject *, int> meshUsers; // static mesh asset -> components using it (this level)
+			std::unordered_set<UObject *> reported;       // components already reported
+			DWORD testAt = 0;                             // when the procedural mesh test runs (0: done)
+			UObject *testActor = nullptr;
+			DWORD testEnd = 0;
+		} g_dig;
+
+		std::wstring mobility_name(UObject *component)
+		{
+			const uint8_t *m = component ? component->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility")) : nullptr;
+			return !m ? L"?" : *m == 0 ? L"static" : *m == 1 ? L"stationary" : L"movable";
+		}
+
+		/// Once per set of levels: how many of each kind of geometry HN's level has.
+		void dig_census()
+		{
+			std::wstring line;
+			for (const wchar_t *c : {L"StaticMeshComponent", L"InstancedStaticMeshComponent", L"HierarchicalInstancedStaticMeshComponent",
+					 L"LandscapeComponent", L"LandscapeHeightfieldCollisionComponent", L"LandscapeProxy", L"ModelComponent", L"BrushComponent",
+					 L"DestructibleComponent", L"ProceduralMeshComponent", L"SplineMeshComponent"})
+				line += L" " + std::wstring(c) + L" " + std::to_wstring(find_all(c).size()) + L";";
+			log(L"dig: census:" + line);
+			int mob[3] = {}, cpu = 0, meshes = 0;
+			for (UObject *smc : find_all(L"StaticMeshComponent"))
+			{
+				if (const uint8_t *m = smc->GetValuePtrByPropertyNameInChain<uint8_t>(STR("Mobility")); m && *m < 3)
+					++mob[*m];
+				if (UObject **mesh = smc->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMesh")); mesh && *mesh)
+					++g_dig.meshUsers[*mesh];
+			}
+			for (auto &[mesh, users] : g_dig.meshUsers)
+			{
+				++meshes;
+				bool allow = false;
+				if (get_bool_property(mesh, STR("bAllowCPUAccess"), allow) && allow)
+					++cpu;
+			}
+			log(L"dig: static mesh components: " + std::to_wstring(mob[0]) + L" static, " + std::to_wstring(mob[1]) + L" stationary, " +
+				std::to_wstring(mob[2]) + L" movable; " + std::to_wstring(meshes) + L" mesh assets, " + std::to_wstring(cpu) +
+				L" with bAllowCPUAccess (their vertices readable at runtime)");
+			const std::vector<UObject *> land = find_all(L"LandscapeComponent");
+			if (!land.empty())
+			{
+				const int32 *quads = land[0]->GetValuePtrByPropertyNameInChain<int32>(STR("ComponentSizeQuads"));
+				const int32 *sx = land[0]->GetValuePtrByPropertyNameInChain<int32>(STR("SectionBaseX"));
+				const int32 *sy = land[0]->GetValuePtrByPropertyNameInChain<int32>(STR("SectionBaseY"));
+				log(L"dig: landscape: " + land[0]->GetFullName() + L", " + (quads ? std::to_wstring(*quads) : std::wstring(L"?")) +
+					L" quads a component, base " + (sx ? std::to_wstring(*sx) : std::wstring(L"?")) + L" " + (sy ? std::to_wstring(*sy) : std::wstring(L"?")));
+			}
+		}
+
+		/// Minecraft's swing hit HN's world: what it hit, once per component.
+		void dig_report(UObject *pawn)
+		{
+			UObject *actor = nullptr, *component = nullptr;
+			Vec3f point{};
+			if (!look_hit(pawn, nullptr, 500.0f, actor, component, point) || !component || g_dig.reported.count(component) || g_dig.reported.size() >= 40)
+				return;
+			g_dig.reported.insert(component);
+			std::wstring line = L"dig: target " + component->GetClassPrivate()->GetName() + L" " + component->GetName() + L" of " +
+								(actor ? actor->GetFullName() : std::wstring(L"-")) + L", " + mobility_name(component);
+			if (UObject **mesh = component->GetValuePtrByPropertyNameInChain<UObject *>(STR("StaticMesh")); mesh && *mesh)
+			{
+				bool allow = false;
+				get_bool_property(*mesh, STR("bAllowCPUAccess"), allow);
+				const auto users = g_dig.meshUsers.find(*mesh);
+				line += L", mesh " + (*mesh)->GetName() + L" (used by " + std::to_wstring(users != g_dig.meshUsers.end() ? users->second : 0) +
+						L" components, CPU access " + (allow ? L"yes" : L"no") + L")";
+			}
+			if (const int32 *quads = component->GetValuePtrByPropertyNameInChain<int32>(STR("ComponentSizeQuads")))
+				line += L", landscape component of " + std::to_wstring(*quads) + L" quads";
+			Call n(component, STR("GetNumMaterials"));
+			if (const int32 *count = n.invoke() ? n.param<int32>(STR("ReturnValue")) : nullptr)
+				line += L", " + std::to_wstring(*count) + L" materials";
+			log(line);
+		}
+
+		/// Once per set of levels, 15 s in: a ProceduralMeshComponent made at runtime, a 1 m grey square with collision
+		/// 3 m in front of Steve, kept 60 s. Logs whether it is registered, built and solid.
+		void dig_mesh_test(UObject *pawn)
+		{
+			DigProbe &D = g_dig;
+			if (D.testActor && GetTickCount() > D.testEnd)
+			{
+				Call(D.testActor, STR("K2_DestroyActor")).invoke();
+				D.testActor = nullptr;
+				log(L"dig: mesh test removed");
+			}
+			if (!D.testAt || GetTickCount() < D.testAt || !g_haveEye)
+				return;
+			D.testAt = 0;
+			UObject *pmClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/ProceduralMeshComponent.ProceduralMeshComponent"));
+			UObject *actorClass = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Actor"));
+			UObject *statics = gameplay_statics();
+			if (!pmClass || !actorClass || !statics)
+			{
+				log(L"dig: mesh test: class missing");
+				return;
+			}
+			const Vec3f dir = look_dir();
+			const float h = std::max(1e-3f, std::hypot(dir.x, dir.y));
+			const Vec3f at{g_eye.x + dir.x / h * 300.0f, g_eye.y + dir.y / h * 300.0f, g_eye.z};
+			Transform4 t;
+			t.pos[0] = at.x, t.pos[1] = at.y, t.pos[2] = at.z;
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), actorClass).set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
+			UObject **actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!actor || !*actor)
+			{
+				log(L"dig: mesh test: no actor");
+				return;
+			}
+			UObject *pmc = UObjectGlobals::StaticConstructObject(FStaticConstructObjectParameters(static_cast<UClass *>(pmClass), *actor));
+			if (!pmc)
+			{
+				log(L"dig: mesh test: StaticConstructObject gave nothing");
+				return;
+			}
+			// its root: the spawn registers the actor's components (it owns the new one: its outer) and places it
+			if (UObject **root = (*actor)->GetValuePtrByPropertyNameInChain<UObject *>(STR("RootComponent")))
+				*root = pmc;
+			auto registered = [](UObject *c) {
+				Call r(c, STR("IsRegistered"));
+				const uint8_t *v = r.invoke() ? r.param<uint8_t>(STR("ReturnValue")) : nullptr;
+				return v ? int(*v) : -1;
+			};
+			const int before = registered(pmc);
+			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), *actor).set(STR("SpawnTransform"), t).invoke();
+			const int after = registered(pmc);
+			// a 1 m square facing Steve (around the actor: the component is its root), both sides
+			const float px = -dir.y / h * 50.0f, py = dir.x / h * 50.0f;
+			const Vec3f verts[4] = {{-px, -py, -50.0f}, {px, py, -50.0f}, {px, py, 50.0f}, {-px, -py, 50.0f}};
+			const int32 tris[12] = {0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0};
+			const float uvs[8] = {0, 1, 1, 1, 1, 0, 0, 0};
+			Call make(pmc, STR("CreateMeshSection_LinearColor"));
+			make.set<int32>(STR("SectionIndex"), 0).set(STR("Vertices"), ScriptArray{verts, 4, 4}).set(STR("Triangles"), ScriptArray{tris, 12, 12})
+				.set(STR("Normals"), ScriptArray{nullptr, 0, 0}).set(STR("UV0"), ScriptArray{uvs, 4, 4}).set(STR("VertexColors"), ScriptArray{nullptr, 0, 0})
+				.set(STR("Tangents"), ScriptArray{nullptr, 0, 0}).set_bool(STR("bCreateCollision"), true);
+			const bool made = make.invoke();
+			if (UObject *material = receiver_material(pawn))
+				Call(pmc, STR("SetMaterial")).set<int32>(STR("ElementIndex"), 0).set<UObject *>(STR("Material"), material).invoke();
+			Call sections(pmc, STR("GetNumSections"));
+			const int32 *count = sections.invoke() ? sections.param<int32>(STR("ReturnValue")) : nullptr;
+			UObject *hitActor = nullptr, *hitComp = nullptr;
+			Vec3f hitPoint{};
+			look_hit(pawn, nullptr, 400.0f, hitActor, hitComp, hitPoint);
+			D.testActor = *actor;
+			D.testEnd = GetTickCount() + 60000;
+			log(L"dig: mesh test: " + pmc->GetFullName() + L" made at runtime; registered before the spawn finished " + std::to_wstring(before) +
+				L", after " + std::to_wstring(after) + L"; section " + (made ? L"made" : L"FAILED") + L", sections " +
+				(count ? std::to_wstring(*count) : std::wstring(L"?")) + L"; a trace ahead hits " +
+				(hitComp ? hitComp->GetFullName() : std::wstring(L"nothing")) + L" (a grey 1 m square 3 m ahead, for 60 s)");
+		}
+
+		void dig_tick(UObject *pc, UObject *pawn, bool punched)
+		{
+			if (dig_off())
+				return;
+			if (g_dig.level != level_key(pc))
+			{
+				g_dig = DigProbe{}; // its test actor went with the level
+				g_dig.level = level_key(pc);
+				g_dig.testAt = GetTickCount() + 15000;
+				dig_census();
+			}
+			if (punched)
+				dig_report(pawn);
+			dig_mesh_test(pawn);
+		}
+
 		struct FStringArray
 		{
 			struct Str
@@ -7439,6 +7627,7 @@ namespace nc
 			for (const Punch &punch : g_punches)
 				physics_punch(pawn, punch);
 			neighbor_tick(pc, pawn);
+			dig_tick(pc, pawn, !g_punches.empty());
 			g_controlsPc = pc;
 			carry_tick(pc, pawn);
 			mesh_path_probe(pawn);

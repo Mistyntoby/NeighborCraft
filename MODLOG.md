@@ -841,3 +841,16 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   push) is sent to HN each server tick ("npush") and launched there, then zeroed. He is pushable again (a boat boards only
   pushable entities) but ignores other entities' shoves. Riding: Minecraft seats him and sends the seat ("nride"); HN holds
   him there (DisableMovement, his controller stopped) until he's out (MOVE_Walking again). Not yet seen.
+
+## Terrain excavation, phase A (feasibility) (2026-11-01)
+- The user's plan: mine into HN's real terrain and uncover Minecraft's world under it; HN geometry genuinely cut (not
+  hidden or masked), collision in step. Known before: Act 1's ground is a landscape (box overlaps don't see under its
+  heightfield), which a shipped 4.20 game can't edit; HANDOFF said runtime component creation "isn't scriptable", but
+  nothing in this log shows it was tried, and UE4SS has StaticConstructObject_Internal.
+- Built (logs only; off: dlls/neighborcraft_dig_off.txt): dig_census (per set of levels: counts of static mesh /
+  instanced / landscape / BSP / destructible / procedural components, static mesh mobility, mesh assets with
+  bAllowCPUAccess, the landscape's component size); dig_report (a Minecraft swing on HN's world: the component's class,
+  owner, mobility, mesh asset, how many components share it, CPU access, materials); dig_mesh_test (15 s after a level
+  loads: an Actor spawned deferred, a ProceduralMeshComponent constructed with it as outer and made its root before the
+  spawn finishes, a 1 m grey square with collision 3 m ahead for 60 s; logs registered before/after, the section, and
+  whether a trace hits it). Not yet run.
