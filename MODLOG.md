@@ -871,3 +871,9 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   component) finds its render component (the nearest LandscapeComponent: same place) and logs its corner, quads x scale
   = size in metres, and material; 3 punches on one tile within 5 s hide its look (SetVisibility) for 15 s, collision kept;
   shown again on a streamed-level change. The runtime ProceduralMeshComponent test no longer runs. Not yet run.
+- [game] a ground tile is 127 m a side (127 quads x 100 cm; _378 in front of the house, _379 the backyard): hiding one hid
+  the whole yard (HN's void below, the user); its GetMaterial(0) is empty. Ground replacement not practical (~16,000
+  pieces, no material): stopped (HANDOFF §6). The hide test now only with dlls/neighborcraft_tilehide.txt.
+- TNT didn't throw HN's objects: HN never handled Minecraft's "explosion" message. Now explosion_tick: loose objects
+  within twice the power in blocks get a velocity change away from the centre (up to 25 m/s, fading, with lift); doors
+  and drawers left to HN. Not yet seen.

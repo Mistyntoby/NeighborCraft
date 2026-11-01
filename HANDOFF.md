@@ -234,6 +234,12 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
                 can be hidden (render and heightfield collision) and replaced by placed geometry. Tile size in metres not
                 yet measured (Landscape_1's scale). Options put to the user; the probes are on (logs only), off with
                 dlls/neighborcraft_dig_off.txt.
+              - Ground tiles (the user's choice) measured in game: a LandscapeComponent is 127 quads x 1 m = 127 m a
+                side (LandscapeComponent_378 in front of the house, _379 the backyard, corners -19000/-6300 and
+                -6300/-6300 cm); SetVisibility(false) on one hid the whole yard (the user saw HN's void below), and its
+                GetMaterial(0) gave nothing. Replacing a tile would take ~16,000 placed 1 m pieces with no ground material
+                to put on them: NOT practical. The road and its borders are static meshes (no CPU access) like the rest.
+                STOPPED here per the spec; the hide test only with dlls/neighborcraft_tilehide.txt.
 
 00000000000. **NATIVE RENDERING MIGRATION (2026-10-13 night, the user's choice and order: one cube -> depth -> light and
             shadow -> many blocks -> Steve; the current renderer kept as fallback at every step).**

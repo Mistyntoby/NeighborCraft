@@ -3116,6 +3116,12 @@ namespace nc
 		};
 		std::vector<NeighborHit> g_neighborHits; // Minecraft's hits on its Neighbor entity (mc Neighbor.java), next tick
 		std::vector<Vec3f> g_neighborPushes;     // Minecraft's pushes on him (a fishing rod's pull), UE cm/s, next tick
+		struct Explosion
+		{
+			Vec3f at; // Unreal
+			float radius; // Minecraft's power (blocks)
+		};
+		std::vector<Explosion> g_explosions; // Minecraft's explosions, applied to HN's loose objects next tick
 		bool g_neighborRiding = false;           // he sits in a Minecraft boat or minecart, at g_neighborSeat (feet, UE)
 		Vec3f g_neighborSeat{};
 
@@ -3236,6 +3242,15 @@ namespace nc
 				carry_answer(json_string(m, "id"), m.find("\"ok\":true") != std::string::npos, json_string(m, "why"));
 			else if (m.find("\"t\":\"throwreq\"") != std::string::npos)
 				g_throwRequests.push_back(json_string(m, "id"));
+			else if (m.find("\"t\":\"explosion\"") != std::string::npos)
+			{
+				double at[3], r = 4.0;
+				if (json_vec3(m, "pos", at))
+				{
+					json_number(m, "r", r);
+					g_explosions.push_back({to_ue(at[0], at[1], at[2]), float(r)});
+				}
+			}
 			else if (m.find("\"t\":\"npush\"") != std::string::npos)
 			{
 				double v[3];
@@ -4983,6 +4998,32 @@ namespace nc
 			sendf("{\"t\":\"nbr\",\"p\":[%.4f,%.4f,%.4f],\"yaw\":%.2f,\"w\":%.3f,\"h\":%.3f}", mx, my, mz, rot->yaw - 90.0f, radius * 2.0f / 100.0f, half * 2.0f / 100.0f);
 		}
 
+		/// A Minecraft explosion (TNT, a creeper) throws HN's loose objects: a velocity change away from its centre, up to
+		/// 25 m/s there and none at twice its power in blocks (Minecraft's own reach for pushing entities), with lift. HN
+		/// never got anything from Minecraft's explosions before (the user: "TNT is not throwing nearby objects", 2026-11-01).
+		/// Doors and drawers stay HN's.
+		void explosion_tick(UObject *pawn, const Explosion &e)
+		{
+			const float reach = e.radius * 2.0f * 100.0f;
+			int thrown = 0;
+			for (UObject *component : physics_near(pawn, e.at, reach))
+			{
+				if (hinged_part(component))
+					continue;
+				Vec3f p = component_location(component);
+				Vec3f d{p.x - e.at.x, p.y - e.at.y, p.z - e.at.z};
+				const float dist = std::max(1.0f, std::hypot(d.x, d.y, d.z));
+				const float k = std::clamp(1.0f - dist / reach, 0.0f, 1.0f);
+				if (k <= 0.0f)
+					continue;
+				const float v = 2500.0f * k;
+				const Vec3f dv{d.x / dist * v, d.y / dist * v, d.z / dist * v + 400.0f * k};
+				Call(component, STR("AddImpulse")).set(STR("Impulse"), dv).set(STR("BoneName"), NameParam{}).set_bool(STR("bVelChange"), true).invoke();
+				++thrown;
+			}
+			log(L"explosion: power " + std::to_wstring(e.radius).substr(0, 4) + L", " + std::to_wstring(thrown) + L" of HN's loose objects thrown");
+		}
+
 		/// Minecraft's attack hit HN's world at `punch.at` (its own reach and ray: nothing through walls, once per
 		/// attack): the loose object there, if any, gets an impulse at the hit point along the attack, scaled by the
 		/// attack's charge (Minecraft's attack strength) and a sprint; heavy things barely move.
@@ -6000,7 +6041,9 @@ namespace nc
 					L" cm = " + std::to_wstring(size).substr(0, 6) + L" m a side; material " +
 					(material && *material ? (*material)->GetFullName() : std::wstring(L"-")));
 			}
-			if (++D.tilePunches == 3 && !D.hidden)
+			// (a tile is 127 m: the whole yard went; the test now only with dlls/neighborcraft_tilehide.txt)
+			static const bool hideTest = bool(std::ifstream(module_dir() + L"neighborcraft_tilehide.txt"));
+			if (++D.tilePunches == 3 && !D.hidden && hideTest)
 			{
 				Call(tile, STR("SetVisibility")).set_bool(STR("bNewVisibility"), false).set_bool(STR("bPropagateToChildren"), false).invoke();
 				D.hidden = tile;
@@ -7702,6 +7745,8 @@ namespace nc
 			physics_tick(pawn);
 			for (const Punch &punch : g_punches)
 				physics_punch(pawn, punch);
+			for (const Explosion &e : g_explosions)
+				explosion_tick(pawn, e);
 			neighbor_tick(pc, pawn);
 			dig_tick(pc, pawn, !g_punches.empty());
 			g_controlsPc = pc;
@@ -7721,6 +7766,7 @@ namespace nc
 		else
 			g_nearPhysics.clear();
 		g_punches.clear();
+		g_explosions.clear();
 		g_throwRequests.clear();
 		if (g_driving && g_mcReady)
 			dynamic_tick(pc);
