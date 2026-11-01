@@ -92,6 +92,16 @@ public final class HostLink extends WebSocketServer {
 				case "cam" -> HostState.update(m);
 				case "ground" -> WorldBridge.solid(ints(m.getAsJsonArray("c")));
 				case "clear" -> WorldBridge.clearSolid();
+				case "nbr" -> {
+					// HN's Neighbor: feet x y z, yaw, capsule width, height (Minecraft's units); no "p": none here
+					if (m.has("p")) {
+						com.google.gson.JsonArray p = m.getAsJsonArray("p");
+						dev.neighborcraft.Neighbor.target(new double[] {p.get(0).getAsDouble(), p.get(1).getAsDouble(), p.get(2).getAsDouble(),
+							m.get("yaw").getAsDouble(), m.get("w").getAsDouble(), m.get("h").getAsDouble()});
+					} else {
+						dev.neighborcraft.Neighbor.target(null);
+					}
+				}
 				case "cmd" -> WorldBridge.command(m.get("c").getAsString());
 				case "blocksync" -> WorldBridge.sync(m.has("r") ? m.get("r").getAsInt() : 48);
 				case "shape" -> {

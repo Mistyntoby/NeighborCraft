@@ -9,9 +9,13 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.MouseHandler;
 import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.blaze3d.platform.Window;
+import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.CharacterEvent;
+import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.player.LocalPlayer;
@@ -51,6 +55,12 @@ final class ClientInput {
 	private ClientInput() {
 	}
 
+	/** A text field of the open screen has the keyboard (chat, a sign, the anvil's name). */
+	private static boolean typing(final Minecraft minecraft) {
+		Screen screen = minecraft.gui.screen();
+		return screen instanceof ChatScreen || screen != null && screen.getFocused() instanceof EditBox;
+	}
+
 	static void handle(final Minecraft minecraft, final JsonObject m) {
 		LocalPlayer player = minecraft.player;
 		switch (m.get("t").getAsString()) {
@@ -63,6 +73,19 @@ final class ClientInput {
 					}
 
 					return;
+				}
+
+				if (k.equals("chat") || k.equals("command")) {
+					// T and /, as Minecraft's own keys open it (cheats are on in this world: commands work)
+					if (minecraft.gui.screen() == null && player != null) {
+						minecraft.gui.setScreen(new ChatScreen(k.equals("command") ? "/" : "", false));
+					}
+
+					return;
+				}
+
+				if (typing(minecraft)) {
+					return; // E, Q, 1-9 are letters in a text field (chat, a sign, the anvil)
 				}
 
 				if (k.equals("drop")) {
@@ -126,7 +149,9 @@ final class ClientInput {
 					}
 					case "click" -> {
 						int button = minecraftButton(m.get("b").getAsInt());
-						MouseButtonEvent event = new MouseButtonEvent(gx, gy, new MouseButtonInfo(button, 0));
+						// Shift and Ctrl from the host: screens read them from the click (shift-click moves a whole stack)
+						int mods = m.has("mod") ? m.get("mod").getAsInt() : 0;
+						MouseButtonEvent event = new MouseButtonEvent(gx, gy, new MouseButtonInfo(button, mods));
 						if (m.get("down").getAsBoolean()) {
 							heldButton = button;
 							// a double click as Minecraft's mouse handler judges it: the same button again within its threshold
@@ -151,6 +176,25 @@ final class ClientInput {
 
 				lastX = gx;
 				lastY = gy;
+			}
+			case "char" -> {
+				// typed in HN's window (its WM_CHAR): Minecraft's hidden window never has the keyboard
+				Screen screen = minecraft.gui.screen();
+				if (screen != null) {
+					screen.charTyped(new CharacterEvent(m.get("c").getAsInt()));
+				}
+			}
+			case "keycode" -> {
+				// a text field's editing keys (Enter, Backspace, arrows, Tab, Ctrl+A/C/V): SDL's scancode, keycode and modifiers
+				Screen screen = minecraft.gui.screen();
+				if (screen != null) {
+					KeyEvent event = new KeyEvent(m.get("k").getAsInt(), m.get("kc").getAsInt(), m.get("mod").getAsInt());
+					if (m.get("down").getAsBoolean()) {
+						screen.keyPressed(event);
+					} else {
+						screen.keyReleased(event);
+					}
+				}
 			}
 			case "pickup" -> {
 				// HN took one of its objects out of its world for Minecraft's inventory (it waits for the answer)
@@ -245,7 +289,7 @@ final class ClientInput {
 				minecraft.options.keySprint.setDown((bits & 64) != 0);
 			}
 			case "slot" -> {
-				if (player != null) {
+				if (player != null && !typing(minecraft)) {
 					player.getInventory().setSelectedSlot(Math.clamp(m.get("n").getAsInt(), 0, Inventory.getSelectionSize() - 1));
 				}
 			}

@@ -240,6 +240,11 @@ namespace nc
 			UObject *Get() const { return ptr; }
 		};
 
+		/// Meshes basic_shape loaded in this set of levels (cleared by level_key when the levels change). After a level change
+		/// the reloaded plane was never found by its path again: it was loaded from the asset registry every frame (1400
+		/// times in 30 s, 2026-11-01 12:24).
+		std::unordered_map<std::wstring, UObject *> g_shapes;
+
 		/// What the per-level caches (doors, interactive parts, the lent light, the sun) are keyed by: the controller AND the
 		/// levels the world has loaded. A nightmare is a streamed level: it comes and goes under the same controller, and
 		/// caches keyed by the controller alone kept its objects after it unloaded: the game crashed calling a destroyed
@@ -268,6 +273,7 @@ namespace nc
 			{
 				last = sig;
 				++key;
+				g_shapes.clear();
 				log(L"levels: " + (levels ? std::to_wstring(levels->num) + L" loaded" : std::wstring(L"the world's level list unreadable")) +
 					L": per-level caches start over");
 			}
@@ -668,9 +674,19 @@ namespace nc
 			g_shadowBoxes = pick->boxes;
 			g_shadowKinds = pick->kinds;
 			g_shadowColours = pick->colours;
-			g_steveFaces = pick->faces;
 			g_shadowBoxesAt = pick->at;
-			if (pick->hasHand)
+			// native Steve is drawn by HN from HN's camera, which is Minecraft's newest (mcpos): his faces from the newest frame
+			// too. Posed from the frame the picture shows (as the stand-ins are), he was 1-3 Minecraft frames behind the camera:
+			// he bounced against the view when the third-person camera turned and trailed when walking (the user, 2026-11-01).
+			// The held HN object follows his hand from the same frame; Minecraft's own held item is still in its (older) picture
+			const ShadowFrame *steve = g_shadowFrames.back().faces.empty() ? pick : &g_shadowFrames.back();
+			g_steveFaces = steve->faces;
+			if (steve->hasHand)
+			{
+				std::copy(steve->hand, steve->hand + 12, g_hand3p);
+				g_hand3pAt = steve->at;
+			}
+			else if (pick->hasHand)
 			{
 				std::copy(pick->hand, pick->hand + 12, g_hand3p);
 				g_hand3pAt = pick->at;
@@ -831,8 +847,10 @@ namespace nc
 		/// One of Unreal's basic shapes (an engine asset, loaded through the asset registry if not in memory).
 		UObject *basic_shape(const TCHAR *path)
 		{
+			if (auto it = g_shapes.find(path); it != g_shapes.end())
+				return it->second;
 			if (UObject *cube = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, path))
-				return cube;
+				return g_shapes[path] = cube;
 			static std::unordered_set<std::wstring> failedPaths;
 			if (failedPaths.count(path))
 				return nullptr;
@@ -865,7 +883,7 @@ namespace nc
 			if (!cube || !*cube)
 				return fail(L"the registry has no such asset");
 			log(L"shapes: loaded " + (*cube)->GetFullName());
-			return *cube;
+			return g_shapes[path] = *cube;
 		}
 
 		UObject *shadow_cube()
@@ -1288,6 +1306,7 @@ namespace nc
 			UObject *level = nullptr;                // level_key
 			std::vector<WeakRef> lights;      // this level's point and spot lights (weak: a nightmare's go with it)
 			WeakRef lent;                     // the light given shadows (it had none)
+			std::vector<WeakRef> quiet;       // its own actor's parts, kept from casting meanwhile (they cast before)
 			float score = 0.0f;
 			DWORD next = 0;
 		} g_lent;
@@ -1352,10 +1371,39 @@ namespace nc
 				Call(lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
 				log(L"shadows: " + lent->GetName() + L" has no shadows again (as HN made it)");
 			}
+			for (const WeakRef &weak : L.quiet)
+				if (UObject *part = weak.Get())
+					Call(part, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
+			L.quiet.clear();
 			L.lent = best;
 			L.score = bestScore;
 			if (best)
 			{
+				// the light's own lamp doesn't cast from it: a stand lamp's light is inside its shade, which put the whole
+				// lamp in its own shadow (the user: the blue lamp went off when Steve came near, 2026-11-01)
+				static UObject *primitive = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.PrimitiveComponent"));
+				Call owner(best, STR("GetOwner"));
+				UObject *const *actor = owner.invoke() ? owner.param<UObject *>(STR("ReturnValue")) : nullptr;
+				if (primitive && actor && *actor)
+				{
+					struct ObjectArray
+					{
+						UObject **data;
+						int32 num, max;
+					};
+					Call list(*actor, STR("GetComponentsByClass"));
+					list.set<UObject *>(STR("ComponentClass"), primitive);
+					const ObjectArray *a = list.invoke() ? list.param<ObjectArray>(STR("ReturnValue")) : nullptr;
+					for (int i = 0; a && i < a->num; ++i)
+					{
+						bool casts = false;
+						if (UObject *part = a->data[i]; part && get_bool_property(part, STR("CastShadow"), casts) && casts)
+						{
+							Call(part, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
+							L.quiet.emplace_back(part);
+						}
+					}
+				}
 				set_bool_property(best, STR("CastDynamicShadows"), true);
 				Call(best, STR("SetCastShadows")).set_bool(STR("bNewValue"), true).invoke();
 				bool now = false;
@@ -2044,6 +2092,9 @@ namespace nc
 						Call(part, STR("K2_DestroyActor")).invoke();
 				if (UObject *lent = g_lent.lent.Get())
 					Call(lent, STR("SetCastShadows")).set_bool(STR("bNewValue"), false).invoke();
+				for (const WeakRef &weak : g_lent.quiet)
+					if (UObject *part = weak.Get())
+						Call(part, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), true).invoke();
 			}
 			if (alive)
 				for (UObject *box : g_pool.boxes)
@@ -3051,6 +3102,12 @@ namespace nc
 			bool sprint;
 		};
 		std::vector<Punch> g_punches; // Minecraft's attacks that hit HN's world, applied on the next tick
+		struct NeighborHit
+		{
+			float damage;
+			bool crit;
+		};
+		std::vector<NeighborHit> g_neighborHits; // Minecraft's hits on its Neighbor entity (mc Neighbor.java), next tick
 
 		void handle(const std::string &m)
 		{
@@ -3168,6 +3225,12 @@ namespace nc
 				carry_answer(json_string(m, "id"), m.find("\"ok\":true") != std::string::npos, json_string(m, "why"));
 			else if (m.find("\"t\":\"throwreq\"") != std::string::npos)
 				g_throwRequests.push_back(json_string(m, "id"));
+			else if (m.find("\"t\":\"nhit\"") != std::string::npos)
+			{
+				double damage = 1.0;
+				json_number(m, "dmg", damage);
+				g_neighborHits.push_back({float(damage), m.find("\"crit\":true") != std::string::npos});
+			}
 			else if (m.find("\"t\":\"punch\"") != std::string::npos)
 			{
 				double at[3], dir[3], strength = 1.0, damage = 1.0;
@@ -3329,10 +3392,82 @@ namespace nc
 			return vk == 'E' || vk == 'Q' || vk == 'F' || vk == VK_F5 || (vk >= '1' && vk <= '9');
 		}
 
+		/// Typing for Minecraft (chat, commands, sign text, renaming), queued by the window procedure and sent each tick.
+		std::mutex g_typedLock;
+		std::vector<std::string> g_typed;
+
+		void type_for_minecraft(std::string message)
+		{
+			std::lock_guard<std::mutex> lock(g_typedLock);
+			g_typed.push_back(std::move(message));
+		}
+
+		/// The editing keys a text field needs as Minecraft 26 has them: SDL's scancode (KeyEvent.key: Enter is 40, Backspace
+		/// 42) and keycode (KeyEvent.keycode, its shortcutKey: Ctrl+A is 'a'); false for other keys. GLFW's codes (Enter
+		/// 257) did nothing: the user could type but not delete, send or complete (2026-11-01).
+		bool sdl_key(WPARAM vk, int &scancode, int &keycode)
+		{
+			constexpr int k = 1 << 30; // SDLK for keys without a character: the scancode | 1 << 30
+			switch (vk)
+			{
+			case VK_RETURN: scancode = 40, keycode = '\r'; return true;
+			case VK_BACK: scancode = 42, keycode = '\b'; return true;
+			case VK_TAB: scancode = 43, keycode = '\t'; return true;
+			case VK_DELETE: scancode = 76, keycode = 127; return true;
+			case VK_HOME: scancode = 74, keycode = k | 74; return true;
+			case VK_PRIOR: scancode = 75, keycode = k | 75; return true;
+			case VK_END: scancode = 77, keycode = k | 77; return true;
+			case VK_NEXT: scancode = 78, keycode = k | 78; return true;
+			case VK_RIGHT: scancode = 79, keycode = k | 79; return true;
+			case VK_LEFT: scancode = 80, keycode = k | 80; return true;
+			case VK_DOWN: scancode = 81, keycode = k | 81; return true;
+			case VK_UP: scancode = 82, keycode = k | 82; return true;
+			default:
+				if (vk >= 'A' && vk <= 'Z' && (GetKeyState(VK_CONTROL) & 0x8000)) // Ctrl+A/C/V/X
+				{
+					scancode = 4 + int(vk - 'A'), keycode = 'a' + int(vk - 'A');
+					return true;
+				}
+				return false;
+			}
+		}
+
+		/// Minecraft 26's (SDL's) modifier bits for the keys held now: Shift 0x1, Ctrl 0x40, Alt 0x100 (the left keys').
+		int sdl_mods()
+		{
+			return ((GetKeyState(VK_SHIFT) & 0x8000) ? 0x1 : 0) | ((GetKeyState(VK_CONTROL) & 0x8000) ? 0x40 : 0) | ((GetKeyState(VK_MENU) & 0x8000) ? 0x100 : 0);
+		}
+
 		LRESULT CALLBACK hn_window_proc(HWND window, UINT msg, WPARAM wparam, LPARAM lparam)
 		{
 			if (g_minecraftInput)
 			{
+				// T opens Minecraft's chat, / its chat with a command started; with a Minecraft screen open, what is typed
+				// goes to it and never to HN
+				if (g_minecraftScreen && msg == WM_CHAR)
+				{
+					if (wparam >= 32 && wparam != 127)
+						type_for_minecraft("{\"t\":\"char\",\"c\":" + std::to_string(unsigned(wparam)) + "}");
+					return 0;
+				}
+				if (g_minecraftScreen && (msg == WM_KEYDOWN || msg == WM_KEYUP) && wparam != VK_ESCAPE)
+				{
+					int scancode = 0, keycode = 0;
+					if (sdl_key(wparam, scancode, keycode))
+						type_for_minecraft("{\"t\":\"keycode\",\"k\":" + std::to_string(scancode) + ",\"kc\":" + std::to_string(keycode) + ",\"down\":" +
+										   (msg == WM_KEYDOWN ? "true" : "false") + ",\"mod\":" + std::to_string(sdl_mods()) + "}");
+					return 0; // Minecraft's own keys (E, Q, 1-9) reach it as before, from their held state (minecraft_controls)
+				}
+				if (!g_minecraftScreen && g_minecraftDriving)
+				{
+					if (msg == WM_KEYDOWN && !(lparam & (1 << 30)) && (wparam == 'T' || wparam == VK_OEM_2))
+					{
+						type_for_minecraft(wparam == 'T' ? "{\"t\":\"key\",\"k\":\"chat\"}" : "{\"t\":\"key\",\"k\":\"command\"}");
+						return 0;
+					}
+					if ((msg == WM_KEYUP && (wparam == 'T' || wparam == VK_OEM_2)) || (msg == WM_CHAR && (wparam == 't' || wparam == 'T' || wparam == '/')))
+						return 0; // the key's own character: not typed into the chat it opens
+				}
 				switch (msg)
 				{
 				case WM_INPUT:
@@ -3618,6 +3753,15 @@ namespace nc
 		/// Minecraft's keybinds, sent every tick (held keys) or on change (presses).
 		void minecraft_controls(UObject *pc)
 		{
+			{
+				std::vector<std::string> typed;
+				{
+					std::lock_guard<std::mutex> lock(g_typedLock);
+					typed.swap(g_typed);
+				}
+				for (const std::string &m : typed)
+					g_ws.send(m);
+			}
 			// movement (Minecraft's: Shift sneaks, Ctrl sprints), every tick
 			const int bits = (key_held('W') ? 1 : 0) | (key_held('S') ? 2 : 0) | (key_held('A') ? 4 : 0) | (key_held('D') ? 8 : 0) |
 							 (key_held(VK_SPACE) ? 16 : 0) | (key_held(VK_SHIFT) ? 32 : 0) | (key_held(VK_CONTROL) ? 64 : 0);
@@ -3680,9 +3824,10 @@ namespace nc
 				const double ny = double(cursor.y) / std::max<LONG>(1, client.bottom - client.top);
 				sendf("{\"t\":\"mouse\",\"x\":%.5f,\"y\":%.5f}", nx, ny);
 				const int buttons[3] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON};
+				// with Shift and Ctrl as Minecraft's modifiers: its screens read them from the click (shift-click moves a stack)
 				for (int b = 0; b < 3; ++b)
 					if (const int e = edge(buttons[b]))
-						sendf("{\"t\":\"click\",\"b\":%d,\"down\":%s,\"x\":%.5f,\"y\":%.5f}", b, e > 0 ? "true" : "false", nx, ny);
+						sendf("{\"t\":\"click\",\"b\":%d,\"down\":%s,\"x\":%.5f,\"y\":%.5f,\"mod\":%d}", b, e > 0 ? "true" : "false", nx, ny, sdl_mods());
 				if (wheel)
 					sendf("{\"t\":\"wheel\",\"d\":%d,\"x\":%.5f,\"y\":%.5f}", wheel, nx, ny);
 				if (pressed(VK_ESCAPE))
@@ -3890,23 +4035,53 @@ namespace nc
 				// first person: the look as of now (mouse input reaches HN's camera this frame, not after a round trip through
 				// Minecraft) plus Minecraft's view-bob offset from the look it rendered with; third person: Minecraft's camera
 				float yaw = g_mcYaw, pitch = g_mcPitch;
+				Vec3f loc = g_mcCamera;
 				if (g_mcFirstPerson && g_lookOwned)
 				{
 					yaw = float(g_lookYaw) + (g_mcYaw - g_mcLookYaw);
 					pitch = std::clamp(float(g_lookPitch) + (g_mcPitch - g_mcLookPitch), -90.0f, 90.0f);
 				}
+				else if (g_lookOwned && g_haveEye)
+				{
+					// third person: the look as of now too. Minecraft's own third-person camera reaches HN a frame or more late
+					// and unevenly: the view juddered when the mouse moved (the user, 2026-11-01). Its offset from the eyes (the
+					// distance behind them, shortened at walls, plus bob and step smoothing) is taken in its own camera's axes
+					// and put back in the turned ones. F5's front view: Minecraft turns the camera 180 degrees, negates the pitch
+					struct Axes
+					{
+						Vec3f f, r, u;
+					};
+					auto axes = [](float y, float p) {
+						const double Y = (y + 90.0) * 3.14159265358979 / 180.0, P = -p * 3.14159265358979 / 180.0;
+						const float cy = float(std::cos(Y)), sy = float(std::sin(Y)), cp = float(std::cos(P)), sp = float(std::sin(P));
+						return Axes{{cp * cy, cp * sy, sp}, {-sy, cy, 0.0f}, {-sp * cy, -sp * sy, cp}};
+					};
+					auto dot = [](const Vec3f &a, const Vec3f &b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+					double off = std::fmod(double(g_mcYaw - g_mcLookYaw), 360.0);
+					off += off > 180.0 ? -360.0 : off < -180.0 ? 360.0 : 0.0;
+					const bool front = std::abs(off) > 90.0;
+					const Axes was = axes(g_mcYaw, g_mcPitch);
+					const Vec3f v{g_mcCamera.x - g_eye.x, g_mcCamera.y - g_eye.y, g_mcCamera.z - g_eye.z};
+					const float rf = dot(v, was.f), rr = dot(v, was.r), ru = dot(v, was.u);
+					yaw = float(g_lookYaw + off);
+					const float look = front ? -float(g_lookPitch) : float(g_lookPitch), mcLook = front ? -g_mcLookPitch : g_mcLookPitch;
+					pitch = std::clamp(look + (g_mcPitch - mcLook), -90.0f, 90.0f);
+					const Axes now = axes(yaw, pitch);
+					loc = Vec3f{g_eye.x + rf * now.f.x + rr * now.r.x + ru * now.u.x, g_eye.y + rf * now.f.y + rr * now.r.y + ru * now.u.y,
+						g_eye.z + rf * now.f.z + rr * now.r.z + ru * now.u.z};
+				}
 				struct
 				{
 					Vec3f loc;
 					Rot3f rot;
-				} pose{g_mcCamera, {-pitch, yaw + 90.0f, -g_mcRoll}};
+				} pose{loc, {-pitch, yaw + 90.0f, -g_mcRoll}};
 				Call place(camera, STR("K2_SetActorLocationAndRotation"));
 				place.set(STR("NewLocation"), pose.loc).set(STR("NewRotation"), pose.rot).set_bool(STR("bSweep"), false).set_bool(STR("bTeleport"), true).invoke();
 				const float hfov = float(2.0 * std::atan(std::tan(g_mcFov * 3.14159265358979 / 360.0) * aspect) * 180.0 / 3.14159265358979);
 				// HN's next frame is rendered from exactly this pose: the compositor re-projects Minecraft's frame onto it
 				// (reading HN's camera back on the game thread could be a frame ahead of the picture being presented)
 				double mx, my, mz;
-				to_mc(g_mcCamera, mx, my, mz);
+				to_mc(loc, mx, my, mz);
 				compositor::set_host_pose(yaw, pitch, g_mcRoll, g_mcFov, mx, my, mz);
 				g_setHfov = hfov;
 				if (UObject **component = camera->GetValuePtrByPropertyNameInChain<UObject *>(STR("CameraComponent")); component && *component)
@@ -4229,6 +4404,8 @@ namespace nc
 				const float dx = cp.x - body.x, dy = cp.y - body.y, dh = std::hypot(dx, dy);
 				if (dh > reach || cp.z < feetZ - 5.0f || cp.z > feetZ + height)
 					continue;
+				if (dh < g_steveWidth * 0.5f && cp.z < feetZ + 10.0f)
+					continue; // under him: he stands on it, walking doesn't shove it from under his feet
 				const float towards = dh < 1.0f ? 1.0f : (dx * dir.x + dy * dir.y) / dh;
 				if (towards < 0.25f)
 					continue;
@@ -4260,6 +4437,165 @@ namespace nc
 				}
 			}
 			g_touching = std::move(touchingNow);
+		}
+
+		/// HN's Neighbor (BP_Sosed_C) as an entity in Minecraft (mc Neighbor.java): HN sends where he stands and his capsule
+		/// each tick, so Minecraft's combat (reach, swings, damage, criticals) works on him; a hit comes back ("nhit") and
+		/// HN plays his own reaction. Which of his functions is that reaction isn't known yet (Sosed has OnStruck, OnHit and
+		/// a debug mixer event "Kick the Neighbor"): each is logged with its parameters the first time, the first found is
+		/// called, and dlls/neighborcraft_stun.txt names another to try.
+		struct NeighborLink
+		{
+			UObject *level = nullptr; // level_key
+			WeakRef actor;
+			DWORD nextFind = 0, nextSend = 0;
+			DWORD stunnedUntil = 0; // SetFreeze(true) until then (0: not stunned by us)
+			Vec3f last{};
+			bool sent = false;
+		} g_nbr;
+
+		/// A function's parameters as the engine has them (name, size, offset), for the log.
+		std::wstring signature(UObject *object, const TCHAR *name)
+		{
+			UFunction *fn = object ? object->GetFunctionByNameInChain(name) : nullptr;
+			if (!fn)
+				return std::wstring(name) + L": none";
+			std::wstring s = std::wstring(name) + L"(";
+			bool first = true;
+			for (FProperty *p : fn->ForEachProperty())
+			{
+				s += (first ? L"" : L", ") + p->GetName() + L" " + std::to_wstring(p->GetSize()) + L" B @" + std::to_wstring(p->GetOffset_Internal());
+				first = false;
+			}
+			return s + L")";
+		}
+
+		/// Sosed::GetState's value (an enum, as a number) and IsFreeze, for the log; -1 unreadable.
+		int neighbor_state(UObject *n)
+		{
+			Call s(n, STR("GetState"));
+			const uint8_t *v = s.invoke() ? s.param<uint8_t>(STR("ReturnValue")) : nullptr;
+			return v ? int(*v) : -1;
+		}
+		int neighbor_frozen(UObject *n)
+		{
+			Call s(n, STR("IsFreeze"));
+			const uint8_t *v = s.invoke() ? s.param<uint8_t>(STR("ReturnValue")) : nullptr;
+			return v ? int(*v) : -1;
+		}
+
+		void neighbor_hit(UObject *pawn, const NeighborHit &hit)
+		{
+			UObject *n = g_nbr.actor.Get();
+			if (!n)
+				return;
+			static std::wstring chosen;
+			static bool told = false;
+			if (!told)
+			{
+				told = true;
+				for (const TCHAR *f : {STR("OnStruck"), STR("OnHit"), STR("SetFreeze"), STR("MixerButtonEvt_Kick the Neighbor_Pressed"), STR("SetState"),
+						 STR("GetState"), STR("IsFreeze")})
+					log(L"neighbor: " + signature(n, f));
+				std::wifstream file(module_dir() + L"neighborcraft_stun.txt");
+				std::getline(file, chosen);
+			}
+			std::wstring fn = chosen;
+			if (fn.empty())
+				for (const TCHAR *f : {STR("OnStruck"), STR("MixerButtonEvt_Kick the Neighbor_Pressed")})
+					if (n->GetFunctionByNameInChain(f))
+					{
+						fn = f;
+						break;
+					}
+			if (fn.empty())
+			{
+				log(L"neighbor: hit, but no reaction to call");
+				return;
+			}
+			// object parameters (who or what struck him) get Steve's HN body; the rest stay zero
+			Call c(n, fn.c_str());
+			if (UFunction *f = n->GetFunctionByNameInChain(fn.c_str()))
+				for (FProperty *p : f->ForEachProperty())
+					if (p->GetSize() == 8 && pawn)
+					{
+						const std::wstring pn = p->GetName();
+						if (pn.find(L"Actor") != std::wstring::npos || pn.find(L"Object") != std::wstring::npos || pn.find(L"Pawn") != std::wstring::npos ||
+							pn.find(L"Instigator") != std::wstring::npos || pn.find(L"Other") != std::wstring::npos)
+							std::memcpy(c.data() + p->GetOffset_Internal(), &pawn, sizeof(pawn));
+					}
+			const int before = neighbor_state(n);
+			const bool ok = c.invoke();
+			// OnStruck alone played his stun sound but he ran on (the user, 2026-11-01): he is also frozen for the stun, a
+			// critical twice as long, more hits adding to it
+			const DWORD now = GetTickCount(), length = hit.crit ? 3000 : 1500;
+			g_nbr.stunnedUntil = std::max(g_nbr.stunnedUntil, now) + (g_nbr.stunnedUntil > now ? length / 2 : length);
+			Call(n, STR("SetFreeze")).set_bool(STR("bFreeze"), true).invoke();
+			log(L"neighbor: hit for " + std::to_wstring(hit.damage).substr(0, 4) + (hit.crit ? L" (critical)" : L"") + L": " + fn + (ok ? L" called" : L" failed") +
+				L", frozen for " + std::to_wstring(int(g_nbr.stunnedUntil - now)) + L" ms; state " + std::to_wstring(before) + L" -> " +
+				std::to_wstring(neighbor_state(n)) + L", IsFreeze " + std::to_wstring(neighbor_frozen(n)));
+		}
+
+		void neighbor_tick(UObject *pc, UObject *pawn)
+		{
+			NeighborLink &N = g_nbr;
+			if (N.level != level_key(pc))
+			{
+				N = NeighborLink{};
+				N.level = level_key(pc);
+			}
+			UObject *n = N.actor.Get();
+			if (!n && GetTickCount() > N.nextFind)
+			{
+				N.nextFind = GetTickCount() + 2000;
+				const std::vector<UObject *> all = find_all(L"BP_Sosed_C");
+				if (!all.empty())
+				{
+					N.actor = n = all[0];
+					log(L"neighbor: " + n->GetFullName() + L" is an entity in Minecraft");
+				}
+			}
+			for (const NeighborHit &hit : g_neighborHits)
+				neighbor_hit(pawn, hit);
+			g_neighborHits.clear();
+			if (n && N.stunnedUntil && GetTickCount() >= N.stunnedUntil)
+			{
+				N.stunnedUntil = 0;
+				Call(n, STR("SetFreeze")).set_bool(STR("bFreeze"), false).invoke();
+				log(L"neighbor: stun over; state " + std::to_wstring(neighbor_state(n)) + L", IsFreeze " + std::to_wstring(neighbor_frozen(n)));
+			}
+			if (!n || !g_driving)
+			{
+				if (N.sent)
+					g_ws.send("{\"t\":\"nbr\"}");
+				N.sent = false;
+				return;
+			}
+			Call where(n, STR("K2_GetActorLocation"));
+			Call turn(n, STR("K2_GetActorRotation"));
+			const Vec3f *at = where.invoke() ? where.param<Vec3f>(STR("ReturnValue")) : nullptr;
+			const Rot3f *rot = turn.invoke() ? turn.param<Rot3f>(STR("ReturnValue")) : nullptr;
+			if (!at || !rot)
+				return;
+			float radius = 40.0f, half = 90.0f;
+			if (UObject **capsule = n->GetValuePtrByPropertyNameInChain<UObject *>(STR("CapsuleComponent")); capsule && *capsule)
+			{
+				Call r(*capsule, STR("GetScaledCapsuleRadius")), h(*capsule, STR("GetScaledCapsuleHalfHeight"));
+				if (const float *v = r.invoke() ? r.param<float>(STR("ReturnValue")) : nullptr)
+					radius = *v;
+				if (const float *v = h.invoke() ? h.param<float>(STR("ReturnValue")) : nullptr)
+					half = *v;
+			}
+			const Vec3f feet{at->x, at->y, at->z - half};
+			const bool moved = std::hypot(feet.x - N.last.x, feet.y - N.last.y, feet.z - N.last.z) > 0.5f;
+			if (!moved && N.sent && GetTickCount() < N.nextSend)
+				return;
+			N.last = feet;
+			N.nextSend = GetTickCount() + 1000;
+			N.sent = true;
+			double mx, my, mz;
+			to_mc(feet, mx, my, mz);
+			sendf("{\"t\":\"nbr\",\"p\":[%.4f,%.4f,%.4f],\"yaw\":%.2f,\"w\":%.3f,\"h\":%.3f}", mx, my, mz, rot->yaw - 90.0f, radius * 2.0f / 100.0f, half * 2.0f / 100.0f);
 		}
 
 		/// Minecraft's attack hit HN's world at `punch.at` (its own reach and ray: nothing through walls, once per
@@ -6184,7 +6520,9 @@ namespace nc
 				double fx, fy, fz;
 				to_mc(g_feet, fx, fy, fz);
 				const double hw = g_steveWidth / 200.0 + 0.125, h = std::max(g_steveHeight / 100.0, 1.8) + 0.05;
-				const double x0 = fx - hw, x1 = fx + hw, y0 = fy - 0.01, y1 = fy + h, z0 = fz - hw, z1 = fz + hw;
+				// from just above his feet: from 1 cm below them, the top sub-cell of the object he stood on was taken out from
+				// under him and he sank into it (the user: can't stay standing on physics objects, 2026-11-01)
+				const double x0 = fx - hw, x1 = fx + hw, y0 = fy + 0.02, y1 = fy + h, z0 = fz - hw, z1 = fz + hw;
 				for (int x = int(std::floor(x0)); x <= int(std::floor(x1)); ++x)
 					for (int y = int(std::floor(y0)); y <= int(std::floor(y1)); ++y)
 						for (int z = int(std::floor(z0)); z <= int(std::floor(z1)); ++z)
@@ -6483,6 +6821,7 @@ namespace nc
 		}
 
 		UObject *pc = player_controller(static_cast<UObject *>(engine_object));
+		level_key(pc); // first: a change of levels drops the meshes basic_shape kept (g_shapes) before anything uses them
 		UObject *pawn = pc ? pawn_of(pc) : nullptr;
 		if (pressed(VK_F9))
 			dump(pc, pawn);
@@ -6717,6 +7056,7 @@ namespace nc
 			physics_tick(pawn);
 			for (const Punch &punch : g_punches)
 				physics_punch(pawn, punch);
+			neighbor_tick(pc, pawn);
 			g_controlsPc = pc;
 			carry_tick(pc, pawn);
 			mesh_path_probe(pawn);

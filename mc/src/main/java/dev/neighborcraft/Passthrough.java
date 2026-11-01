@@ -49,7 +49,9 @@ public class Passthrough implements ModInitializer {
 			.isSuffocating((state, level, pos) -> false)));
 		ResourceKey<Item> itemKey = ResourceKey.create(Registries.ITEM, Identifier.fromNamespaceAndPath(ID, "hn_object"));
 		HN_OBJECT = Registry.register(BuiltInRegistries.ITEM, itemKey, new Item(new Item.Properties().setId(itemKey).stacksTo(1)));
+		Neighbor.register();
 		ServerTickEvents.END_SERVER_TICK.register(Carry::tick);
+		ServerTickEvents.END_SERVER_TICK.register(Neighbor::tick);
 		// HN's world can't be broken from Minecraft (creative would otherwise break it instantly)
 		PlayerBlockBreakEvents.BEFORE.register((level, player, pos, state, entity) -> !state.is(HOST));
 		ServerLifecycleEvents.SERVER_STARTED.register(WorldBridge::attach);

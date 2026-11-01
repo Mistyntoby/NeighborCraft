@@ -231,12 +231,19 @@ All of these are in MODLOG §"Interactions, physics, terrain, stability":
             SectionCompiler.compile -> ModelBlockRenderer.tesselateBlock; ProceduralMeshComponent exists in this build, but
             runtime component creation isn't scriptable in 4.20; the proven runtime path is StaticMeshActor + Unreal's cube
             + a base_m dynamic material with an imported texture (the stand-ins').
-            Phase 2 BUILT, not yet run: mc NativeBlocks + SectionCompilerMixin leave a full opaque cube with one untinted
-            sprite on all six faces out of Minecraft's chunk mesh and send it to HN ("nblock"; texture PNG 8x upscaled in
-            %LOCALAPPDATA%/NeighborCraft/blocks); at most HN's "native" n blocks (1 now). HN apply_native: the stand-in
-            goes, a textured cube is drawn (g_native); removed with the block and on level change. Off:
-            dlls/neighborcraft_native_off.txt. Test: place one cobblestone: Minecraft's look, lit and shadowed by HN,
-            hidden by walls/doors in front, no clone; then the phase 3 checks.
+            State 2026-11-01 (MODLOG "native Steve timing, crack, fist, input, the Neighbor as an entity"):
+            - Native blocks VERIFIED (n=4096): per-face planes darkened by Minecraft's light level ("<tex>_l<n>"); the crack
+              baked into them while mining ("<tex>_c<stage>_l<n>", materials seen made in game; the look not yet judged).
+              Off: dlls/neighborcraft_native_off.txt.
+            - Native Steve (phase 5) REPORTED good ("really good now"), posed from Minecraft's newest frame like the camera;
+              third-person camera now turned by HN's own mouse look (judder fix BUILT, not yet judged); fist restored in
+              first person (BUILT). UVs (dlls/neighborcraft_steve_uv.txt) not yet checked on screen. Off:
+              neighborcraft_native_steve_off.txt.
+            - OPEN: the dark-box check (only light levels 13-15 were made: the box was probably not sealed), the white
+              square near the neighbour's door (n1/n1off.png, not investigated: no new screenshot).
+            - Also BUILT 2026-11-01: lamp self-shadow fix, standing on physics objects, T/ chat with SDL key codes,
+              shift-click, the Neighbor as a Minecraft entity (hits VERIFIED reaching HN; stun = OnStruck + SetFreeze,
+              the freeze not yet seen).
 
 0000000000. **BUILT and running (2026-10-13 21:54, MODLOG "Receivers seen only by a scene capture"): steps 1-3 done; [game] logs confirm the texture found and the receivers hidden. Left: the visual check (no trailing clone; blocks/Steve lit and shadowed; brightness vs before), GPU cost. Earlier plan:** Done and
            built (inactive until step 3): compositor.cpp finds the capture texture by size (compositor::kReceiverW/H =

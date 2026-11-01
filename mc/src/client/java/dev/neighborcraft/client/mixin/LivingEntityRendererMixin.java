@@ -12,7 +12,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * With HN drawing Steve (NativeSteve), Minecraft doesn't draw his body: his render state says invisible (and invisible
- * to the player: no see-through ghost). His held item and armour layers still draw, as for an invisible player.
+ * to the player: no see-through ghost) in third person. His held item and armour layers still draw, as for an invisible
+ * player.
  * ShadowExport builds its own render states meanwhile (NativeSteve.exporting) and still gets the model.
  */
 @Mixin(LivingEntityRenderer.class)
@@ -20,7 +21,11 @@ abstract class LivingEntityRendererMixin {
 	@Inject(method = "extractRenderState(Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/client/renderer/entity/state/LivingEntityRenderState;F)V",
 		at = @At("TAIL"), require = 0)
 	private void passthrough$nativeSteve(final LivingEntity entity, final LivingEntityRenderState state, final float partial, final CallbackInfo ci) {
-		if (NativeSteve.enabled && !NativeSteve.exporting && entity == Minecraft.getInstance().player) {
+		// third person only: in first person Minecraft doesn't draw his body anyway, and its first-person arm
+		// (FirstPersonHandsAndItemsRenderer.submitArmWithItem) is drawn only for a render state that isn't invisible: the
+		// fist was gone (the user, 2026-11-01)
+		Minecraft minecraft = Minecraft.getInstance();
+		if (NativeSteve.enabled && !NativeSteve.exporting && entity == minecraft.player && !minecraft.options.getCameraType().isFirstPerson()) {
 			state.isInvisible = true;
 			state.isInvisibleToPlayer = true;
 		}

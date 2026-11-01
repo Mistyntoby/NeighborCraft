@@ -764,3 +764,39 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   body (LivingEntityRendererMixin), his held item stays; outer skin layers skipped (opaque material). Plane UV convention
   untested: dlls/neighborcraft_steve_uv.txt "swap flipU flipV" (also used by block faces). Off:
   neighborcraft_native_steve_off.txt.
+
+## 2026-11-01: native Steve timing, crack, fist, input, the Neighbor as an entity
+- Installed HEAD a1f46ac (md5 e547594a, built = installed). [game] 11:45 session: the user "it's really good now"; left:
+  third-person camera bouncy, fist sometimes missing, Steve lagging behind. Frame stats 60 fps, nothing over 50 ms.
+- Steve's lag/bounce: HN's camera took Minecraft's newest pose (mcpos) but native Steve was posed from the frame the
+  compositor shows (log "posed from frame N, newest N+1..3"): 1-3 Minecraft frames behind the camera. Native Steve (and
+  the carried object's hand frame) now from the newest "shadows" message; the stand-ins keep the matched one.
+- Third-person judder remained (the user, 11:58; frames still 60 fps): Minecraft's third-person camera arrives late and
+  unevenly. Now HN turns it with its own mouse look as in first person: Minecraft's camera offset from the eyes is taken in
+  its own axes and put back in the turned ones (distance, wall clip, bob, F5 front view kept). Not yet judged.
+- Fist gone: 26.3 draws the first-person arm (FirstPersonHandsAndItemsRenderer.submitArmWithItem) only if the player's
+  render state isn't isInvisible, which LivingEntityRendererMixin set to hide his body for native Steve. Now third person
+  only.
+- Crack on native blocks: Minecraft's crumbling overlay (LevelRenderer.submitBlockDestroyAnimation, not tesselateBlock)
+  writes no depth, so HN's block hid it. Handing the block back to Minecraft while breaking worked but "looks really bad"
+  (the user). Now baked into HN's face textures: "<sprite>_c<stage>_l<light>" = 2 x crack x block where the crack's alpha
+  >= 0.1 (the crumbling blend). [game] 12:23: materials _c1.._c9 made for cobblestone while it was mined.
+- After a level change HN loaded /Engine/BasicShapes/Plane from the asset registry every frame (1400 times in 30 s,
+  12:24): the reloaded mesh is never found by its path. basic_shape caches per set of levels (g_shapes, level_key).
+- Blue lamp "turns off when close": lend_shadows_tick gave BP_Stand_lamp_638.Spot shadows near Steve (log, 4 times); its
+  light is inside its shade, which then shadowed the whole lamp. The lit light's own actor's primitives stop casting while
+  it is lent (restored after). Not yet seen.
+- Can't stand on physics objects: moving collision was cleared from Steve's hitbox from 1 cm below his feet, i.e. the top
+  sub-cell of what he stood on; now from 2 cm above. Walking on top also pushed it (its nearest point is under him): not
+  any more. Not yet seen.
+- Input: Minecraft 26.3 is on SDL: KeyEvent(SDL scancode, SDL keycode, SDL modifiers): Enter 40, Backspace 42, Tab 43;
+  Shift 0x3, Ctrl 0xC0, Alt 0x300 (InputWithModifiers). T opens chat, / with "/"; HN's WM_CHAR goes to the screen
+  ("char"), editing keys as "keycode"; clicks carry modifiers (shift-click). [game] 12:38: chat opened and typing worked,
+  but Backspace/Enter/Tab didn't with GLFW codes: now SDL's. Cheats were already on (LevelSettings allowCommands).
+- The Neighbor (BP_Sosed_C) as a Minecraft entity (mc Neighbor.java: invisible no-AI mob, NoopRenderer, placed from HN's
+  "nbr" each tick, capsule size): [game] 12:38: hits arrive ("nhit" 7.0, 10.5, 13.5), HN calls Sosed::OnStruck (no
+  parameters): the user heard his stun sound but he ran on. Signatures: OnHit(HitComp, OtherActor, OtherComp,
+  NormalImpulse, Hit 136 B), SetFreeze(bFreeze), MixerButtonEvt_Kick the Neighbor_Pressed(Button, ParticipantId,
+  TransactionId, SparkCost). Now also SetFreeze(true) for 1.5 s (critical 3 s), GetState/IsFreeze logged. Crits came as
+  "normal" (10.5 = 7 x 1.5): 26.3's attack applies 1.5x inline when canCriticalAttack(target) is true and never calls
+  Player.crit; hooked canCriticalAttack's return instead.

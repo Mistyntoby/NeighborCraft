@@ -84,6 +84,8 @@ public class PassthroughClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
 		HostLink.launch();
+		// HN draws its Neighbor: Minecraft only fights him (dev.neighborcraft.Neighbor)
+		net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry.register(dev.neighborcraft.Neighbor.TYPE, net.minecraft.client.renderer.entity.NoopRenderer::new);
 		ClientTickEvents.END_CLIENT_TICK.register(PassthroughClient::tick);
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			ServerPlayer player = handler.player;

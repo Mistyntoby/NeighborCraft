@@ -2,6 +2,7 @@ package dev.neighborcraft.client;
 
 import com.mojang.blaze3d.platform.NativeImage;
 import dev.neighborcraft.Passthrough;
+import dev.neighborcraft.client.mixin.MultiPlayerGameModeAccessor;
 import dev.neighborcraft.client.mixin.SpriteContentsAccessor;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,6 +20,7 @@ import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.resources.Identifier;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.BlockAndLightGetter;
@@ -98,11 +100,12 @@ public final class NativeBlocks {
 		// each face HN draws, with the light level of the air in front of it (Minecraft's own: sky and torch light). HN's
 		// world can't darken a space its runtime blocks enclose (its sky and bounce light are precomputed from its own
 		// level): a box built around Steve stayed lit inside (the user). -1: a face against another solid block, not drawn
+		String tex = texture(key, name);
 		StringBuilder faces = new StringBuilder();
 		for (Direction d : Direction.values()) {
 			BlockPos n = key.relative(d);
 			int light = level.getBlockState(n).isSolidRender() ? -1 : level.getRawBrightness(n, 0);
-			if (light >= 0 && !write(name, sprite, light)) {
+			if (light >= 0 && !write(tex, sprite, light)) {
 				light = -1;
 			}
 
@@ -110,9 +113,10 @@ public final class NativeBlocks {
 		}
 
 		NATIVE.add(key);
+		SPRITES.put(key, sprite);
 		String f = faces.toString();
 		if (!f.equals(TOLD_FACES.put(key, f))) {
-			OUT.add("{\"t\":\"nblock\",\"p\":[" + key.getX() + "," + key.getY() + "," + key.getZ() + "],\"tex\":\"" + name + "\",\"f\":[" + f + "]}");
+			OUT.add("{\"t\":\"nblock\",\"p\":[" + key.getX() + "," + key.getY() + "," + key.getZ() + "],\"tex\":\"" + tex + "\",\"f\":[" + f + "]}");
 		}
 
 		return true;
@@ -159,11 +163,23 @@ public final class NativeBlocks {
 		return Math.max(0.03F, f / (4.0F - 3.0F * f));
 	}
 
-	/** The sprite at a light level ("<name>_l<level>"), written once. */
+	/**
+	 * The sprite at a light level ("<name>_l<level>"), written once. A cracked name ("<sprite>_c<stage>", see texture())
+	 * gets Minecraft's crack on it as its crumbling blend draws it (colour = 2 x crack x block where the crack isn't clear).
+	 */
 	private static boolean write(final String name, final TextureAtlasSprite sprite, final int light) {
 		String file = name + "_l" + light;
 		if (WRITTEN.containsKey(file)) {
 			return true;
+		}
+
+		int cut = name.lastIndexOf("_c");
+		NativeImage crack = null;
+		if (cut >= 0 && name.substring(cut + 2).matches("\\d")) {
+			crack = crack(Integer.parseInt(name.substring(cut + 2)));
+			if (crack == null) {
+				return false;
+			}
 		}
 
 		float k = lightFactor(light);
@@ -180,7 +196,16 @@ public final class NativeBlocks {
 				for (int y = 0; y < h * s; y++) {
 					for (int x = 0; x < w * s; x++) {
 						int c = image.getPixel(x / s, y / s);
-						int r = Math.round((c >> 16 & 0xFF) * k), g = Math.round((c >> 8 & 0xFF) * k), b = Math.round((c & 0xFF) * k);
+						float m = 1.0F;
+						if (crack != null) {
+							int d = crack.getPixel(x * crack.getWidth() / (w * s), y * crack.getHeight() / (h * s));
+							if ((d >>> 24) >= 26) { // the crumbling shader discards alpha < 0.1
+								m = 2.0F * (d >> 16 & 0xFF) / 255.0F; // grey: one channel will do
+							}
+						}
+
+						int r = Math.min(255, Math.round((c >> 16 & 0xFF) * k * m)), g = Math.min(255, Math.round((c >> 8 & 0xFF) * k * m)),
+							b = Math.min(255, Math.round((c & 0xFF) * k * m));
 						big.setPixel(x, y, 0xFF000000 | r << 16 | g << 8 | b);
 					}
 				}
@@ -230,13 +255,92 @@ public final class NativeBlocks {
 		}
 	}
 
+	/**
+	 * The block Steve is breaking and its crack stage (0-9). Minecraft's crack (LevelRenderer.submitBlockDestroyAnimation)
+	 * draws over the block without writing depth: on a block HN draws, the compositor put HN's block in front of it. Handing
+	 * the block back to Minecraft while it broke showed it in Minecraft's own look (the user: "looks really bad"), so the
+	 * crack is baked into HN's face textures instead ("<name>_c<stage>_l<light>").
+	 */
+	private static volatile BlockPos breaking;
+	private static volatile int breakingStage = -1;
+	/** Each native block's sprite, for its cracked textures. */
+	private static final Map<BlockPos, TextureAtlasSprite> SPRITES = new ConcurrentHashMap<>();
+	/** Minecraft's destroy_stage_0..9 textures, read on first use. */
+	private static final NativeImage[] CRACKS = new NativeImage[10];
+
+	/** The texture name HN is given for a block: its sprite's, cracked while Steve breaks it. */
+	private static String texture(final BlockPos pos, final String name) {
+		int stage = breakingStage;
+		return stage >= 0 && pos.equals(breaking) ? name + "_c" + stage : name;
+	}
+
+	/** Tells HN a native block's textures again (its crack changed). */
+	private static void retell(final Minecraft minecraft, final BlockPos pos) {
+		TextureAtlasSprite sprite = SPRITES.get(pos);
+		String faces = TOLD_FACES.get(pos);
+		if (sprite == null || faces == null || !NATIVE.contains(pos) || !minecraft.level.getBlockState(pos).isSolidRender()) {
+			return;
+		}
+
+		String name = sprite.contents().name().toString().replace(':', '_').replace('/', '_');
+		String tex = texture(pos, name);
+		for (String light : faces.split(",")) {
+			int l = Integer.parseInt(light);
+			if (l >= 0 && !write(tex, sprite, l)) {
+				return;
+			}
+		}
+
+		OUT.add("{\"t\":\"nblock\",\"p\":[" + pos.getX() + "," + pos.getY() + "," + pos.getZ() + "],\"tex\":\"" + tex + "\",\"f\":[" + faces + "]}");
+	}
+
+	/** Minecraft's crack texture for a stage, or null. */
+	private static synchronized NativeImage crack(final int stage) {
+		if (CRACKS[stage] == null) {
+			Identifier id = Identifier.withDefaultNamespace("textures/block/destroy_stage_" + stage + ".png");
+			try (java.io.InputStream in = Minecraft.getInstance().getResourceManager().open(id)) {
+				CRACKS[stage] = NativeImage.read(in);
+			} catch (Exception ex) {
+				Passthrough.LOG.warn("native blocks: crack {} not read ({})", id, ex.toString());
+				return null;
+			}
+		}
+
+		return CRACKS[stage];
+	}
+
 	/** Client thread, every tick: blocks gone (no longer the eligible block) leave the set; queued messages go to HN. */
 	public static void tick(final Minecraft minecraft) {
+		BlockPos now = null;
+		int stage = -1;
+		if (limit > 0 && minecraft.gameMode != null && minecraft.gameMode.isDestroying()) {
+			now = ((MultiPlayerGameModeAccessor) minecraft.gameMode).passthrough$destroyBlockPos();
+			stage = Math.min(minecraft.gameMode.getDestroyStage(), 9);
+		}
+
+		if (stage < 0) {
+			now = null;
+		}
+
+		if (minecraft.level != null && (!java.util.Objects.equals(now, breaking) || stage != breakingStage)) {
+			BlockPos was = breaking;
+			breaking = now == null ? null : now.immutable();
+			breakingStage = stage;
+			if (was != null && !was.equals(breaking)) {
+				retell(minecraft, was); // uncracked again
+			}
+
+			if (breaking != null) {
+				retell(minecraft, breaking);
+			}
+		}
+
 		if (minecraft.level != null && !NATIVE.isEmpty()) {
 			for (BlockPos pos : NATIVE) {
 				if (!minecraft.level.getBlockState(pos).isSolidRender()) {
 					NATIVE.remove(pos);
 					TOLD_FACES.remove(pos);
+					SPRITES.remove(pos);
 					OUT.add("{\"t\":\"nblock\",\"p\":[" + pos.getX() + "," + pos.getY() + "," + pos.getZ() + "],\"tex\":\"\"}");
 				}
 			}
@@ -266,6 +370,7 @@ public final class NativeBlocks {
 		limit = n;
 		NATIVE.clear();
 		TOLD_FACES.clear();
+		SPRITES.clear();
 		Passthrough.LOG.info("native blocks: up to {} drawn by Hello Neighbor", n);
 		if (minecraft.levelRenderer != null) {
 			minecraft.levelRenderer.resetLevelRenderData(); // every chunk meshed again
