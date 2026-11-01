@@ -867,3 +867,7 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - [game] the user didn't see the runtime ProceduralMeshComponent square: constructed and built but never drawn (not
   registered; registration is native only in 4.20, no UFunction, nothing in UE4SS). Phase A conclusion in HANDOFF §6:
   no genuine cuts of HN meshes in this build; only landscape tiles could be replaced by placed geometry.
+- Ground tiles only (the user's choice). Phase B step 1 built: a punch on the ground (LandscapeHeightfieldCollision
+  component) finds its render component (the nearest LandscapeComponent: same place) and logs its corner, quads x scale
+  = size in metres, and material; 3 punches on one tile within 5 s hide its look (SetVisibility) for 15 s, collision kept;
+  shown again on a streamed-level change. The runtime ProceduralMeshComponent test no longer runs. Not yet run.

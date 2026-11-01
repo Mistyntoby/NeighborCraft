@@ -5954,7 +5954,60 @@ namespace nc
 			DWORD testAt = 0;                             // when the procedural mesh test runs (0: done)
 			UObject *testActor = nullptr;
 			DWORD testEnd = 0;
+			// phase B, step 1: the ground tile punched (its render component), punches on it in a row, and a tile hidden
+			UObject *tile = nullptr;
+			int tilePunches = 0;
+			DWORD tileFirst = 0;
+			UObject *pc = nullptr;     // the controller these were found under
+			UObject *hidden = nullptr; // hidden by the test until hiddenUntil (shown again then, or on a level change)
+			DWORD hiddenUntil = 0;
 		} g_dig;
+
+		/// The ground under a punch: the landscape's render component for the heightfield collision component that was hit
+		/// (they are the same tile: the same place), measured and logged; 3 punches on one tile within 5 s hide it for
+		/// 15 s, its look only (its collision stays: nothing falls through). Phase B step 1: how big a tile is and whether
+		/// one can be taken out of the picture cleanly.
+		void dig_ground(UObject *collision)
+		{
+			DigProbe &D = g_dig;
+			const Vec3f at = component_location(collision);
+			UObject *tile = nullptr;
+			float best = 1e30f;
+			for (UObject *c : find_all(L"LandscapeComponent"))
+			{
+				const Vec3f p = component_location(c);
+				const float d = std::hypot(p.x - at.x, p.y - at.y, p.z - at.z);
+				if (d < best)
+					best = d, tile = c;
+			}
+			if (!tile)
+				return;
+			const DWORD now = GetTickCount();
+			if (tile != D.tile || now - D.tileFirst > 5000)
+			{
+				D.tile = tile, D.tilePunches = 0, D.tileFirst = now;
+				const int32 *quads = tile->GetValuePtrByPropertyNameInChain<int32>(STR("ComponentSizeQuads"));
+				Call sc(tile, STR("K2_GetComponentScale"));
+				const Vec3f *scale = sc.invoke() ? sc.param<Vec3f>(STR("ReturnValue")) : nullptr;
+				const Vec3f o = component_location(tile);
+				Call gm(tile, STR("GetMaterial"));
+				gm.set<int32>(STR("ElementIndex"), 0);
+				UObject *const *material = gm.invoke() ? gm.param<UObject *>(STR("ReturnValue")) : nullptr;
+				const float size = quads && scale ? *quads * scale->x / 100.0f : -1.0f;
+				log(L"dig: ground tile " + tile->GetName() + L" (its collision " + std::to_wstring(int(best)) + L" cm off): corner " +
+					std::to_wstring(int(o.x)) + L" " + std::to_wstring(int(o.y)) + L" " + std::to_wstring(int(o.z)) + L" cm, " +
+					(quads ? std::to_wstring(*quads) : std::wstring(L"?")) + L" quads x " + (scale ? std::to_wstring(scale->x).substr(0, 6) : std::wstring(L"?")) +
+					L" cm = " + std::to_wstring(size).substr(0, 6) + L" m a side; material " +
+					(material && *material ? (*material)->GetFullName() : std::wstring(L"-")));
+			}
+			if (++D.tilePunches == 3 && !D.hidden)
+			{
+				Call(tile, STR("SetVisibility")).set_bool(STR("bNewVisibility"), false).set_bool(STR("bPropagateToChildren"), false).invoke();
+				D.hidden = tile;
+				D.hiddenUntil = now + 15000;
+				log(L"dig: ground tile " + tile->GetName() + L" hidden for 15 s (its look only; its collision stays)");
+			}
+		}
 
 		std::wstring mobility_name(UObject *component)
 		{
@@ -6005,7 +6058,11 @@ namespace nc
 		{
 			UObject *actor = nullptr, *component = nullptr;
 			Vec3f point{};
-			if (!look_hit(pawn, nullptr, 500.0f, actor, component, point) || !component || g_dig.reported.count(component) || g_dig.reported.size() >= 40)
+			if (!look_hit(pawn, nullptr, 500.0f, actor, component, point) || !component)
+				return;
+			if (is_a(component, L"LandscapeHeightfieldCollisionComponent"))
+				dig_ground(component);
+			if (g_dig.reported.count(component) || g_dig.reported.size() >= 40)
 				return;
 			g_dig.reported.insert(component);
 			std::wstring line = L"dig: target " + component->GetClassPrivate()->GetName() + L" " + component->GetName() + L" of " +
@@ -6110,13 +6167,23 @@ namespace nc
 				return;
 			if (g_dig.level != level_key(pc))
 			{
+				// a streamed level came or went under the same controller: the landscape is still there, its hidden tile
+				// is shown again (never left hidden); another controller: it went with its level
+				if (g_dig.hidden && g_dig.pc == pc)
+					Call(g_dig.hidden, STR("SetVisibility")).set_bool(STR("bNewVisibility"), true).set_bool(STR("bPropagateToChildren"), false).invoke();
 				g_dig = DigProbe{}; // its test actor went with the level
+				g_dig.pc = pc;
 				g_dig.level = level_key(pc);
-				g_dig.testAt = GetTickCount() + 15000;
-				dig_census();
+				dig_census(); // (the runtime ProceduralMeshComponent test is settled: never drawn; dig_mesh_test stays for the record)
 			}
 			if (punched)
 				dig_report(pawn);
+			if (g_dig.hidden && GetTickCount() >= g_dig.hiddenUntil)
+			{
+				Call(g_dig.hidden, STR("SetVisibility")).set_bool(STR("bNewVisibility"), true).set_bool(STR("bPropagateToChildren"), false).invoke();
+				log(L"dig: ground tile " + g_dig.hidden->GetName() + L" shown again");
+				g_dig.hidden = nullptr;
+			}
 			dig_mesh_test(pawn);
 		}
 
