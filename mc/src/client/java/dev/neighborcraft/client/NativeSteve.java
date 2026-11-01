@@ -36,7 +36,7 @@ public final class NativeSteve {
 	 * the corner of the texture's top-left), outward normal, all in Minecraft's world, relative to `origin`.
 	 */
 	static void face(final StringBuilder out, final Identifier skinId, final NativeImage skin, final Matrix4f m, final ModelPart.Cube cube,
-		final int index, final ModelPart.Polygon polygon, final net.minecraft.world.phys.Vec3 origin) {
+		final int index, final ModelPart.Polygon polygon, final net.minecraft.world.phys.Vec3 origin, final boolean outer) {
 		ModelPart.Vertex[] v = polygon.vertices();
 		if (v.length != 4 || skin == null) {
 			return;
@@ -67,7 +67,7 @@ public final class NativeSteve {
 			return;
 		}
 
-		int id = texture(skinId, skin, cube, index, u0, v0, u1, v1);
+		int id = texture(skinId, skin, cube, index, u0, v0, u1, v1, outer);
 		if (id < 0) {
 			return;
 		}
@@ -95,9 +95,10 @@ public final class NativeSteve {
 
 	/** The id of a face's texture, written for HN on first use (the skin's rectangle, 8x with nearest pixels); -1: none. */
 	private static int texture(final Identifier skinId, final NativeImage skin, final ModelPart.Cube cube, final int index, final float u0,
-		final float v0, final float u1, final float v1) {
+		final float v0, final float u1, final float v1, final boolean outer) {
 		int cubeId = CUBES.computeIfAbsent(cube, k -> CUBES.size());
-		String name = ("steve_" + skinId.toString() + "_" + cubeId + "_" + index).replace(':', '_').replace('/', '_').replace('.', '_');
+		// an outer layer's texture keeps its transparency ("_a": HN's masked material for it)
+		String name = ("steve_" + skinId.toString() + "_" + cubeId + "_" + index).replace(':', '_').replace('/', '_').replace('.', '_') + (outer ? "_a" : "");
 		Integer known = TEXTURES.get(name);
 		if (known != null) {
 			return known;
@@ -110,6 +111,21 @@ public final class NativeSteve {
 			return -1;
 		}
 
+		if (outer) {
+			// a face the skin leaves fully clear (an empty outer layer there): nothing to draw
+			boolean any = false;
+			for (int y = y0; y < y1 && !any; y++) {
+				for (int x = x0; x < x1 && !any; x++) {
+					any = (skin.getPixel(x, y) >>> 24) >= 128;
+				}
+			}
+
+			if (!any) {
+				TEXTURES.put(name, -1);
+				return -1;
+			}
+		}
+
 		int k = 8;
 		try {
 			Path file = NativeBlocks.dir().resolve(name + ".png");
@@ -117,7 +133,9 @@ public final class NativeSteve {
 			try (NativeImage face = new NativeImage((x1 - x0) * k, (y1 - y0) * k, false)) {
 				for (int y = 0; y < (y1 - y0) * k; y++) {
 					for (int x = 0; x < (x1 - x0) * k; x++) {
-						face.setPixel(x, y, skin.getPixel(x0 + x / k, y0 + y / k) | 0xFF000000); // opaque (HN's base_m is)
+						int c = skin.getPixel(x0 + x / k, y0 + y / k);
+						// opaque for the body (HN's base_m is); an outer layer cut at half alpha (base_alpha_m's mask)
+						face.setPixel(x, y, outer ? ((c >>> 24) >= 128 ? c | 0xFF000000 : c & 0x00FFFFFF) : c | 0xFF000000);
 					}
 				}
 

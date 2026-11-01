@@ -928,7 +928,7 @@ namespace nc
 		/// collector freed it; the next SetMaterial read a freed material and the game crashed (19:11 and 19:2x on
 		/// 2026-10-11, on F5, when Steve's boxes start being drawn). UE4SS's SetRootSet didn't keep it in this build. The
 		/// keeper dies with its level; the pool's level change makes new materials (shadow_boxes_tick).
-		UObject *new_receiver_material(UObject *context, const std::wstring &file, const std::string &png)
+		UObject *new_receiver_material(UObject *context, const std::wstring &file, const std::string &png, bool masked = false)
 		{
 			if (!png.empty() && GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
 				if (FILE *f = _wfopen(file.c_str(), L"wb"))
@@ -938,7 +938,9 @@ namespace nc
 				}
 			static UObject *rendering = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetRenderingLibrary"));
 			static UObject *matLib = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/Engine.Default__KismetMaterialLibrary"));
-			UObject *parent = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Game/Objects/Materials/Base/base_m.base_m"));
+			// masked: HN's cut-out base material (its texture's alpha is the mask), for the skin's outer layers
+			UObject *parent = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr,
+				masked ? STR("/Game/Objects/Materials/Base/base_Alpha_m.base_alpha_m") : STR("/Game/Objects/Materials/Base/base_m.base_m"));
 			if (!rendering || !matLib || !parent)
 			{
 				log(L"receivers: no material (base_m " + std::wstring(parent ? L"found" : L"missing") + L"): stand-ins stay shadow-only");
@@ -1101,7 +1103,9 @@ namespace nc
 			if (auto it = g_nativeMaterials.find(tex); it != g_nativeMaterials.end())
 				return it->second;
 			const std::wstring file = native_texture_dir() + std::wstring(tex.begin(), tex.end()) + L".png";
-			UObject *m = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES ? new_receiver_material(context, file, std::string()) : nullptr;
+			// "..._a": a texture with transparency (native Steve's outer skin layers: hat, jacket, sleeves, trousers)
+			const bool masked = tex.size() > 2 && tex.compare(tex.size() - 2, 2, "_a") == 0;
+			UObject *m = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES ? new_receiver_material(context, file, std::string(), masked) : nullptr;
 			g_nativeMaterials[tex] = m;
 			log(m ? L"native blocks: a material for " + std::wstring(tex.begin(), tex.end())
 				  : L"native blocks: no texture file " + file + L": the block stays Minecraft's");

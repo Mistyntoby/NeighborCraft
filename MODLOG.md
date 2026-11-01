@@ -909,3 +909,8 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   Minecraft crashed 2 s later: NullPointerException "this.viewArea is null" in LevelRenderer.repositionCamera. Cause:
   NativeBlocks.setLimit's resetLevelRenderData with a world already loaded (the dev client only loaded its world after
   the host). Now invalidateCompiledGeometry when a world is loaded; the profile's jar replaced (md5 checked).
+- [game] the Modrinth profile works end to end (the user: "it all works now"), but no outer skin layers: native Steve
+  skipped them (opaque base_m would have boxed him in). Now the outer layers (hat, jacket, sleeves, trousers) are sent
+  too, their face textures named "..._a" and keeping alpha (cut at 128; a face fully clear in the skin skipped), and HN
+  gives "_a" textures the masked base_alpha_m (/Game/Objects/Materials/Base/base_Alpha_m). Profile jar updated; HN
+  DLL built, waiting for HN to close.

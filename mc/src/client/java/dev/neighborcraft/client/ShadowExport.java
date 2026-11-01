@@ -380,9 +380,12 @@ public final class ShadowExport {
 			for (ModelPart.Cube c : access.passthrough$cubes()) {
 				// native Steve: the local player's body faces (not the skin's outer layers: mostly transparent pixels, and
 				// HN's material is opaque)
-				if (NativeSteve.enabled && out.surface == 2 && !OUTER_LAYERS.contains(name)) {
+				if (NativeSteve.enabled && out.surface == 2) {
+					// the outer layers too, with their transparency (HN's masked material): they were left out as opaque
+					// boxes would have covered him (the user: "I don't see the skin layers", 2026-11-01)
+					boolean outer = OUTER_LAYERS.contains(name);
 					for (int i = 0; i < c.polygons.length; i++) {
-						NativeSteve.face(out.faces, out.skinId, out.skin, m, c, i, c.polygons[i], out.origin);
+						NativeSteve.face(out.faces, out.skinId, out.skin, m, c, i, c.polygons[i], out.origin, outer);
 					}
 				}
 				out.colour = cubeColour(out.skinId, out.skin, c);
