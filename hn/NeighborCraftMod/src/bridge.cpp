@@ -3115,6 +3115,9 @@ namespace nc
 			bool player = true;                    // Steve's (else a mob's, an arrow's)
 		};
 		std::vector<NeighborHit> g_neighborHits; // Minecraft's hits on its Neighbor entity (mc Neighbor.java), next tick
+		std::vector<Vec3f> g_neighborPushes;     // Minecraft's pushes on him (a fishing rod's pull), UE cm/s, next tick
+		bool g_neighborRiding = false;           // he sits in a Minecraft boat or minecart, at g_neighborSeat (feet, UE)
+		Vec3f g_neighborSeat{};
 
 		void handle(const std::string &m)
 		{
@@ -3233,6 +3236,19 @@ namespace nc
 				carry_answer(json_string(m, "id"), m.find("\"ok\":true") != std::string::npos, json_string(m, "why"));
 			else if (m.find("\"t\":\"throwreq\"") != std::string::npos)
 				g_throwRequests.push_back(json_string(m, "id"));
+			else if (m.find("\"t\":\"npush\"") != std::string::npos)
+			{
+				double v[3];
+				if (json_vec3(m, "v", v)) // Minecraft blocks a tick -> Unreal cm/s (x, z, y)
+					g_neighborPushes.push_back(Vec3f{float(v[0] * 2000.0), float(v[2] * 2000.0), float(v[1] * 2000.0)});
+			}
+			else if (m.find("\"t\":\"nride\"") != std::string::npos)
+			{
+				double p[3];
+				g_neighborRiding = json_vec3(m, "p", p);
+				if (g_neighborRiding)
+					g_neighborSeat = to_ue(p[0], p[1], p[2]);
+			}
 			else if (m.find("\"t\":\"nhit\"") != std::string::npos)
 			{
 				double damage = 1.0;
@@ -4470,6 +4486,8 @@ namespace nc
 			int watchState = -1;                                  // his state before the last throw, logged when it changes
 			DWORD watchUntil = 0;
 			bool sensesOff = false; // creative: his controller's perception switched off
+			bool riding = false;    // held in a Minecraft boat (his movement off)
+			float half = 90.0f;     // his capsule's half height
 			Vec3f last{};
 			bool sent = false;
 		} g_nbr;
@@ -4786,6 +4804,39 @@ namespace nc
 			for (const NeighborHit &hit : g_neighborHits)
 				neighbor_hit(pawn, hit);
 			g_neighborHits.clear();
+			// Minecraft's pushes (a fishing rod pulls him): launched so
+			for (const Vec3f &v : g_neighborPushes)
+				if (n)
+				{
+					Call(n, STR("LaunchCharacter")).set(STR("LaunchVelocity"), v).set_bool(STR("bXYOverride"), true).set_bool(STR("bZOverride"), true).invoke();
+					log(L"neighbor: pushed by Minecraft, " + std::to_wstring(int(std::hypot(v.x, v.y, v.z))) + L" cm/s");
+				}
+			g_neighborPushes.clear();
+			// in a Minecraft boat: held on its seat, his own movement off, until he is out (the user: "stuck in a boat")
+			if (n)
+			{
+				UObject *movement = movement_component(n);
+				if (g_neighborRiding)
+				{
+					if (!N.riding)
+					{
+						N.riding = true;
+						if (movement)
+							Call(movement, STR("DisableMovement")).invoke();
+						if (UObject **controller = n->GetValuePtrByPropertyNameInChain<UObject *>(STR("Controller")); controller && *controller)
+							Call(*controller, STR("StopMovement")).invoke();
+						log(L"neighbor: in a Minecraft boat: held there");
+					}
+					set_actor_location(n, Vec3f{g_neighborSeat.x, g_neighborSeat.y, g_neighborSeat.z + N.half});
+				}
+				else if (N.riding)
+				{
+					N.riding = false;
+					if (movement)
+						Call(movement, STR("SetMovementMode")).set<uint8_t>(STR("NewMovementMode"), 1).set<uint8_t>(STR("NewCustomMode"), 0).invoke();
+					log(L"neighbor: out of the boat: walks again");
+				}
+			}
 			if (n && N.stunnedUntil && GetTickCount() >= N.stunnedUntil)
 			{
 				N.stunnedUntil = 0;
@@ -4909,6 +4960,7 @@ namespace nc
 				if (const float *v = h.invoke() ? h.param<float>(STR("ReturnValue")) : nullptr)
 					half = *v;
 			}
+			N.half = half;
 			const Vec3f feet{at->x, at->y, at->z - half};
 			g_nbrFeet = feet, g_nbrSeen = true;
 			const bool moved = std::hypot(feet.x - N.last.x, feet.y - N.last.y, feet.z - N.last.z) > 0.5f;

@@ -68,8 +68,8 @@ public class Neighbor extends Mob {
 	/** Client, each frame: the entity exactly at HN's Neighbor (old positions too: no easing between frames). */
 	public static void snap(final Entity e) {
 		double[] t = target;
-		if (t == null) {
-			return;
+		if (t == null || e.isPassenger()) {
+			return; // riding: where Minecraft seats him
 		}
 
 		e.setPos(t[0], t[1], t[2]);
@@ -140,9 +140,15 @@ public class Neighbor extends Mob {
 		// HN moves him
 	}
 
+	/** Pushable, so a boat takes him aboard (it looks only among pushable entities)... */
 	@Override
 	public boolean isPushable() {
-		return false;
+		return true;
+	}
+
+	/** ...but other entities don't shove him (that would reach HN as a push): HN's own bodies meet his. */
+	@Override
+	public void push(final Entity other) {
 	}
 
 	@Override
@@ -209,10 +215,41 @@ public class Neighbor extends Mob {
 			}
 		}
 
+		entity.setHealth(entity.getMaxHealth());
+		// what Minecraft did to move him (a fishing rod's pull, a wind charge, an explosion's push) goes to HN as a launch:
+		// here HN places him (the user: "the fishing rod should pull him")
+		net.minecraft.world.phys.Vec3 v = entity.getDeltaMovement();
+		if (v.lengthSqr() > 0.0025) {
+			Passthrough.events.accept(String.format(Locale.ROOT, "{\"t\":\"npush\",\"v\":[%.4f,%.4f,%.4f]}", v.x, v.y, v.z));
+			Passthrough.LOG.info("neighbor: pushed {} {} {} blocks a tick", String.format(Locale.ROOT, "%.2f", v.x), String.format(Locale.ROOT, "%.2f", v.y),
+				String.format(Locale.ROOT, "%.2f", v.z));
+		}
+
+		entity.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+		// in a boat (or a minecart): Minecraft places him on its seat and HN holds him there (stuck, as a mob in a boat)
+		if (entity.isPassenger()) {
+			Passthrough.events.accept(String.format(Locale.ROOT, "{\"t\":\"nride\",\"p\":[%.4f,%.4f,%.4f],\"yaw\":%.2f}", entity.getX(), entity.getY(),
+				entity.getZ(), entity.getYRot()));
+			if (!riding) {
+				riding = true;
+				Passthrough.LOG.info("neighbor: riding {}", entity.getVehicle().getType().toShortString());
+			}
+
+			return;
+		}
+
+		if (riding) {
+			riding = false;
+			Passthrough.events.accept("{\"t\":\"nride\"}");
+			Passthrough.LOG.info("neighbor: out again");
+		}
+
 		entity.setPos(t[0], t[1], t[2]);
 		entity.setYRot((float) t[3]);
 		entity.setYHeadRot((float) t[3]);
 		entity.setYBodyRot((float) t[3]);
-		entity.setHealth(entity.getMaxHealth());
 	}
+
+	/** He is riding something (server thread): HN was told so. */
+	private static boolean riding;
 }

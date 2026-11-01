@@ -837,3 +837,7 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
 - Fire on him trailed behind him: the entity was placed by the server at 20 Hz and eased on the client. Now the client
   entity is placed at HN's latest position before each frame (GameRendererMixin render HEAD -> Neighbor.snap). Burning
   (fire, lava) counts as a hit once a second, with no push.
+- Fishing rod and boats (the user): whatever velocity Minecraft gives his entity (a rod's pull, a wind charge, an explosion's
+  push) is sent to HN each server tick ("npush") and launched there, then zeroed. He is pushable again (a boat boards only
+  pushable entities) but ignores other entities' shoves. Riding: Minecraft seats him and sends the seat ("nride"); HN holds
+  him there (DisableMovement, his controller stopped) until he's out (MOVE_Walking again). Not yet seen.
