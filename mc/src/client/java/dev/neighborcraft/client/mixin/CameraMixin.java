@@ -125,9 +125,9 @@ abstract class CameraMixin {
 			// and his feet and hitbox: the host's player body is his size, where he stands (sneaking too)
 			Vec3 feet = player.getPosition(partial);
 			Passthrough.events.accept(String.format(Locale.ROOT,
-				"{\"t\":\"mcpos\",\"eye\":[%.4f,%.4f,%.4f],\"cam\":[%.4f,%.4f,%.4f],\"rot\":[%.3f,%.3f,%.3f],\"look\":[%.3f,%.3f],\"fp\":%b,\"fov\":%.3f,\"feet\":[%.4f,%.4f,%.4f],\"size\":[%.4f,%.4f],\"tn\":%d}",
+				"{\"t\":\"mcpos\",\"eye\":[%.4f,%.4f,%.4f],\"cam\":[%.4f,%.4f,%.4f],\"rot\":[%.3f,%.3f,%.3f],\"look\":[%.3f,%.3f],\"fp\":%b,\"fov\":%.3f,\"feet\":[%.4f,%.4f,%.4f],\"size\":[%.4f,%.4f],\"cr\":%b,\"tn\":%d}",
 				eye.x, eye.y, eye.z, cam.x, cam.y, cam.z, yaw, pitch, roll, p.yaw(), p.pitch(), !this.detached, lastFov > 0.0F ? lastFov : 70.0F,
-				feet.x, feet.y, feet.z, player.getBbWidth(), player.getBbHeight(), System.nanoTime()));
+				feet.x, feet.y, feet.z, player.getBbWidth(), player.getBbHeight(), player instanceof net.minecraft.world.entity.player.Player pl && pl.isCreative(), System.nanoTime()));
 		} else {
 			HostState.setRenderedCamera(self.yRot(), self.xRot(), p != null ? p.roll() : 0.0F);
 		}

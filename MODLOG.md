@@ -804,3 +804,15 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   after OnStruck, 0 when released). SetFreeze is out; a stun now holds his CharacterMovement.MaxWalkSpeed at 0 (every
   tick, his own value given back after) and stops his controller's movement. Creative couldn't fly: PlayerSync took
   flying/mayfly every tick while Minecraft drives; now only in survival and adventure.
+- [game] 12:52: the speed hold paused him but no arm animation or stagger (the user: like being hit by an object should
+  be; a critical should knock him over). Now a hit throws a hidden copy of the lightest loose object near him (BP_Banana_C,
+  7 kg) from Steve's side (9 m/s, critical 25 m/s). [game] 12:58: thrown, but his state never changed: the engine reported
+  no hit. Now Sosed::OnHit is also called as the engine would (HitComp his capsule, the object, its impulse), and a
+  critical calls Sosed::MixerFall. Not yet seen.
+- Creative: the controller's AI perception switch logged nothing and he still caught Steve. Now the flag change is logged,
+  plus PawnSensing components on the Neighbor (SetSensingUpdatesEnabled, bSeePawns, bHearNoises). Not yet seen.
+- Mobs ignored the Neighbor: his entity was invisible (mobs see 0.07 of their range). Visible now (still NoopRenderer, no
+  shadow box); free hostile mobs within 24 blocks target him each second. [game] they go for him. Mob hits, arrows and
+  explosions on him count as hits.
+- Skeletons burned under HN's roof: host blocks don't block sky light. MobMixin: HN geometry above a mob's head means no
+  sun burn. Not yet seen.

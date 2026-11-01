@@ -2,6 +2,6 @@
 	"required": true,
 	"package": "dev.neighborcraft.mixin",
 	"compatibilityLevel": "JAVA_25",
-	"mixins": ["LandingEffectsMixin", "LevelMixin", "PlayerMixin", "ServerExplosionMixin", "ServerPlayerMixin", "SurfaceEffectsMixin"],
+	"mixins": ["LandingEffectsMixin", "LevelMixin", "MobMixin", "PlayerMixin", "ServerExplosionMixin", "ServerPlayerMixin", "SurfaceEffectsMixin"],
 	"injectors": { "defaultRequire": 1 }
 }

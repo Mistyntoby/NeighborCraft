@@ -168,7 +168,7 @@ public final class ShadowExport {
 			Out out = new Out(camera);
 			float[] hand = null;
 			for (Entity e : minecraft.level.entitiesForRendering()) {
-				if (e.distanceToSqr(camera) > RANGE * RANGE || e.isInvisible() && e != minecraft.player) {
+				if (e.distanceToSqr(camera) > RANGE * RANGE || e.isInvisible() && e != minecraft.player || e instanceof dev.neighborcraft.Neighbor) {
 					continue;
 				}
 

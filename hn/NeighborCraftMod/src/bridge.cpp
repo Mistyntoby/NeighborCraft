@@ -106,6 +106,7 @@ namespace nc
 		float g_mcYaw = 0, g_mcPitch = 0, g_mcRoll = 0, g_mcFov = 70; // Minecraft's camera (Minecraft degrees, vertical FOV)
 		float g_mcLookYaw = 0, g_mcLookPitch = 0; // the look that camera was rendered for
 		bool g_mcFirstPerson = true;
+		bool g_mcCreative = false; // Minecraft's game mode is creative (mcpos "cr")
 		float g_setHfov = 0;                      // the FOV last given to HN's camera (horizontal degrees)
 
 		// Minecraft's process (from its hello): its window is hidden, and it can be started from here
@@ -3190,6 +3191,7 @@ namespace nc
 						g_mcLookPitch = float(look[1]);
 					}
 					g_mcFirstPerson = m.find("\"fp\":false") == std::string::npos;
+					g_mcCreative = m.find("\"cr\":true") != std::string::npos;
 					g_mcFov = float(fov);
 					g_haveMcCamera = true;
 				}
@@ -4451,6 +4453,11 @@ namespace nc
 			DWORD nextFind = 0, nextSend = 0;
 			DWORD stunnedUntil = 0; // held still until then (0: not stunned by us)
 			float speed = 0.0f;     // his MaxWalkSpeed before the stun (given back after it)
+			UObject *projectileClass = nullptr;                   // a loose object's class (the lightest seen), this level
+			std::vector<std::pair<UObject *, DWORD>> projectiles; // thrown at him, destroyed at the time
+			int watchState = -1;                                  // his state before the last throw, logged when it changes
+			DWORD watchUntil = 0;
+			bool sensesOff = false; // creative: his controller's perception switched off
 			Vec3f last{};
 			bool sent = false;
 		} g_nbr;
@@ -4494,10 +4501,96 @@ namespace nc
 			}
 		}
 
+		/// A hit as HN's own: an object (hidden, of a loose object's class) thrown into him from Steve's side, a critical much
+		/// faster, so HN's physics and his own hit reaction decide (the stagger forward and the arm animation, or a fall).
+		/// OnStruck and a speed hold only played the sound and stopped him (the user, 2026-11-01). False: nothing to throw.
+		bool neighbor_throw(UObject *pawn, UObject *n, const NeighborHit &hit)
+		{
+			NeighborLink &N = g_nbr;
+			Call where(n, STR("K2_GetActorLocation"));
+			const Vec3f *at = where.invoke() ? where.param<Vec3f>(STR("ReturnValue")) : nullptr;
+			if (!at)
+				return false;
+			const Vec3f centre = *at;
+			if (!N.projectileClass)
+			{
+				// the lightest loose object around him (not a door or drawer, not one being carried)
+				float lightest = 1e9f;
+				for (UObject *component : physics_near(pawn, centre, 3000.0f))
+				{
+					if (hinged_part(component))
+						continue;
+					UObject *owner = owner_of(component);
+					const float mass = mass_of(component);
+					if (owner && mass > 0.0f && mass < lightest)
+						lightest = mass, N.projectileClass = owner->GetClassPrivate();
+				}
+				if (!N.projectileClass)
+					return false;
+				log(L"neighbor: hits are thrown " + N.projectileClass->GetName() + L" (" + std::to_wstring(int(lightest)) + L" kg)");
+			}
+			UObject *statics = gameplay_statics();
+			if (!statics)
+				return false;
+			// from Steve's side, at his chest, just outside his capsule
+			float dx = centre.x - g_eye.x, dy = centre.y - g_eye.y;
+			const float d = std::max(1.0f, std::hypot(dx, dy));
+			dx /= d, dy /= d;
+			const Vec3f from{centre.x - dx * 75.0f, centre.y - dy * 75.0f, centre.z + 30.0f};
+			Transform4 t;
+			t.pos[0] = from.x, t.pos[1] = from.y, t.pos[2] = from.z;
+			Call begin(statics, STR("BeginDeferredActorSpawnFromClass"));
+			begin.set<UObject *>(STR("WorldContextObject"), pawn).set<UObject *>(STR("ActorClass"), N.projectileClass).set(STR("SpawnTransform"), t)
+				.set<uint8_t>(STR("CollisionHandlingOverride"), 1).set<UObject *>(STR("Owner"), nullptr);
+			UObject **actor = begin.invoke() ? begin.param<UObject *>(STR("ReturnValue")) : nullptr;
+			if (!actor || !*actor)
+				return false;
+			UObject *object = *actor;
+			Call(statics, STR("FinishSpawningActor")).set<UObject *>(STR("Actor"), object).set(STR("SpawnTransform"), t).invoke();
+			Call(object, STR("SetActorHiddenInGame")).set_bool(STR("bNewHidden"), true).invoke();
+			Call root(object, STR("K2_GetRootComponent"));
+			UObject *const *body = root.invoke() ? root.param<UObject *>(STR("ReturnValue")) : nullptr;
+			const float speed = hit.crit ? 2500.0f : 900.0f;
+			if (body && *body)
+			{
+				Call(*body, STR("SetCastShadow")).set_bool(STR("NewCastShadow"), false).invoke();
+				Call(*body, STR("SetPhysicsLinearVelocity")).set(STR("NewVel"), Vec3f{dx * speed, dy * speed, 0.0f}).set_bool(STR("bAddToCurrent"), false)
+					.set(STR("BoneName"), NameParam{}).invoke();
+			}
+			N.projectiles.emplace_back(object, GetTickCount() + 1500);
+			N.watchState = neighbor_state(n);
+			N.watchUntil = GetTickCount() + 2000;
+			// The engine never reported the object hitting him (his state stayed put, 12:58-13:00: a 7 kg banana at 9 m/s):
+			// his own hit handler, Sosed::OnHit (UE's OnComponentHit: HitComp, OtherActor, OtherComp, NormalImpulse, Hit),
+			// is called as the engine would, with the thrown object and its impulse; a critical also makes him fall
+			// (Sosed::MixerFall)
+			const float mass = body && *body ? mass_of(*body) : 10.0f;
+			UObject **capsule = n->GetValuePtrByPropertyNameInChain<UObject *>(STR("CapsuleComponent"));
+			Call onHit(n, STR("OnHit"));
+			onHit.set<UObject *>(STR("HitComp"), capsule ? *capsule : nullptr).set<UObject *>(STR("OtherActor"), object)
+				.set<UObject *>(STR("OtherComp"), body ? *body : nullptr).set(STR("NormalImpulse"), Vec3f{dx * speed * mass, dy * speed * mass, 0.0f});
+			const bool hitOk = onHit.invoke();
+			bool fell = false;
+			if (hit.crit)
+			{
+				static bool told = false;
+				if (!told)
+					told = true, log(L"neighbor: " + signature(n, STR("MixerFall")));
+				fell = Call(n, STR("MixerFall")).invoke();
+			}
+			log(L"neighbor: hit for " + std::to_wstring(hit.damage).substr(0, 4) + (hit.crit ? L" (critical)" : L"") + L": " + object->GetName() +
+				L" thrown into him at " + std::to_wstring(int(speed)) + L" cm/s (" + std::to_wstring(int(mass)) + L" kg), OnHit " + (hitOk ? L"called" : L"failed") +
+				(hit.crit ? (fell ? L", MixerFall called" : L", MixerFall failed") : L"") + L"; state " + std::to_wstring(N.watchState));
+			return true;
+		}
+
 		void neighbor_hit(UObject *pawn, const NeighborHit &hit)
 		{
 			UObject *n = g_nbr.actor.Get();
 			if (!n)
+				return;
+			static const bool oldStun = bool(std::ifstream(module_dir() + L"neighborcraft_stun.txt"));
+			if (!oldStun && neighbor_throw(pawn, n, hit))
 				return;
 			static std::wstring chosen;
 			static bool told = false;
@@ -4540,7 +4633,7 @@ namespace nc
 			// critical twice as long, more hits adding to it. Not Sosed::SetFreeze: with it he vanished at the first hit
 			// (IsFreeze read 0 right after; his state went 2 -> 3, then 0 when released)
 			const DWORD now = GetTickCount(), length = hit.crit ? 3000 : 1500;
-			g_nbr.stunnedUntil = std::max(g_nbr.stunnedUntil, now) + (g_nbr.stunnedUntil > now ? length / 2 : length);
+			g_nbr.stunnedUntil = std::min<DWORD>(std::max(g_nbr.stunnedUntil, now) + (g_nbr.stunnedUntil > now ? length / 2 : length), now + 4000); // at most 4 s (it stacked to 9)
 			if (UObject **controller = n->GetValuePtrByPropertyNameInChain<UObject *>(STR("Controller")); controller && *controller)
 				Call(*controller, STR("StopMovement")).invoke();
 			neighbor_hold(n);
@@ -4581,6 +4674,69 @@ namespace nc
 			}
 			else if (n && N.stunnedUntil)
 				neighbor_hold(n); // every tick: his own logic may set his speed again (walk, run)
+			// the objects thrown at him go once they've hit (hidden meanwhile)
+			for (auto it = N.projectiles.begin(); it != N.projectiles.end();)
+				if (GetTickCount() >= it->second)
+				{
+					Call(it->first, STR("K2_DestroyActor")).invoke();
+					it = N.projectiles.erase(it);
+				}
+				else
+					++it;
+			// how he took it (his state's numbers: what HN does with a hit, to learn them)
+			if (n && N.watchUntil)
+			{
+				const int now = neighbor_state(n);
+				if (now != N.watchState)
+				{
+					log(L"neighbor: state " + std::to_wstring(N.watchState) + L" -> " + std::to_wstring(now));
+					N.watchState = now;
+				}
+				if (GetTickCount() >= N.watchUntil)
+					N.watchUntil = 0;
+			}
+			// creative: he doesn't perceive Steve (his controller's AI perception off), so he never chases or catches him
+			// (the first try only switched the controller's AI perception and logged nothing: he still saw and caught Steve
+			// in creative, 2026-11-01; Sosed's own sight, OnSeePawn, is Unreal's PawnSensing on the Neighbor himself)
+			if (n && g_mcCreative != N.sensesOff)
+			{
+				N.sensesOff = g_mcCreative;
+				const bool off = N.sensesOff;
+				std::wstring what;
+				UObject **controller = n->GetValuePtrByPropertyNameInChain<UObject *>(STR("Controller"));
+				UObject **perception = controller && *controller ? (*controller)->GetValuePtrByPropertyNameInChain<UObject *>(STR("PerceptionComponent")) : nullptr;
+				if (perception && *perception)
+				{
+					if (off)
+						Call(*perception, STR("Deactivate")).invoke();
+					else
+						Call(*perception, STR("Activate")).set_bool(STR("bReset"), true).invoke();
+					what += L" AI perception " + (*perception)->GetName() + L";";
+				}
+				static UObject *sensing = UObjectGlobals::StaticFindObject<UObject *>(nullptr, nullptr, STR("/Script/AIModule.PawnSensingComponent"));
+				if (sensing)
+				{
+					struct ObjectArray
+					{
+						UObject **data;
+						int32 num, max;
+					};
+					Call list(n, STR("GetComponentsByClass"));
+					list.set<UObject *>(STR("ComponentClass"), sensing);
+					const ObjectArray *a = list.invoke() ? list.param<ObjectArray>(STR("ReturnValue")) : nullptr;
+					for (int i = 0; a && i < a->num; ++i)
+						if (UObject *s = a->data[i])
+						{
+							Call(s, STR("SetSensingUpdatesEnabled")).set_bool(STR("bEnabled"), !off).invoke();
+							set_bool_property(s, STR("bSeePawns"), !off);
+							set_bool_property(s, STR("bHearNoises"), !off);
+							what += L" pawn sensing " + s->GetName() + L";";
+						}
+				}
+				if (off && controller && *controller)
+					Call(*controller, STR("StopMovement")).invoke();
+				log(std::wstring(L"neighbor: ") + (off ? L"creative: senses off:" : L"survival: senses on again:") + (what.empty() ? L" nothing found" : what));
+			}
 			if (!n || !g_driving)
 			{
 				if (N.sent)

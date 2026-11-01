@@ -42,7 +42,8 @@ public class Neighbor extends Mob {
 		super(type, level);
 		this.setNoAi(true);
 		this.setNoGravity(true);
-		this.setInvisible(true);
+		// not invisible: mobs barely see an invisible target (0.07 of their range) and ignored him (the user, 2026-11-01);
+		// he still isn't drawn (NoopRenderer) nor exported as a shadow box (ShadowExport)
 		this.setPersistenceRequired();
 		this.setSilent(true);
 	}
@@ -71,6 +72,11 @@ public class Neighbor extends Mob {
 			hitDamage = Math.max(hitDamage, amount);
 			hitSprint = player.isSprinting();
 			return true; // hit (Minecraft's swing, sound and particles), but no health lost and no knockback here
+		}
+
+		if (source.getEntity() instanceof Mob || source.getDirectEntity() != null || source.is(net.minecraft.tags.DamageTypeTags.IS_EXPLOSION)) {
+			hitDamage = Math.max(hitDamage, amount); // a mob's hit, an arrow, an explosion: the same reaction in HN
+			return true;
 		}
 
 		return false; // nothing else hurts him in Minecraft (fall, fire, suffocation in HN's world blocks)
@@ -131,6 +137,16 @@ public class Neighbor extends Mob {
 
 		if (Math.abs(entity.getBbWidth() - t[4]) > 0.01 || Math.abs(entity.getBbHeight() - t[5]) > 0.01) {
 			entity.refreshDimensions();
+		}
+
+		// hostile mobs go for him (theirs only hunt players): each second, the free ones within 24 blocks
+		if (server.getTickCount() % 20 == 0) {
+			for (net.minecraft.world.entity.monster.Monster m : level.getEntitiesOfClass(net.minecraft.world.entity.monster.Monster.class,
+				entity.getBoundingBox().inflate(24.0))) {
+				if (m.getTarget() == null || !m.getTarget().isAlive()) {
+					m.setTarget(entity);
+				}
+			}
 		}
 
 		entity.setPos(t[0], t[1], t[2]);
