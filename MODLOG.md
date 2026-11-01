@@ -830,3 +830,10 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   per unit, at most 25 m/s; up 2.5 m/s, an explosion 7) and an explosion knocks him down (MixerFall) like a critical.
   Steve's normal hit also calls his OnSeePawn with Steve's HN body (he "does not realize it"). His state names (SetState's
   enum) are logged on the first hit. Not yet seen.
+- [game] 13:17-13:20 (creative): punches alert him by themselves (OnStruck: state 0 -> 1 -> 2) and he chased HN's player
+  body, lifted 200 m, to somewhere under it ("runs to his backyard"); HN's pause view (its camera on that body) showed the
+  sky. Now the body is lifted only while he is within 4 m (creative), and put back at Steve when HN pauses. His states
+  aren't a named enum (SetState's parameter has none). Knockback seen working (launched 600 cm/s; TNT 2398 cm/s + fall).
+- Fire on him trailed behind him: the entity was placed by the server at 20 Hz and eased on the client. Now the client
+  entity is placed at HN's latest position before each frame (GameRendererMixin render HEAD -> Neighbor.snap). Burning
+  (fire, lava) counts as a hit once a second, with no push.

@@ -107,6 +107,9 @@ namespace nc
 		float g_mcLookYaw = 0, g_mcLookPitch = 0; // the look that camera was rendered for
 		bool g_mcFirstPerson = true;
 		bool g_mcCreative = false; // Minecraft's game mode is creative (mcpos "cr")
+		bool g_creativeLifted = false; // HN's player body is 200 m above Steve (creative, the Neighbor close)
+		Vec3f g_nbrFeet{};             // the Neighbor's feet (neighbor_tick), g_nbrSeen once known
+		bool g_nbrSeen = false;
 		float g_setHfov = 0;                      // the FOV last given to HN's camera (horizontal degrees)
 
 		// Minecraft's process (from its hello): its window is hidden, and it can be started from here
@@ -4766,6 +4769,7 @@ namespace nc
 			if (N.level != level_key(pc))
 			{
 				N = NeighborLink{};
+				g_nbrSeen = false;
 				N.level = level_key(pc);
 			}
 			UObject *n = N.actor.Get();
@@ -4906,6 +4910,7 @@ namespace nc
 					half = *v;
 			}
 			const Vec3f feet{at->x, at->y, at->z - half};
+			g_nbrFeet = feet, g_nbrSeen = true;
 			const bool moved = std::hypot(feet.x - N.last.x, feet.y - N.last.y, feet.z - N.last.z) > 0.5f;
 			if (!moved && N.sent && GetTickCount() < N.nextSend)
 				return;
@@ -7171,6 +7176,12 @@ namespace nc
 		if (wasGameplay && !gameplay && pc)
 			centre_cursor(pc);
 		wasGameplay = gameplay;
+		if (!gameplay && g_creativeLifted && pawn)
+		{
+			// paused while the body was lifted (creative): back at Steve, where HN's pause view looks from
+			g_creativeLifted = false;
+			set_actor_location(pawn, Vec3f{g_lastPlaced.x, g_lastPlaced.y, g_lastPlaced.z - 20000.0f});
+		}
 		// Minecraft pauses whenever HN isn't in gameplay (pause menu, main menu) or the passthrough is off
 		static bool mcPaused = false;
 		if (!g_ws.connected())
@@ -7517,10 +7528,14 @@ namespace nc
 					steve_capsule(pawn);
 					target = {g_feet.x, g_feet.y, g_feet.z + std::max(g_steveHeight, g_steveWidth) * 0.5f};
 				}
-				// creative: HN's player body far above, out of the Neighbor's reach: his catch is his own (Sosed::OnCatchPlayer)
-				// and caught Steve even with HN's invisibility on (the user, 2026-11-01); HN's movement is off while Minecraft
-				// drives, so it just stays there. HN's own triggers for the player don't fire meanwhile
-				if (g_mcCreative)
+				// creative: HN's player body out of the Neighbor's reach while he is close: his catch is his own
+				// (Sosed::OnCatchPlayer) and caught Steve even with HN's invisibility on (the user, 2026-11-01). Only while he
+				// is within 4 m: lifted all the time, he chased it to wherever was under it and ran to his backyard, and the
+				// pause view (HN's own camera, on that body) showed the sky (the user). HN's movement is off while
+				// Minecraft drives, so the body just stays where it is put
+				g_creativeLifted = g_mcCreative && g_nbrSeen &&
+								   std::hypot(g_nbrFeet.x - g_feet.x, g_nbrFeet.y - g_feet.y, g_nbrFeet.z - g_feet.z) < 400.0f;
+				if (g_creativeLifted)
 					target.z += 20000.0f;
 				set_actor_location(pawn, target);
 				// HN's own camera component (where HN's action key looks from) at Steve's eyes, so HN uses the object

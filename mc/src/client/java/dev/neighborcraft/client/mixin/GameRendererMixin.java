@@ -83,6 +83,22 @@ abstract class GameRendererMixin {
 		dev.neighborcraft.client.CarryHand.hudFov = camera.hudFov;
 	}
 
+	/**
+	 * Before the frame: the Neighbor's entity exactly where HN's Neighbor is now, not where the server last put it and the
+	 * client then eased it to (a few ticks behind: the fire on him trailed behind him, the user, 2026-11-01).
+	 */
+	@Inject(method = "render", at = @At("HEAD"))
+	private void passthrough$neighbor(final CallbackInfo ci) {
+		net.minecraft.client.multiplayer.ClientLevel level = net.minecraft.client.Minecraft.getInstance().level;
+		if (level != null) {
+			for (net.minecraft.world.entity.Entity e : level.entitiesForRendering()) {
+				if (e instanceof dev.neighborcraft.Neighbor) {
+					dev.neighborcraft.Neighbor.snap(e);
+				}
+			}
+		}
+	}
+
 	@Inject(method = "render", at = @At("TAIL"))
 	private void passthrough$captureOverlay(final CallbackInfo ci) {
 		FrameExporter.captureOverlay(this.mainRenderTarget);

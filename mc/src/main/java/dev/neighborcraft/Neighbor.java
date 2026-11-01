@@ -39,7 +39,9 @@ public class Neighbor extends Mob {
 	private static boolean hitSprint;
 	/** Its knockback: direction (x, z, unit) and Minecraft's strength; whether an explosion; whether Steve's. */
 	private static double hitKx, hitKz, hitK;
-	private static boolean hitBoom, hitPlayer;
+	private static boolean hitBoom, hitPlayer, hitBurn;
+	/** The game time he last took fire damage as a hit (fire hurts every tick or so: once a second is enough). */
+	private static long lastBurn = -100;
 
 	public Neighbor(final EntityType<? extends Neighbor> type, final Level level) {
 		super(type, level);
@@ -63,6 +65,21 @@ public class Neighbor extends Mob {
 		target = t;
 	}
 
+	/** Client, each frame: the entity exactly at HN's Neighbor (old positions too: no easing between frames). */
+	public static void snap(final Entity e) {
+		double[] t = target;
+		if (t == null) {
+			return;
+		}
+
+		e.setPos(t[0], t[1], t[2]);
+		e.xo = e.xOld = t[0];
+		e.yo = e.yOld = t[1];
+		e.zo = e.zOld = t[2];
+		e.setYRot((float) t[3]);
+		e.yRotO = (float) t[3];
+	}
+
 	@Override
 	public EntityDimensions getDefaultDimensions(final Pose pose) {
 		double[] t = target;
@@ -73,8 +90,20 @@ public class Neighbor extends Mob {
 	public boolean hurtServer(final ServerLevel level, final DamageSource source, final float amount) {
 		boolean boom = source.is(net.minecraft.tags.DamageTypeTags.IS_EXPLOSION);
 		boolean player = source.getEntity() instanceof Player;
+		if (source.is(net.minecraft.tags.DamageTypeTags.IS_FIRE) && source.getEntity() == null && source.getDirectEntity() == null) {
+			// burning (fire, lava, a flame's ticks): a hit with no push, at most once a second (the user: "fire burns him")
+			if (level.getGameTime() - lastBurn >= 20) {
+				lastBurn = level.getGameTime();
+				hitDamage = Math.max(hitDamage, amount);
+				hitPlayer = false;
+				hitBurn = true;
+			}
+
+			return true;
+		}
+
 		if (!player && !boom && !(source.getEntity() instanceof Mob) && source.getDirectEntity() == null) {
-			return false; // nothing else hurts him in Minecraft (fall, fire, suffocation in HN's world blocks)
+			return false; // nothing else hurts him in Minecraft (falls, suffocation in HN's world blocks)
 		}
 
 		// a hit (Minecraft's swing, sound and particles), no health lost here; HN plays it and pushes him (knockback as
@@ -132,14 +161,15 @@ public class Neighbor extends Mob {
 	public static void tick(final MinecraftServer server) {
 		if (hitDamage >= 0.0F) {
 			Passthrough.events.accept(String.format(Locale.ROOT,
-				"{\"t\":\"nhit\",\"dmg\":%.2f,\"crit\":%b,\"sprint\":%b,\"kx\":%.3f,\"kz\":%.3f,\"k\":%.3f,\"boom\":%b,\"player\":%b}",
-				hitDamage, hitCrit, hitSprint, hitKx, hitKz, hitK, hitBoom, hitPlayer));
+				"{\"t\":\"nhit\",\"dmg\":%.2f,\"crit\":%b,\"sprint\":%b,\"kx\":%.3f,\"kz\":%.3f,\"k\":%.3f,\"boom\":%b,\"player\":%b,\"burn\":%b}",
+				hitDamage, hitCrit, hitSprint, hitKx, hitKz, hitK, hitBoom, hitPlayer, hitBurn));
 			Passthrough.LOG.info("neighbor: hit for {} ({}{}{}), knockback {}", hitDamage, hitCrit ? "critical" : "normal", hitSprint ? ", sprinting" : "",
 				hitBoom ? ", explosion" : hitPlayer ? "" : ", not the player", String.format(Locale.ROOT, "%.2f", hitK));
 			hitDamage = -1.0F;
 			hitCrit = false;
 			hitSprint = false;
 			hitBoom = false;
+			hitBurn = false;
 			hitK = 0.0;
 		}
 
