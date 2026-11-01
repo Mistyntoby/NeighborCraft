@@ -816,3 +816,9 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   explosions on him count as hits.
 - Skeletons burned under HN's roof: host blocks don't block sky light. MobMixin: HN geometry above a mob's head means no
   sun burn. Not yet seen.
+- [game] 13:04-13:07: crits fall exactly (MixerFall, state 0 -> 2); normal hits don't: OnHit is called but his state
+  never changes. Skeleton arrows reach HN as hits (3-4 damage) but end the same way. Creative: "senses off: nothing found":
+  no AI perception, no PawnSensing on him: his sight is HN's own (IsVisibleHuman). Now a normal hit also calls OnStruck and
+  plays a hit montage directly (PlayAnimMontage; the loaded montages with a hit-like name logged on the first hit, his own
+  preferred; dlls/neighborcraft_hitanim.txt names another). Creative turns on HN's own invisibility (Human::SetInvisibility,
+  m_bInvisibility: the power-up's), kept on while creative. Not yet seen.

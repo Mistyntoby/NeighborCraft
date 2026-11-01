@@ -4501,6 +4501,51 @@ namespace nc
 			}
 		}
 
+		/// His hit animation (an AnimMontage), played on him; its name, or "" if none. Which montage is his hit isn't known
+		/// yet: the first time, the loaded montages with a hit-like name are logged and the best guess is taken (his own
+		/// first: "Sosed"/"Neighbor" in the name); dlls/neighborcraft_hitanim.txt names another.
+		std::wstring neighbor_hit_anim(UObject *n)
+		{
+			static UObject *montage = nullptr;
+			static bool chosen = false;
+			if (!chosen)
+			{
+				chosen = true;
+				std::wstring wanted;
+				std::wifstream file(module_dir() + L"neighborcraft_hitanim.txt");
+				std::getline(file, wanted);
+				auto lower = [](std::wstring s) {
+					for (wchar_t &c : s)
+						c = wchar_t(towlower(c));
+					return s;
+				};
+				int best = 0, listed = 0;
+				for (UObject *m : find_all(L"AnimMontage"))
+				{
+					const std::wstring name = m->GetName(), l = lower(name);
+					int score = 0;
+					for (const wchar_t *k : {L"struck", L"hit", L"stun", L"hurt", L"pain", L"punch", L"kick", L"damage"})
+						if (l.find(k) != std::wstring::npos)
+							score = std::max(score, 2);
+					if (score && (l.find(L"sosed") != std::wstring::npos || l.find(L"neighbo") != std::wstring::npos))
+						score += 2;
+					if (!wanted.empty())
+						score = name == wanted ? 100 : 0;
+					if (score && listed++ < 40)
+						log(L"neighbor: hit animation candidate " + m->GetFullName());
+					if (score > best)
+						best = score, montage = m;
+				}
+				log(L"neighbor: hit animation: " + (montage ? montage->GetFullName() : std::wstring(L"none found")));
+			}
+			if (!montage)
+				return L"";
+			Call play(n, STR("PlayAnimMontage"));
+			play.set<UObject *>(STR("AnimMontage"), montage).set(STR("InPlayRate"), 1.0f).set(STR("StartSectionName"), NameParam{});
+			const float *length = play.invoke() ? play.param<float>(STR("ReturnValue")) : nullptr;
+			return montage->GetName() + L" (" + (length && *length > 0.0f ? std::to_wstring(*length).substr(0, 4) + L" s)" : std::wstring(L"not played)"));
+		}
+
 		/// A hit as HN's own: an object (hidden, of a loose object's class) thrown into him from Steve's side, a critical much
 		/// faster, so HN's physics and his own hit reaction decide (the stagger forward and the arm animation, or a fall).
 		/// OnStruck and a speed hold only played the sound and stopped him (the user, 2026-11-01). False: nothing to throw.
@@ -4578,9 +4623,18 @@ namespace nc
 					told = true, log(L"neighbor: " + signature(n, STR("MixerFall")));
 				fell = Call(n, STR("MixerFall")).invoke();
 			}
+			// a normal hit: OnHit did nothing for him (state unchanged, the user: "regular punches don't", 13:05-13:07; crits
+			// fell as they should). His struck reaction (OnStruck: the sound) and a hit animation of his, played directly
+			std::wstring anim;
+			if (!hit.crit)
+			{
+				Call(n, STR("OnStruck")).invoke();
+				anim = neighbor_hit_anim(n);
+			}
 			log(L"neighbor: hit for " + std::to_wstring(hit.damage).substr(0, 4) + (hit.crit ? L" (critical)" : L"") + L": " + object->GetName() +
 				L" thrown into him at " + std::to_wstring(int(speed)) + L" cm/s (" + std::to_wstring(int(mass)) + L" kg), OnHit " + (hitOk ? L"called" : L"failed") +
-				(hit.crit ? (fell ? L", MixerFall called" : L", MixerFall failed") : L"") + L"; state " + std::to_wstring(N.watchState));
+				(hit.crit ? (fell ? L", MixerFall called" : L", MixerFall failed") : L", OnStruck, " + (anim.empty() ? std::wstring(L"no hit animation") : anim)) +
+				L"; state " + std::to_wstring(N.watchState));
 			return true;
 		}
 
@@ -4733,9 +4787,37 @@ namespace nc
 							what += L" pawn sensing " + s->GetName() + L";";
 						}
 				}
+				// neither exists on him (the first try's log: "nothing found"): his sight is HN's own code, which ignores a player
+				// with HN's invisibility (Human::SetInvisibility, the power-up's): that is what counts
+				if (UFunction *f = pawn ? pawn->GetFunctionByNameInChain(STR("SetInvisibility")) : nullptr)
+				{
+					Call inv(pawn, STR("SetInvisibility"));
+					for (FProperty *p : f->ForEachProperty())
+						if (p->GetSize() == 1)
+						{
+							*(inv.data() + p->GetOffset_Internal()) = off ? 1 : 0;
+							break;
+						}
+					inv.invoke();
+					bool now = false;
+					get_bool_property(pawn, STR("m_bInvisibility"), now);
+					what += L" HN's invisibility " + std::wstring(now ? L"on" : L"off") + L" (" + signature(pawn, STR("SetInvisibility")) + L");";
+				}
 				if (off && controller && *controller)
 					Call(*controller, STR("StopMovement")).invoke();
 				log(std::wstring(L"neighbor: ") + (off ? L"creative: senses off:" : L"survival: senses on again:") + (what.empty() ? L" nothing found" : what));
+			}
+			else if (n && N.sensesOff && pawn)
+			{
+				// HN's invisibility is a timed power-up: kept on while creative
+				bool now = true;
+				if (get_bool_property(pawn, STR("m_bInvisibility"), now) && !now)
+				{
+					N.sensesOff = false; // the switch above runs again next tick
+					static int told = 0;
+					if (told++ < 5)
+						log(L"neighbor: HN's invisibility ran out: on again");
+				}
 			}
 			if (!n || !g_driving)
 			{
