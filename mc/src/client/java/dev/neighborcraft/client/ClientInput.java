@@ -119,6 +119,10 @@ final class ClientInput {
 				}
 
 				if (key != null) {
+					if (k.equals("swap") && down) {
+						Passthrough.LOG.info("keys: offhand swap from the host (screen {})", minecraft.gui.screen() == null ? "-" : minecraft.gui.screen().getClass().getSimpleName());
+					}
+
 					if (down && !key.isDown()) {
 						KeyMappingAccessor access = (KeyMappingAccessor)key;
 						access.passthrough$setClickCount(access.passthrough$getClickCount() + 1);

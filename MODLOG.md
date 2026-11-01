@@ -854,3 +854,13 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   loads: an Actor spawned deferred, a ProceduralMeshComponent constructed with it as outer and made its root before the
   spawn finishes, a 1 m grey square with collision 3 m ahead for 60 s; logs registered before/after, the section, and
   whether a trace hits it). Not yet run.
+- [game] 13:3x phase A results: census: StaticMeshComponent 1519 (470 static, 1049 movable), Instanced 75, HISM 6,
+  LandscapeComponent 225 (127 quads each, one Landscape_1), BrushComponent 15, BSP/Model 0, Destructible 0, Spline 92;
+  374 mesh assets, 0 with bAllowCPUAccess. Targets: the lawn/road ground = LandscapeHeightfieldCollisionComponent of
+  Landscape_1; each house is ONE static mesh (Childhood_House, Act1_Neighbor_House, 5 and 10 materials); fences/carpets
+  instanced (fence_1 x39). The mesh test: the ProceduralMeshComponent was constructed and its section made (sections 1),
+  but IsRegistered couldn't be read (-1: not callable here) and a trace ahead hit the TV stand, not the square: whether
+  it was drawn and solid is the user's to say. Conclusion so far: no HN mesh can be read or cut at runtime (no CPU access,
+  houses are single meshes); only the landscape could be replaced tile by tile, if a runtime procedural mesh is drawn.
+- Fishing rod: pushes reached HN (7.5-9 m/s launches) but his ground friction and own walking ate them: now 1.6x and at
+  least 3.5 m/s up, off the ground. Offhand swaps: only F reaches Minecraft's swap; both sides now log each swap.

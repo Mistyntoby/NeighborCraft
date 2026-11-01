@@ -3405,7 +3405,13 @@ namespace nc
 		void forward_key(int vk, const char *key)
 		{
 			if (const int e = edge(vk))
+			{
 				sendf("{\"t\":\"key\",\"k\":\"%s\",\"down\":%s}", key, e > 0 ? "true" : "false");
+				// items "randomly" went to the offhand (the user, 2026-11-01): every swap press logged, with what HN saw
+				if (vk == 'F' && e > 0)
+					log(L"keys: F pressed (offhand swap sent); focused " + std::to_wstring(game_focused()) + L", Minecraft screen " +
+						std::to_wstring(g_minecraftScreen));
+			}
 		}
 
 		// ---- Minecraft's controls inside HN's window ---------------------------------------------------------
@@ -4808,7 +4814,10 @@ namespace nc
 			for (const Vec3f &v : g_neighborPushes)
 				if (n)
 				{
-					Call(n, STR("LaunchCharacter")).set(STR("LaunchVelocity"), v).set_bool(STR("bXYOverride"), true).set_bool(STR("bZOverride"), true).invoke();
+					// off the ground and harder: on it, his ground friction and his own walking ate an 8 m/s pull at once (the
+					// user: "the fishing rod barely moves him")
+					const Vec3f lift{v.x * 1.6f, v.y * 1.6f, std::max(v.z * 1.6f, 350.0f)};
+					Call(n, STR("LaunchCharacter")).set(STR("LaunchVelocity"), lift).set_bool(STR("bXYOverride"), true).set_bool(STR("bZOverride"), true).invoke();
 					log(L"neighbor: pushed by Minecraft, " + std::to_wstring(int(std::hypot(v.x, v.y, v.z))) + L" cm/s");
 				}
 			g_neighborPushes.clear();
