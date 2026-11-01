@@ -800,3 +800,7 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   TransactionId, SparkCost). Now also SetFreeze(true) for 1.5 s (critical 3 s), GetState/IsFreeze logged. Crits came as
   "normal" (10.5 = 7 x 1.5): 26.3's attack applies 1.5x inline when canCriticalAttack(target) is true and never calls
   Player.crit; hooked canCriticalAttack's return instead.
+- [game] 12:46: the Neighbor vanished at the first hit with SetFreeze(true) (IsFreeze still 0 right after; state 2 -> 3
+  after OnStruck, 0 when released). SetFreeze is out; a stun now holds his CharacterMovement.MaxWalkSpeed at 0 (every
+  tick, his own value given back after) and stops his controller's movement. Creative couldn't fly: PlayerSync took
+  flying/mayfly every tick while Minecraft drives; now only in survival and adventure.

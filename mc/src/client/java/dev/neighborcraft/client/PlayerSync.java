@@ -93,9 +93,10 @@ public final class PlayerSync {
 		}
 
 		if (p.drive()) {
-			// walking, not creative flight: jumps, falls and critical hits work as in survival
+			// walking, not the flight the host-driven mode gave him: jumps, falls and critical hits work as in survival.
+			// Creative and spectator keep their own flight (it was taken every tick: the user couldn't fly, 2026-11-01)
 			Abilities abilities = player.getAbilities();
-			if (abilities.flying || abilities.mayfly) {
+			if (!player.isCreative() && !player.isSpectator() && (abilities.flying || abilities.mayfly)) {
 				abilities.flying = false;
 				abilities.mayfly = false;
 				player.onUpdateAbilities();

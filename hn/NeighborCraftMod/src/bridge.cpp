@@ -4449,7 +4449,8 @@ namespace nc
 			UObject *level = nullptr; // level_key
 			WeakRef actor;
 			DWORD nextFind = 0, nextSend = 0;
-			DWORD stunnedUntil = 0; // SetFreeze(true) until then (0: not stunned by us)
+			DWORD stunnedUntil = 0; // held still until then (0: not stunned by us)
+			float speed = 0.0f;     // his MaxWalkSpeed before the stun (given back after it)
 			Vec3f last{};
 			bool sent = false;
 		} g_nbr;
@@ -4477,11 +4478,20 @@ namespace nc
 			const uint8_t *v = s.invoke() ? s.param<uint8_t>(STR("ReturnValue")) : nullptr;
 			return v ? int(*v) : -1;
 		}
-		int neighbor_frozen(UObject *n)
+		float *neighbor_speed(UObject *n)
 		{
-			Call s(n, STR("IsFreeze"));
-			const uint8_t *v = s.invoke() ? s.param<uint8_t>(STR("ReturnValue")) : nullptr;
-			return v ? int(*v) : -1;
+			UObject *movement = movement_component(n);
+			return movement ? movement->GetValuePtrByPropertyNameInChain<float>(STR("MaxWalkSpeed")) : nullptr;
+		}
+
+		/// Stunned: he can't walk (his speed 0, the one he had kept to give back; any he sets meanwhile is newer).
+		void neighbor_hold(UObject *n)
+		{
+			if (float *speed = neighbor_speed(n); speed && *speed > 0.0f)
+			{
+				g_nbr.speed = *speed;
+				*speed = 0.0f;
+			}
 		}
 
 		void neighbor_hit(UObject *pawn, const NeighborHit &hit)
@@ -4526,14 +4536,17 @@ namespace nc
 					}
 			const int before = neighbor_state(n);
 			const bool ok = c.invoke();
-			// OnStruck alone played his stun sound but he ran on (the user, 2026-11-01): he is also frozen for the stun, a
-			// critical twice as long, more hits adding to it
+			// OnStruck alone played his stun sound but he ran on (the user, 2026-11-01): he also can't walk for the stun, a
+			// critical twice as long, more hits adding to it. Not Sosed::SetFreeze: with it he vanished at the first hit
+			// (IsFreeze read 0 right after; his state went 2 -> 3, then 0 when released)
 			const DWORD now = GetTickCount(), length = hit.crit ? 3000 : 1500;
 			g_nbr.stunnedUntil = std::max(g_nbr.stunnedUntil, now) + (g_nbr.stunnedUntil > now ? length / 2 : length);
-			Call(n, STR("SetFreeze")).set_bool(STR("bFreeze"), true).invoke();
+			if (UObject **controller = n->GetValuePtrByPropertyNameInChain<UObject *>(STR("Controller")); controller && *controller)
+				Call(*controller, STR("StopMovement")).invoke();
+			neighbor_hold(n);
 			log(L"neighbor: hit for " + std::to_wstring(hit.damage).substr(0, 4) + (hit.crit ? L" (critical)" : L"") + L": " + fn + (ok ? L" called" : L" failed") +
-				L", frozen for " + std::to_wstring(int(g_nbr.stunnedUntil - now)) + L" ms; state " + std::to_wstring(before) + L" -> " +
-				std::to_wstring(neighbor_state(n)) + L", IsFreeze " + std::to_wstring(neighbor_frozen(n)));
+				L", held for " + std::to_wstring(int(g_nbr.stunnedUntil - now)) + L" ms (his speed was " + std::to_wstring(int(g_nbr.speed)) + L"); state " +
+				std::to_wstring(before) + L" -> " + std::to_wstring(neighbor_state(n)));
 		}
 
 		void neighbor_tick(UObject *pc, UObject *pawn)
@@ -4561,9 +4574,13 @@ namespace nc
 			if (n && N.stunnedUntil && GetTickCount() >= N.stunnedUntil)
 			{
 				N.stunnedUntil = 0;
-				Call(n, STR("SetFreeze")).set_bool(STR("bFreeze"), false).invoke();
-				log(L"neighbor: stun over; state " + std::to_wstring(neighbor_state(n)) + L", IsFreeze " + std::to_wstring(neighbor_frozen(n)));
+				if (float *speed = neighbor_speed(n); speed && N.speed > 0.0f)
+					*speed = N.speed;
+				N.speed = 0.0f;
+				log(L"neighbor: stun over; state " + std::to_wstring(neighbor_state(n)));
 			}
+			else if (n && N.stunnedUntil)
+				neighbor_hold(n); // every tick: his own logic may set his speed again (walk, run)
 			if (!n || !g_driving)
 			{
 				if (N.sent)
