@@ -3107,6 +3107,9 @@ namespace nc
 		{
 			float damage;
 			bool crit;
+			float kx = 0.0f, kz = 0.0f, k = 0.0f; // knockback: direction (Minecraft x, z) and Minecraft's strength
+			bool boom = false;                     // an explosion
+			bool player = true;                    // Steve's (else a mob's, an arrow's)
 		};
 		std::vector<NeighborHit> g_neighborHits; // Minecraft's hits on its Neighbor entity (mc Neighbor.java), next tick
 
@@ -3231,7 +3234,13 @@ namespace nc
 			{
 				double damage = 1.0;
 				json_number(m, "dmg", damage);
-				g_neighborHits.push_back({float(damage), m.find("\"crit\":true") != std::string::npos});
+				NeighborHit hit{float(damage), m.find("\"crit\":true") != std::string::npos};
+				double kx = 0.0, kz = 0.0, k = 0.0;
+				json_number(m, "kx", kx), json_number(m, "kz", kz), json_number(m, "k", k);
+				hit.kx = float(kx), hit.kz = float(kz), hit.k = float(k);
+				hit.boom = m.find("\"boom\":true") != std::string::npos;
+				hit.player = m.find("\"player\":false") == std::string::npos;
+				g_neighborHits.push_back(hit);
 			}
 			else if (m.find("\"t\":\"punch\"") != std::string::npos)
 			{
@@ -4501,6 +4510,32 @@ namespace nc
 			}
 		}
 
+		/// The names of his states (Sosed::SetState's enum), once, so the log's numbers can be read.
+		void log_neighbor_states(UObject *n)
+		{
+			static bool told = false;
+			if (told)
+				return;
+			told = true;
+			UFunction *f = n->GetFunctionByNameInChain(STR("SetState"));
+			if (!f)
+			{
+				log(L"neighbor: his states: SetState not found");
+				return;
+			}
+			for (FProperty *p : f->ForEachProperty())
+			{
+				FByteProperty *b = CastField<FByteProperty>(p);
+				UEnum *e = b ? b->GetEnum().Get() : nullptr;
+				std::wstring names;
+				if (e)
+					for (const auto &pair : e->ForEachName())
+						names += L" " + std::to_wstring(pair.Value) + L"=" + pair.Key.ToString();
+				log(L"neighbor: his states:" + (names.empty() ? std::wstring(L" (no enum)") : names));
+				return;
+			}
+		}
+
 		/// His hit animation (an AnimMontage), played on him; its name, or "" if none. Which montage is his hit isn't known
 		/// yet: the first time, the loaded montages with a hit-like name are logged and the best guess is taken (his own
 		/// first: "Sosed"/"Neighbor" in the name); dlls/neighborcraft_hitanim.txt names another.
@@ -4609,6 +4644,7 @@ namespace nc
 			// his own hit handler, Sosed::OnHit (UE's OnComponentHit: HitComp, OtherActor, OtherComp, NormalImpulse, Hit),
 			// is called as the engine would, with the thrown object and its impulse; a critical also makes him fall
 			// (Sosed::MixerFall)
+			log_neighbor_states(n);
 			const float mass = body && *body ? mass_of(*body) : 10.0f;
 			UObject **capsule = n->GetValuePtrByPropertyNameInChain<UObject *>(STR("CapsuleComponent"));
 			Call onHit(n, STR("OnHit"));
@@ -4616,7 +4652,8 @@ namespace nc
 				.set<UObject *>(STR("OtherComp"), body ? *body : nullptr).set(STR("NormalImpulse"), Vec3f{dx * speed * mass, dy * speed * mass, 0.0f});
 			const bool hitOk = onHit.invoke();
 			bool fell = false;
-			if (hit.crit)
+			const bool down = hit.crit || hit.boom; // knocked over: a critical, an explosion
+			if (down)
 			{
 				static bool told = false;
 				if (!told)
@@ -4626,14 +4663,41 @@ namespace nc
 			// a normal hit: OnHit did nothing for him (state unchanged, the user: "regular punches don't", 13:05-13:07; crits
 			// fell as they should). His struck reaction (OnStruck: the sound) and a hit animation of his, played directly
 			std::wstring anim;
-			if (!hit.crit)
+			if (!down)
 			{
 				Call(n, STR("OnStruck")).invoke();
 				anim = neighbor_hit_anim(n);
+				// Steve's hit: he knows who did it (his sight's own event with Steve's HN body; not in creative). The
+				// punch played only the sound and he "does not realize it" (the user, 2026-11-01)
+				if (hit.player && !g_mcCreative && pawn)
+					if (UFunction *f = n->GetFunctionByNameInChain(STR("OnSeePawn")))
+					{
+						static bool told = false;
+						if (!told)
+							told = true, log(L"neighbor: " + signature(n, STR("OnSeePawn")));
+						Call see(n, STR("OnSeePawn"));
+						for (FProperty *p : f->ForEachProperty())
+							if (p->GetSize() == 8)
+							{
+								std::memcpy(see.data() + p->GetOffset_Internal(), &pawn, sizeof(pawn));
+								break;
+							}
+						see.invoke();
+					}
+			}
+			// Minecraft's knockback as a launch: a push for a punch or a mob's hit, a hard one for an explosion (with the fall)
+			Vec3f launch{};
+			if (hit.k > 0.0f)
+			{
+				const float h = std::min(hit.k * 1500.0f, 2500.0f), up = hit.boom ? 700.0f : 250.0f;
+				launch = Vec3f{hit.kx * h, hit.kz * h, up};
+				Call(n, STR("LaunchCharacter")).set(STR("LaunchVelocity"), launch).set_bool(STR("bXYOverride"), true).set_bool(STR("bZOverride"), true).invoke();
 			}
 			log(L"neighbor: hit for " + std::to_wstring(hit.damage).substr(0, 4) + (hit.crit ? L" (critical)" : L"") + L": " + object->GetName() +
 				L" thrown into him at " + std::to_wstring(int(speed)) + L" cm/s (" + std::to_wstring(int(mass)) + L" kg), OnHit " + (hitOk ? L"called" : L"failed") +
-				(hit.crit ? (fell ? L", MixerFall called" : L", MixerFall failed") : L", OnStruck, " + (anim.empty() ? std::wstring(L"no hit animation") : anim)) +
+				(down ? (fell ? L", MixerFall called" : L", MixerFall failed") : L", OnStruck, " + (anim.empty() ? std::wstring(L"no hit animation") : anim)) +
+				(hit.boom ? L", explosion" : L"") + (hit.player ? L"" : L", not Steve's") +
+				(hit.k > 0.0f ? L", launched " + std::to_wstring(int(std::hypot(launch.x, launch.y))) + L" cm/s" : L"") +
 				L"; state " + std::to_wstring(N.watchState));
 			return true;
 		}
@@ -7453,6 +7517,11 @@ namespace nc
 					steve_capsule(pawn);
 					target = {g_feet.x, g_feet.y, g_feet.z + std::max(g_steveHeight, g_steveWidth) * 0.5f};
 				}
+				// creative: HN's player body far above, out of the Neighbor's reach: his catch is his own (Sosed::OnCatchPlayer)
+				// and caught Steve even with HN's invisibility on (the user, 2026-11-01); HN's movement is off while Minecraft
+				// drives, so it just stays there. HN's own triggers for the player don't fire meanwhile
+				if (g_mcCreative)
+					target.z += 20000.0f;
 				set_actor_location(pawn, target);
 				// HN's own camera component (where HN's action key looks from) at Steve's eyes, so HN uses the object
 				// the interaction ray picked, not a neighbour (it sat 8 cm lower, and without Minecraft's look offset)

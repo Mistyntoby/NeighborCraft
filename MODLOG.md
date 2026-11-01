@@ -822,3 +822,11 @@ shown with F6) while the user was away. Evidence: screenshots 18:1x-18:2x, UE4SS
   plays a hit montage directly (PlayAnimMontage; the loaded montages with a hit-like name logged on the first hit, his own
   preferred; dlls/neighborcraft_hitanim.txt names another). Creative turns on HN's own invisibility (Human::SetInvisibility,
   m_bInvisibility: the power-up's), kept on while creative. Not yet seen.
+- [game] 13:10-13:12: "hit animation: none found" (no loaded AnimMontage has a hit-like name: his stagger isn't a
+  montage); HN's invisibility was on ("SetInvisibility(Invisibility)") and he still caught Steve: the catch is his own
+  (Sosed::OnCatchPlayer), not his sight. Now: in creative HN's player body is kept 200 m above Steve (HN's movement is off
+  while Minecraft drives), out of his reach. Knockback: Minecraft sends each hit's direction and strength (0.4, sprint
+  +0.5, a mob's ATTACK_KNOCKBACK; an explosion 0.3 + damage/8, at most 1.6); HN launches him (LaunchCharacter, 1500 cm/s
+  per unit, at most 25 m/s; up 2.5 m/s, an explosion 7) and an explosion knocks him down (MixerFall) like a critical.
+  Steve's normal hit also calls his OnSeePawn with Steve's HN body (he "does not realize it"). His state names (SetState's
+  enum) are logged on the first hit. Not yet seen.

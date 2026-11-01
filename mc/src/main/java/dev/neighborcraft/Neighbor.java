@@ -37,6 +37,9 @@ public class Neighbor extends Mob {
 	private static float hitDamage = -1.0F;
 	private static boolean hitCrit;
 	private static boolean hitSprint;
+	/** Its knockback: direction (x, z, unit) and Minecraft's strength; whether an explosion; whether Steve's. */
+	private static double hitKx, hitKz, hitK;
+	private static boolean hitBoom, hitPlayer;
 
 	public Neighbor(final EntityType<? extends Neighbor> type, final Level level) {
 		super(type, level);
@@ -68,18 +71,39 @@ public class Neighbor extends Mob {
 
 	@Override
 	public boolean hurtServer(final ServerLevel level, final DamageSource source, final float amount) {
-		if (source.getEntity() instanceof Player player) {
-			hitDamage = Math.max(hitDamage, amount);
-			hitSprint = player.isSprinting();
-			return true; // hit (Minecraft's swing, sound and particles), but no health lost and no knockback here
+		boolean boom = source.is(net.minecraft.tags.DamageTypeTags.IS_EXPLOSION);
+		boolean player = source.getEntity() instanceof Player;
+		if (!player && !boom && !(source.getEntity() instanceof Mob) && source.getDirectEntity() == null) {
+			return false; // nothing else hurts him in Minecraft (fall, fire, suffocation in HN's world blocks)
 		}
 
-		if (source.getEntity() instanceof Mob || source.getDirectEntity() != null || source.is(net.minecraft.tags.DamageTypeTags.IS_EXPLOSION)) {
-			hitDamage = Math.max(hitDamage, amount); // a mob's hit, an arrow, an explosion: the same reaction in HN
-			return true;
+		// a hit (Minecraft's swing, sound and particles), no health lost here; HN plays it and pushes him (knockback as
+		// Minecraft's: 0.4, more for a sprinting player or a mob's knockback; an explosion by its damage). The user:
+		// "explosions should knock him down, mobs give him knockback" (2026-11-01)
+		double strength = 0.4;
+		if (source.getEntity() instanceof Player p) {
+			hitSprint = p.isSprinting();
+			strength += hitSprint ? 0.5 : 0.0;
+		} else if (source.getEntity() instanceof Mob m && source.getDirectEntity() == m) {
+			strength += m.getAttributeValue(Attributes.ATTACK_KNOCKBACK);
 		}
 
-		return false; // nothing else hurts him in Minecraft (fall, fire, suffocation in HN's world blocks)
+		if (boom) {
+			strength = Math.min(1.6, 0.3 + amount / 8.0);
+		}
+
+		net.minecraft.world.phys.Vec3 from = source.getSourcePosition();
+		double dx = from != null ? this.getX() - from.x : 0.0, dz = from != null ? this.getZ() - from.z : 0.0, d = Math.hypot(dx, dz);
+		if (amount >= hitDamage || boom) {
+			hitKx = d > 1.0E-4 ? dx / d : 0.0;
+			hitKz = d > 1.0E-4 ? dz / d : 0.0;
+			hitK = d > 1.0E-4 ? strength : 0.0;
+			hitBoom |= boom;
+			hitPlayer = player;
+		}
+
+		hitDamage = Math.max(hitDamage, amount);
+		return true;
 	}
 
 	@Override
@@ -107,10 +131,16 @@ public class Neighbor extends Mob {
 	/** Server thread, end of each tick: the entity follows HN's Neighbor; a hit this tick goes to HN. */
 	public static void tick(final MinecraftServer server) {
 		if (hitDamage >= 0.0F) {
-			Passthrough.events.accept(String.format(Locale.ROOT, "{\"t\":\"nhit\",\"dmg\":%.2f,\"crit\":%b,\"sprint\":%b}", hitDamage, hitCrit, hitSprint));
-			Passthrough.LOG.info("neighbor: hit for {} ({}{})", hitDamage, hitCrit ? "critical" : "normal", hitSprint ? ", sprinting" : "");
+			Passthrough.events.accept(String.format(Locale.ROOT,
+				"{\"t\":\"nhit\",\"dmg\":%.2f,\"crit\":%b,\"sprint\":%b,\"kx\":%.3f,\"kz\":%.3f,\"k\":%.3f,\"boom\":%b,\"player\":%b}",
+				hitDamage, hitCrit, hitSprint, hitKx, hitKz, hitK, hitBoom, hitPlayer));
+			Passthrough.LOG.info("neighbor: hit for {} ({}{}{}), knockback {}", hitDamage, hitCrit ? "critical" : "normal", hitSprint ? ", sprinting" : "",
+				hitBoom ? ", explosion" : hitPlayer ? "" : ", not the player", String.format(Locale.ROOT, "%.2f", hitK));
 			hitDamage = -1.0F;
 			hitCrit = false;
+			hitSprint = false;
+			hitBoom = false;
+			hitK = 0.0;
 		}
 
 		double[] t = target;
