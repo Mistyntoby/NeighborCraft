@@ -21,7 +21,13 @@ abstract class AbstractClientPlayerMixin {
 		if (Passthrough.active && !Boolean.getBoolean("neighborcraft.ownSkin")) {
 			// the player's own skin if one is set up (OwnSkin: skin.png or a username), else classic Steve
 			PlayerSkin own = (Object) this == net.minecraft.client.Minecraft.getInstance().player ? dev.neighborcraft.client.OwnSkin.skin() : null;
-			cir.setReturnValue(own != null ? own : DefaultPlayerSkin.get(CLASSIC_STEVE));
+			if (own != null) {
+				cir.setReturnValue(own);
+			} else if (net.fabricmc.loader.api.FabricLoader.getInstance().isDevelopmentEnvironment()) {
+				// the development client has no account (a made-up name, a random default skin): classic Steve. A real
+				// launcher's signed-in player keeps the account's own skin
+				cir.setReturnValue(DefaultPlayerSkin.get(CLASSIC_STEVE));
+			}
 		}
 	}
 }
